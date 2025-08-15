@@ -20,11 +20,6 @@ META_FIELDS = {
     "custom_location_id", "level", "name", "data_type"
 }
 
-def _is_date_bucket(key: str) -> bool:
-    if key.startswith("date_"):
-        return True
-    return key in {"yesterday","today","last_week","this_week","last_month","this_month","this_year","last_year"}
-
 def _coerce_float(x):
     try:
         return float(x)
@@ -44,15 +39,10 @@ def _extract_metrics(data_node: Dict[str, Any], kpi_keys: Iterable[str]) -> Dict
             out[k] = fv
     return out
 
-def _parse_date_from_bucket(bucket_key: str, default_date: Optional[str] = None) -> Optional[str]:
-    if bucket_key.startswith("date_"):
-        return bucket_key.replace("date_", "", 1)
-    return default_date
-
 def normalize_vemcount_response(resp_json: Dict[str, Any],
                                 shop_name_map: Optional[Dict[int, str]] = None,
-                                kpi_keys: Optional[Iterable[str]] = None
-                                ) -> pd.DataFrame:
+                                kpi_keys: Optional[Iterable[str]] = None) -> pd.DataFrame:
+    """Flatten both day-level and timestamp-level nodes to a tidy DataFrame."""
     if not isinstance(resp_json, dict) or "data" not in resp_json:
         return pd.DataFrame()
 
@@ -60,8 +50,11 @@ def normalize_vemcount_response(resp_json: Dict[str, Any],
     rows: List[Dict[str, Any]] = []
     data_block = resp_json.get("data", {})
 
+    # possible shapes:
+    #  A) {"data":{"date_YYYY-MM-DD": {"<shop_id>":{"data":{...}}}}}
+    #  B) {"data":{"date_YYYY-MM-DD": {"<shop_id>":{"dates":{"YYYY-MM-DD HH:MM":{"data":{...}}}}}}}
     for bucket_key, shops_dict in data_block.items():
-        date_str = _parse_date_from_bucket(bucket_key)
+        date_str = bucket_key.replace("date_", "", 1) if str(bucket_key).startswith("date_") else None
         if not isinstance(shops_dict, dict):
             continue
 
@@ -74,22 +67,19 @@ def normalize_vemcount_response(resp_json: Dict[str, Any],
             if not isinstance(shop_node, dict):
                 continue
 
-            # timestamps
             if "dates" in shop_node and isinstance(shop_node["dates"], dict):
                 for ts, node in shop_node["dates"].items():
                     data_node = node.get("data", {}) if isinstance(node, dict) else {}
                     metrics = _extract_metrics(data_node, kpi_keys)
                     ts_str = str(ts)
-                    date_iso = date_str
                     try:
                         date_iso = datetime.fromisoformat(ts_str.replace(" ", "T")).date().isoformat()
                     except Exception:
-                        pass
+                        date_iso = date_str
                     row = {"date": date_iso, "timestamp": ts_str, "shop_id": shop_id, "shop_name": shop_name}
                     row.update(metrics)
                     rows.append(row)
 
-            # day-level
             if "data" in shop_node and isinstance(shop_node["data"], dict):
                 data_node = shop_node["data"]
                 metrics = _extract_metrics(data_node, kpi_keys)
@@ -107,20 +97,3 @@ def normalize_vemcount_response(resp_json: Dict[str, Any],
     df = df.reindex(columns=ordered_cols)
     df = df.sort_values(by=["date","shop_id","timestamp"], kind="stable", na_position="last").reset_index(drop=True)
     return df
-
-def attach_shop_names(df: pd.DataFrame, shop_name_map: Dict[int,str]) -> pd.DataFrame:
-    if df.empty:
-        return df
-    df = df.copy()
-    df["shop_name"] = df["shop_id"].map(shop_name_map)
-    return df
-
-def to_wide(df: pd.DataFrame,
-            index: List[str] = ["date","shop_id","shop_name"],
-            values: Optional[List[str]] = None) -> pd.DataFrame:
-    if df.empty:
-        return df
-    kpi_cols = [c for c in df.columns if c not in {"date","timestamp","shop_id","shop_name"}]
-    values = values or kpi_cols
-    wide = df.drop(columns=["timestamp"]).groupby(index, as_index=False)[values].sum(numeric_only=True)
-    return wide
