@@ -1,107 +1,94 @@
-# utils_pfmx.py
+# utils_pfmx.py (no-encode brackets; literal ":"; robust errors; includes inject_css + friendly_error)
 import os
-from typing import List, Tuple, Union, Optional
-from urllib.parse import quote
+from typing import List, Tuple, Union, Iterable, Optional
 import requests
 
 # ---- Config ----
 API_URL = os.getenv("API_URL", "").rstrip("/")  # e.g. https://vemcount-agent.onrender.com/get-report
-ARRAY_KEYS = {"data", "data_output"}  # extend if needed: zones, sensors, groups
+ARRAY_KEYS = {"data", "data_output"}
 
-# ---- UI helper (compat with existing Home.py) ----
+# ---- UI helper (optional) ----
 def inject_css():
-    """Lightweight CSS injector used by existing pages."""
     try:
         import streamlit as st
-        st.markdown(
-            """
+        st.markdown("""
             <style>
-                .block-container{padding-top:1rem;padding-bottom:2rem;}
-                .stMetric > div {background:#F8F9FA;border-radius:16px;padding:12px;}
-                .stTabs [data-baseweb="tab-list"] {gap:0.5rem;}
-                .stButton>button {border-radius:999px;padding:.5rem 1rem;}
+            .stMetric { text-align: center; }
+            .block-container { padding-top: 1rem; padding-bottom: 2rem; }
             </style>
-            """,
-            unsafe_allow_html=True
-        )
+        """, unsafe_allow_html=True)
     except Exception:
-        # no-op if Streamlit not available
         pass
 
-# ---- Querystring builder ----
-def _normalize_key_for_brackets(key: str, prefer_brackets: bool, is_list: bool) -> str:
-    base = key.replace("[]", "")
-    if prefer_brackets and is_list and base in ARRAY_KEYS:
-        return f"{base}[]"
-    return base
-
-def _make_qs(pairs: List[Tuple[str, Union[str, int, float, list, tuple]]],
-             prefer_brackets: bool) -> str:
-    """
-    Build a querystring keeping [] literal (not %5B%5D) and ':' literal in times.
-    """
-    parts = []
+def _expand_params(pairs: List[Tuple[str, Union[str,int,float,list,tuple]]],
+                   prefer_brackets: bool = True) -> List[Tuple[str,str]]:
+    expanded: List[Tuple[str,str]] = []
     for k, v in pairs:
-        is_list = isinstance(v, (list, tuple))
-        k_norm = _normalize_key_for_brackets(str(k), prefer_brackets, is_list)
-        k_enc  = quote(k_norm, safe="[]")  # leave [] as-is
-        if is_list:
+        base = str(k).replace("[]","")
+        if isinstance(v, (list, tuple)):
+            use_key = f"{base}[]" if (prefer_brackets and base in ARRAY_KEYS) else base
             for vi in v:
-                parts.append(f"{k_enc}={quote(str(vi), safe=':')}")
+                expanded.append((use_key, str(vi)))
         else:
-            parts.append(f"{k_enc}={quote(str(v),  safe=':')}")
-    return "&".join(parts)
+            # single value: never force [] (werkt zo in jouw eerdere tools)
+            expanded.append((base, str(v)))
+    return expanded
 
-# ---- API helper ----
+def _build_qs_literal(expanded_pairs: List[Tuple[str,str]]) -> str:
+    # IMPORTANT: no URL encoding at all; keep [] and ":" literally,
+    # like your working calculators.
+    return "&".join(f"{k}={v}" for k, v in expanded_pairs)
+
 def api_get_report(params: List[Tuple[str, Union[str,int,float,list,tuple]]],
                    timeout: int = 60,
-                   prefer_brackets: bool = True) -> dict:
+                   prefer_brackets: bool = True,
+                   headers: Optional[dict] = None) -> dict:
     """
-    Universal POST helper for /get-report (Vemcount via proxy).
-    Default: bracket-style (data[]=..., data_output[]=...), exactly like your Postman calls.
-    Returns JSON on success; on HTTP error it returns a structured dict with '_error': True.
+    POST to /get-report with a querystring where [] remain literal (no %5B%5D) and ':' remains ':'.
+    - Lists under keys in ARRAY_KEYS become repeated pairs with '[]' suffix when prefer_brackets=True.
+    - Single values stay without brackets.
+    - Returns JSON or an error dict { _error, status, _url, _method, exception }.
     """
     if not API_URL:
-        return {"_error": True, "status": 500, "exception": "API_URL missing in environment/secrets."}
-    qs = _make_qs(params, prefer_brackets=prefer_brackets)
+        return {"_error": True, "status": None, "_url": None, "_method": "POST",
+                "exception": "API_URL missing (set env/Streamlit secrets)"}
+    expanded = _expand_params(params, prefer_brackets=prefer_brackets)
+    qs = _build_qs_literal(expanded)
     url = f"{API_URL}?{qs}"
     try:
-        r = requests.post(url, timeout=timeout)
-        r.raise_for_status()
-        return r.json()
-    except requests.HTTPError as http_err:
-        return {
-            "_error": True,
-            "status": r.status_code if 'r' in locals() else None,
-            "_url": url,
-            "_method": "POST",
-            "exception": str(http_err),
-            "_text": r.text[:500] if 'r' in locals() else None
-        }
+        r = requests.post(url, timeout=timeout, headers=headers or {})
+        try:
+            r.raise_for_status()
+        except requests.HTTPError as he:
+            return {"_error": True, "status": r.status_code, "_url": url, "_method": "POST",
+                    "exception": str(he), "_body": r.text[:500] if r.text else ""}
+        try:
+            return r.json()
+        except Exception as je:
+            return {"_error": True, "status": r.status_code, "_url": url, "_method": "POST",
+                    "exception": f"JSON parse failed: {je}", "_body": r.text[:500] if r.text else ""}
     except Exception as e:
-        return {"_error": True, "status": None, "_url": url, "_method": "POST", "exception": str(e)}
+        return {"_error": True, "status": None, "_url": url, "_method": "POST",
+                "exception": str(e)}
 
-# ---- Friendly error reporter (backwards compat) ----
 def friendly_error(resp_json: dict, period: Optional[str] = None) -> bool:
     """
-    If resp_json indicates an error, show a Streamlit error and return True (caller may st.stop()).
-    Safe to import when Streamlit isn't present (returns True/False only).
+    If resp_json contains an error dict from api_get_report, show it (Streamlit) and return True.
+    Otherwise return False.
     """
-    is_err = isinstance(resp_json, dict) and resp_json.get("_error") is True
-    if not is_err:
+    if not isinstance(resp_json, dict) or not resp_json.get("_error"):
         return False
-    msg = f"API call failed"
-    if period:
-        msg += f" for period '{period}'"
-    details = []
-    for k in ("status","_url","_method","exception"):
-        v = resp_json.get(k)
-        if v is not None:
-            details.append(f"{k}: {v}")
-    detail_txt = " | ".join(details)
     try:
         import streamlit as st
-        st.error(msg + (f" — {detail_txt}" if detail_txt else ""))
+        hdr = f"API call failed — status: {resp_json.get('status')}"
+        url = resp_json.get("_url")
+        body = resp_json.get("_body", "")
+        st.error(f"{hdr} | _url: {url} | _method: POST | exception: {resp_json.get('exception')}")
+        if body:
+            with st.expander("Response body (truncated)"):
+                st.code(body)
+        if period:
+            st.caption(f"Period requested: {period}")
     except Exception:
         pass
     return True
