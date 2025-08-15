@@ -1,22 +1,16 @@
-
 import sys
 from pathlib import Path
 import streamlit as st
+from datetime import datetime
 import pandas as pd
-from datetime import datetime, time
-from zoneinfo import ZoneInfo
 
-# Ensure root on path (shop_mapping in root)
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from shop_mapping import SHOP_NAME_MAP
-from utils_pfmx import api_get_report
-from helpers_normalize import normalize_vemcount_response, to_wide
-
-st.set_page_config(layout="wide")
-TZ = ZoneInfo("Europe/Amsterdam")
+from utils_pfmx import api_get_report, friendly_error
+from helpers_normalize import normalize_vemcount_response
 
 st.title("👻 Ghost / API Smoke Test")
 
@@ -31,8 +25,9 @@ for name, p in tests.items():
     st.subheader(name)
     with st.spinner(f"Call {name}..."):
         r = api_get_report(p, prefer_brackets=True)
-        ok = "data" in r
+        if friendly_error(r):
+            st.code(p)
+            continue
         df = normalize_vemcount_response(r, SHOP_NAME_MAP)
-    st.json({"ok": ok, "rows": 0 if df is None else len(df)})
-    if not df.empty:
-        st.dataframe(df.head(10))
+    st.success(f"OK • rows: {0 if df is None else len(df)}")
+    st.dataframe(df.head(10))
