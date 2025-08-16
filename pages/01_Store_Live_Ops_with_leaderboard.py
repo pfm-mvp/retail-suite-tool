@@ -2,6 +2,8 @@ import os, sys
 import streamlit as st
 import requests
 import pandas as pd
+from datetime import datetime
+import pytz
 
 # ---------- Imports / mapping ----------
 sys.path.append(os.path.abspath(os.path.dirname(__file__) + '/../'))
@@ -23,6 +25,9 @@ metric_for_rank = st.selectbox("Leaderboard op basis van", ["conversion_rate","s
 
 METRICS = ["count_in","conversion_rate","turnover","sales_per_visitor"]
 
+TZ = pytz.timezone("Europe/Amsterdam")
+TODAY = datetime.now(TZ).date()
+
 def fetch(params):
     r = requests.post(API_URL, params=params, timeout=45)
     r.raise_for_status()
@@ -32,10 +37,11 @@ def add_effective_date(df: pd.DataFrame) -> pd.DataFrame:
     d = df.copy()
     if "date" not in d.columns:
         d["date"] = pd.Series([None]*len(d))
+    # parse timestamp if present (handles strings like 'Fri. Aug 8, 2025')
     ts = pd.to_datetime(d.get("timestamp"), errors="coerce")
-    date_series = d["date"]
-    date_fallback = ts.dt.date.astype("string")
-    d["date_eff"] = date_series.fillna(date_fallback)
+    date_series = pd.to_datetime(d["date"], errors="coerce")
+    # prefer 'date', fallback to parsed timestamp
+    d["date_eff"] = date_series.fillna(ts).dt.date
     return d
 
 # ---------- Cards: gisteren vs eergisteren ----------
@@ -43,32 +49,38 @@ params_cards = [("data", store_id)]
 params_cards += [("data_output", m) for m in METRICS]
 params_cards += [("source","shops"), ("period","this_week"), ("step","day")]
 
-def get_last_two(js):
+def pick_yesterday_pairs(js):
     df = normalize_vemcount_response(js, SHOP_NAME_MAP, kpi_keys=METRICS)
-    dfd = add_effective_date(df)
-    dates_sorted = [x for x in sorted(dfd["date_eff"].dropna().unique()) if x]
+    dfd = add_effective_date(df).dropna(subset=["date_eff"]).copy()
+    if dfd.empty:
+        return None, None, None, None, dfd
+
+    # Exclude TODAY to avoid zeros (sales posted next day)
+    dfd = dfd[dfd["date_eff"] < TODAY]
+
+    dates_sorted = sorted(dfd["date_eff"].unique())
     if len(dates_sorted) >= 2:
         y, b = dates_sorted[-1], dates_sorted[-2]
         g_y = dfd[dfd["date_eff"]==y].groupby("shop_id")[METRICS].sum(numeric_only=True).reset_index()
         g_b = dfd[dfd["date_eff"]==b].groupby("shop_id")[METRICS].sum(numeric_only=True).reset_index()
-        return g_y, g_b, y, b, dfd
+        return g_y, g_b, y.isoformat(), b.isoformat(), dfd
     return None, None, None, None, dfd
 
 try:
     js_cards = fetch(params_cards)
-    gy, gb, ydate, bdate, dfd_cards = get_last_two(js_cards)
+    gy, gb, ydate, bdate, dfd_cards = pick_yesterday_pairs(js_cards)
     if gy is None:
         params_cards_fallback = [("data", store_id)]
         params_cards_fallback += [("data_output", m) for m in METRICS]
         params_cards_fallback += [("source","shops"), ("period","last_week"), ("step","day")]
         js_cards = fetch(params_cards_fallback)
-        gy, gb, ydate, bdate, dfd_cards = get_last_two(js_cards)
+        gy, gb, ydate, bdate, dfd_cards = pick_yesterday_pairs(js_cards)
 except Exception as e:
     st.error(f"API fout (cards): {e}")
     st.stop()
 
 if gy is None:
-    st.warning("Geen voldoende dagdata om kaarten te tonen.")
+    st.warning("Geen voldoende dagdata om kaarten te tonen (na uitsluiten van vandaag).")
     st.stop()
 
 ry = gy[gy["shop_id"]==store_id].iloc[0]
@@ -100,7 +112,9 @@ def fetch_week(period: str):
     params += [("source","shops"), ("period", period), ("step","day")]
     js = fetch(params)
     df = normalize_vemcount_response(js, SHOP_NAME_MAP, kpi_keys=METRICS)
-    return add_effective_date(df)
+    d = add_effective_date(df)
+    # WTD t/m gisteren -> filter < TODAY
+    return d[d["date_eff"] < TODAY]
 
 try:
     df_this = fetch_week("this_week")
@@ -112,15 +126,10 @@ except Exception as e:
 if df_this.empty:
     st.warning("Geen data voor leaderboard.")
 else:
-    dates_this = [x for x in sorted(df_this["date_eff"].dropna().unique()) if x]
-    cutoff = dates_this[-1] if dates_this else None
-
-    def wtd_agg(d: pd.DataFrame, upto: str | None) -> pd.DataFrame:
+    def wtd_agg(d: pd.DataFrame) -> pd.DataFrame:
         if d is None or d.empty:
             return pd.DataFrame()
-        if upto:
-            d = d[d["date_eff"] <= upto]
-        g = d.groupby("shop_id", as_index=False).agg({"count_in":"sum", "turnover":"sum"})
+        g = d.groupby("shop_id", as_index=False).agg({"count_in":"sum","turnover":"sum"})
         g["sales_per_visitor"] = g.apply(lambda r: (r["turnover"]/r["count_in"]) if r["count_in"] else 0.0, axis=1)
         conv = d.groupby("shop_id").apply(
             lambda x: (x["conversion_rate"]*x["count_in"]).sum()/x["count_in"].sum() if x["count_in"].sum() else x["conversion_rate"].mean()
@@ -130,8 +139,8 @@ else:
         g["shop_name"] = g["shop_id"].map(SHOP_NAME_MAP)
         return g
 
-    agg_this = wtd_agg(df_this, cutoff)
-    agg_last = wtd_agg(df_last, None)
+    agg_this = wtd_agg(df_this)
+    agg_last = wtd_agg(df_last)
 
     rank_metric = metric_for_rank
     ascending = False
@@ -168,5 +177,6 @@ else:
         st.dataframe(fmt, use_container_width=True)
 
 with st.expander("🔧 Debug"):
-    st.write("Kaarten params:", params_cards)
-    st.write("Beschikbare laatste datums (cards):", sorted(dfd_cards["date_eff"].dropna().unique())[-7:])
+    st.write("Cards params:", params_cards)
+    st.write("Vandaag (Europe/Amsterdam):", str(TODAY))
+    st.write("Laatste kaart-datums (na filter < vandaag):", sorted(dfd_cards["date_eff"].unique())[-7:])
