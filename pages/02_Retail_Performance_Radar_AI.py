@@ -141,16 +141,22 @@ total_turn = cur["turnover"].sum()
 total_vis  = cur["count_in"].sum()
 total_sqm  = cur["sq_meter"].fillna(0).sum()
 
-avg_conv   = weighted_avg(cur["conversion_rate"],   cur["count_in"])           # gewogen op bezoekers
-avg_spv    = weighted_avg(cur["sales_per_visitor"], cur["count_in"])           # gewogen op bezoekers
-avg_spsqm  = (total_turn / total_sqm) if total_sqm > 0 else np.nan            # Σ omzet / Σ m²   ✅
+def weighted_avg(series, weights):
+    w = weights.fillna(0.0); s = series.fillna(0.0)
+    d = w.sum()
+    return (s*w).sum()/d if d else np.nan
+
+# Gewogen op bezoekers (conversie/SPV) + GEWOGEN sales/m² = Σ omzet / Σ m² ✅
+avg_conv   = weighted_avg(cur["conversion_rate"],   cur["count_in"])
+avg_spv    = weighted_avg(cur["sales_per_visitor"], cur["count_in"])
+avg_spsqm  = (total_turn / total_sqm) if total_sqm > 0 else np.nan
 
 # Vorige periode (alleen als we 'has_true_previous' hebben)
 if has_true_previous and not prev.empty:
     prev_total_turn = prev["turnover"].sum()
+    prev_total_sqm  = prev["sq_meter"].fillna(0).sum()
     prev_avg_conv   = weighted_avg(prev["conversion_rate"],   prev["count_in"])
     prev_avg_spv    = weighted_avg(prev["sales_per_visitor"], prev["count_in"])
-    prev_total_sqm  = prev["sq_meter"].fillna(0).sum()
     prev_avg_spsqm  = (prev_total_turn / prev_total_sqm) if prev_total_sqm > 0 else np.nan
 else:
     prev_total_turn = prev_avg_conv = prev_avg_spv = prev_avg_spsqm = np.nan
@@ -171,17 +177,6 @@ else:
     d_turn = d_conv = d_spv = d_spsqm = np.nan
     cls_turn = cls_conv = cls_spv = cls_spsqm = "flat"
     ok1 = ok2 = ok3 = ok4 = False
-
-def badge(label_value, cls, is_real_delta, money=False, pp=False):
-    if not is_real_delta:
-        return f'<span class="badge flat">n.v.t.</span>'
-    if money:
-        val = f"{'+' if label_value>0 else ''}{'€'}{abs(label_value):,.0f}".replace(",",".")
-    elif pp:
-        val = f"{'+' if label_value>0 else ''}{abs(label_value):.2f}pp"
-    else:
-        val = f"{'+' if label_value>0 else ''}{abs(label_value):.2f}"
-    return f'<span class="badge {cls}">{val} vs vorige periode</span>'
 
 # ---------- KPI Cards ----------
 c1,c2,c3,c4 = st.columns(4)
@@ -276,7 +271,11 @@ with cB:
 st.subheader("🏁 Leaderboard — sales/m² t.o.v. regio-gemiddelde")
 
 comp = cur[["shop_name", "sales_per_sqm", "turnover", "sq_meter"]].copy()
+
+# Gebruik hetzelfde gewogen regio-gemiddelde als in de card ✅
 comp["region_avg_spsqm"] = avg_spsqm
+
+# Afwijkingen
 comp["delta_eur_sqm"] = comp["sales_per_sqm"] - comp["region_avg_spsqm"]
 comp["delta_pct"] = np.where(
     comp["region_avg_spsqm"] > 0,
@@ -296,15 +295,15 @@ show = comp[["shop_name","sales_per_sqm","region_avg_spsqm","delta_eur_sqm","del
 })
 
 def color_delta(series):
-    colors = []
+    styles = []
     for v in series:
         if pd.isna(v) or v == 0:
-            colors.append("color: #6B7280;")     # grijs
+            styles.append("color: #6B7280;")     # grijs
         elif v > 0:
-            colors.append("color: #22C55E;")     # groen
+            styles.append("color: #22C55E;")     # groen
         else:
-            colors.append("color: #F04438;")     # rood
-    return colors
+            styles.append("color: #F04438;")     # rood
+    return styles
 
 styler = (
     show.style
@@ -319,8 +318,6 @@ styler = (
 )
 
 st.dataframe(styler, use_container_width=True)
-
-st.markdown("---")
 
 # ---------- 🤖 AI Region Coach ----------
 st.markdown("## 🤖 AI Region Coach")
