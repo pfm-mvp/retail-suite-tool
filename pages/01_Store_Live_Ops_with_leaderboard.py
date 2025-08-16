@@ -35,10 +35,17 @@ st.markdown(f'''
 .kpi-value {{
   font-size:40px; font-weight:800; line-height:1.1; margin-bottom:6px;
 }}
-.kpi-delta {{ font-size:14px; font-weight:600; padding:4px 10px; border-radius:999px; display:inline-block; }}
+.kpi-delta {{ font-size:14px; font-weight:700; padding:4px 10px; border-radius:999px; display:inline-block; }}
 .kpi-delta.up {{ color:{PFM_GREEN}; background: rgba(34,197,94,.10); }}
 .kpi-delta.down {{ color:{PFM_RED}; background: rgba(240,68,56,.10); }}
 .kpi-delta.flat {{ color:{PFM_GRAY}; background: rgba(107,114,128,.10); }}
+
+.lb-card {{
+  border: 1px dashed #DDD; border-radius: 12px; padding: 12px 14px; margin-bottom: 8px;
+  background: #FAFAFC;
+}}
+.lb-title {{ font-size:14px; color:#0C111D; font-weight:600; }}
+.lb-val {{ font-size:18px; font-weight:800; }}
 </style>
 ''', unsafe_allow_html=True)
 
@@ -107,48 +114,56 @@ if gy is None:
 ry = gy[gy["shop_id"]==store_id].iloc[0]
 rb = gb[gb["shop_id"]==store_id].iloc[0]
 
-def delta_block(diff, suffix="", reverse_good=False):
-    # return colored badge with bold delta and text "t.o.v. dag ervoor"
-    if isinstance(diff, str):
-        num = None
+def signed_text(value: float, kind: str) -> str:
+    """Return '+ €1.234' or '- 0,45%' etc. kind in {'eur0','eur2','pct2','int'}"""
+    sign = "+" if value >= 0 else "-"
+    v = abs(value)
+    if kind == "eur0":
+        num = f"€{v:,.0f}".replace(",", ".")
+    elif kind == "eur2":
+        num = f"€{v:,.2f}".replace(",", ".")
+    elif kind == "pct2":
+        num = f"{v:.2f}%"
+    elif kind == "int":
+        num = f"{int(v):,}".replace(",", ".")
     else:
-        num = diff
-    if num is not None:
-        if num > 0:
-            cls = "up" if not reverse_good else "down"; arrow = "↑"
-        elif num < 0:
-            cls = "down" if not reverse_good else "up"; arrow = "↓"
-        else:
-            cls = "flat"; arrow = "→"
-        content = f"{arrow} <b>{diff}{suffix}</b> t.o.v. dag ervoor"
+        num = f"{v}"
+    return f"{sign} {num}"
+
+def delta_badge(value: float, kind: str):
+    """Colored badge with arrow & strong signed text followed by 't.o.v. dag ervoor'."""
+    if value > 0:
+        cls = "up"; arrow = "↑"
+    elif value < 0:
+        cls = "down"; arrow = "↓"
     else:
-        cls = "flat"; content = f"<b>{diff}{suffix}</b> t.o.v. dag ervoor"
-    return f'<span class="kpi-delta {cls}">{content}</span>'
+        cls = "flat"; arrow = "→"
+    return f'<span class="kpi-delta {cls}">{arrow} <b>{signed_text(value, kind)}</b> t.o.v. dag ervoor</span>'
 
 # Build four cards
 c1,c2,c3,c4 = st.columns(4)
 
 # Bezoekers
 with c1:
-    diff = int(ry['count_in'] - rb['count_in'])
+    diff = float(ry['count_in'] - rb['count_in'])
     html = f'''
     <div class="kpi-card">
       <div class="kpi-title">Bezoekers <small>(gisteren)</small></div>
       <div class="kpi-value">{int(ry["count_in"]):,}</div>
-      {delta_block(diff)}
+      {delta_badge(diff, "int")}
     </div>
     '''.replace(",", ".")
     st.markdown(html, unsafe_allow_html=True)
 
-# Conversie (pp delta)
+# Conversie (% delta)
 with c2:
     val = f"{ry['conversion_rate']:.2f}%"
-    diff_pp = round(ry['conversion_rate'] - rb['conversion_rate'], 2)
+    diff_pct = float(ry['conversion_rate'] - rb['conversion_rate'])
     html = f'''
     <div class="kpi-card">
       <div class="kpi-title">Conversie <small>(gisteren)</small></div>
       <div class="kpi-value">{val}</div>
-      {delta_block(diff_pp,' pp')}
+      {delta_badge(diff_pct, "pct2")}
     </div>
     '''
     st.markdown(html, unsafe_allow_html=True)
@@ -156,12 +171,12 @@ with c2:
 # Omzet
 with c3:
     val = f"€{ry['turnover']:,.0f}".replace(",", ".")
-    diff_eur = f"€{(ry['turnover'] - rb['turnover']):+,.0f}".replace(",", ".")
+    diff_eur = float(ry['turnover'] - rb['turnover'])
     html = f'''
     <div class="kpi-card">
       <div class="kpi-title">Omzet <small>(gisteren)</small></div>
       <div class="kpi-value">{val}</div>
-      {delta_block(diff_eur)}
+      {delta_badge(diff_eur, "eur0")}
     </div>
     '''
     st.markdown(html, unsafe_allow_html=True)
@@ -169,12 +184,12 @@ with c3:
 # Sales per visitor
 with c4:
     val = f"€{ry['sales_per_visitor']:,.2f}".replace(",", ".")
-    diff_spv = f"€{(ry['sales_per_visitor'] - rb['sales_per_visitor']):+,.2f}".replace(",", ".")
+    diff_spv = float(ry['sales_per_visitor'] - rb['sales_per_visitor'])
     html = f'''
     <div class="kpi-card">
       <div class="kpi-title">Sales per visitor <small>(gisteren)</small></div>
       <div class="kpi-value">{val}</div>
-      {delta_block(diff_spv)}
+      {delta_badge(diff_spv, "eur2")}
     </div>
     '''
     st.markdown(html, unsafe_allow_html=True)
@@ -234,10 +249,22 @@ else:
     agg = agg_this.merge(tmp[["shop_id","rank_last"]], on="shop_id", how="left")
     agg["rank_change"] = agg["rank_last"] - agg["rank_now"]
 
+    # Leaderboard mini-card for this store
+    me = agg[agg["shop_id"]==store_id].iloc[0]
+    change = int(me["rank_change"]) if pd.notna(me["rank_change"]) else 0
+    arrow = "🔺" if change>0 else ("🔻" if change<0 else "→")
+    col = PFM_GREEN if change>0 else (PFM_RED if change<0 else PFM_GRAY)
+    st.markdown(f'''
+    <div class="lb-card">
+      <div class="lb-title">Jouw positie op <b>{'Conversie' if rank_metric=='conversion_rate' else 'SPV'}</b></div>
+      <div class="lb-val" style="color:{col}">#{int(me["rank_now"])} {arrow} {abs(change)} t.o.v. vorige week</div>
+    </div>
+    ''', unsafe_allow_html=True)
+
     agg = agg.sort_values("rank_now")
     def pos_delta(r):
         change = int(r["rank_change"]) if pd.notna(r["rank_change"]) else 0
-        arrow = "▲" if change>0 else ("▼" if change<0 else "→")
+        arrow = "🔺" if change>0 else ("🔻" if change<0 else "→")
         color = PFM_GREEN if change>0 else (PFM_RED if change<0 else PFM_GRAY)
         return f"<span style='color:{color};font-weight:600'>{int(r['rank_now'])} {arrow} {abs(change)}</span>"
 
@@ -260,7 +287,8 @@ else:
     except Exception:
         styler = fmt.style
 
-    styler = styler.format({"positie (nu vs lw)": lambda x: x}, escape="html")
+    # Render HTML in first column
+    styler = styler.format({"positie (nu vs lw)": lambda x: x}, escape="none")
     st.dataframe(styler, use_container_width=True)
 
 with st.expander("🔧 Debug"):
