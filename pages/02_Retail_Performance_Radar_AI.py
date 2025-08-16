@@ -1,0 +1,324 @@
+# pages/02_Region_Performance_Radar.py
+import os, sys
+from datetime import datetime
+import pytz
+import requests
+import numpy as np
+import pandas as pd
+import streamlit as st
+import plotly.express as px
+import plotly.graph_objects as go
+
+# ---------- Imports / mapping ----------
+sys.path.append(os.path.abspath(os.path.dirname(__file__) + '/../'))
+from shop_mapping import SHOP_NAME_MAP
+from helpers_normalize import normalize_vemcount_response
+
+st.set_page_config(page_title="Region Performance Radar", page_icon="🧭", layout="wide")
+st.title("🧭 Region Performance Radar")
+
+API_URL = st.secrets["API_URL"]
+
+# ---------- PFM-styling ----------
+PFM_RED    = "#F04438"
+PFM_GREEN  = "#22C55E"
+PFM_PURPLE = "#6C4EE3"
+PFM_GRAY   = "#6B7280"
+
+st.markdown(f"""
+<style>
+.kpi {{ border:1px solid #eee; border-radius:14px; padding:16px; }}
+.kpi .t {{ font-weight:600; color:#0C111D; }}
+.kpi .v {{ font-size:38px; font-weight:800; }}
+.badge {{ font-size:13px; font-weight:700; padding:4px 10px; border-radius:999px; display:inline-block; }}
+.badge.up {{ color:{PFM_GREEN}; background: rgba(34,197,94,.10); }}
+.badge.down {{ color:{PFM_RED}; background: rgba(240,68,56,.10); }}
+.badge.flat {{ color:{PFM_GRAY}; background: rgba(107,114,128,.10); }}
+.box {{ border:1px dashed #ddd; border-radius:12px; padding:14px; background:#FAFAFC; }}
+.box h4 {{ margin:0 0 8px 0; }}
+</style>
+""", unsafe_allow_html=True)
+
+# ---------- Inputs ----------
+PERIODS = ["this_week","last_week","this_month","last_month","this_quarter","last_quarter","this_year","last_year"]
+period = st.selectbox("Periode", PERIODS, index=1)
+
+# ---------- Helpers ----------
+TZ = pytz.timezone("Europe/Amsterdam")
+TODAY = datetime.now(TZ).date()
+ALL_IDS = list(SHOP_NAME_MAP.keys())
+METRICS = ["count_in","conversion_rate","turnover","sales_per_visitor","sq_meter"]
+
+def post_report(params):
+    # ✅ Géén data[]; géén show_hours_*; herhaalde "data" en "data_output".
+    r = requests.post(API_URL, params=params, timeout=45)
+    r.raise_for_status()
+    return r
+
+def add_effective_date(df: pd.DataFrame) -> pd.DataFrame:
+    d = df.copy()
+    if "date" not in d.columns:
+        d["date"] = pd.Series([None]*len(d))
+    ts = pd.to_datetime(d.get("timestamp"), errors="coerce")
+    date_series = pd.to_datetime(d["date"], errors="coerce")
+    d["date_eff"] = date_series.fillna(ts).dt.date
+    return d
+
+def fetch_df(shop_ids, period, step, metrics):
+    params = [("data", sid) for sid in shop_ids]
+    params += [("data_output", m) for m in metrics]
+    params += [("source","shops"), ("period", period), ("step", step)]
+    r = post_report(params)
+    js = r.json()
+    df = normalize_vemcount_response(js, SHOP_NAME_MAP, kpi_keys=metrics)
+    dfe = add_effective_date(df)
+    return dfe, params, r.status_code
+
+def weighted_avg(series, weights):
+    try:
+        w = weights.fillna(0.0)
+        s = series.fillna(0.0)
+        d = w.sum()
+        return (s*w).sum()/d if d else np.nan
+    except Exception:
+        return np.nan
+
+def fmt_eur0(x): return f"€{x:,.0f}".replace(",", ".")
+def fmt_eur2(x): return f"€{x:,.2f}".replace(",", ".")
+def fmt_pct2(x): return f"{x:.2f}%"
+
+# ---------- Data ophalen ----------
+df_cur, p_cur, s_cur = fetch_df(ALL_IDS, period, "day", METRICS)
+
+prev_map = {
+    "this_week": "last_week",
+    "last_week": "last_week",
+    "this_month": "last_month",
+    "last_month": "last_month",
+    "this_quarter": "last_quarter",
+    "last_quarter": "last_quarter",
+    "this_year": "last_year",
+    "last_year": "last_year",
+}
+period_prev = prev_map.get(period, "last_week")
+df_prev, p_prev, s_prev = fetch_df(ALL_IDS, period_prev, "day", METRICS)
+
+# Voor 'this_*' enkel t/m gisteren nemen
+if period.startswith("this_"):
+    df_cur = df_cur[df_cur["date_eff"] < TODAY]
+
+# ---------- Aggregatie per winkel ----------
+def agg_store(d: pd.DataFrame) -> pd.DataFrame:
+    if d is None or d.empty: return pd.DataFrame()
+    g = d.groupby("shop_id", as_index=False).agg({"count_in":"sum","turnover":"sum"})
+    w = d.groupby("shop_id").apply(lambda x: pd.Series({
+        "conversion_rate": weighted_avg(x["conversion_rate"], x["count_in"]),
+        "sales_per_visitor": weighted_avg(x["sales_per_visitor"], x["count_in"]),
+    })).reset_index()
+    g = g.merge(w, on="shop_id", how="left")
+    sqm = (d.sort_values("date_eff").groupby("shop_id")["sq_meter"]
+           .apply(lambda s: float(s.dropna().iloc[-1]) if s.dropna().size else np.nan)
+           ).reset_index()
+    g = g.merge(sqm, on="shop_id", how="left")
+    g["sales_per_sqm"] = g.apply(lambda r: (r["turnover"]/r["sq_meter"]) if (pd.notna(r["sq_meter"]) and r["sq_meter"]>0) else np.nan, axis=1)
+    g["shop_name"] = g["shop_id"].map(SHOP_NAME_MAP)
+    return g
+
+cur = agg_store(df_cur)
+prev = agg_store(df_prev)
+
+if cur.empty:
+    st.warning("Geen data voor deze periode.")
+    st.stop()
+
+# ---------- Region KPI's + deltas ----------
+total_turn = cur["turnover"].sum()
+avg_conv   = weighted_avg(cur["conversion_rate"], cur["count_in"])
+avg_spv    = weighted_avg(cur["sales_per_visitor"], cur["count_in"])
+avg_spsqm  = weighted_avg(cur["sales_per_sqm"], cur["sq_meter"].fillna(0))
+
+prev_total_turn = prev["turnover"].sum() if not prev.empty else np.nan
+prev_avg_conv   = weighted_avg(prev["conversion_rate"], prev["count_in"]) if not prev.empty else np.nan
+prev_avg_spv    = weighted_avg(prev["sales_per_visitor"], prev["count_in"]) if not prev.empty else np.nan
+prev_avg_spsqm  = weighted_avg(prev["sales_per_sqm"], prev["sq_meter"].fillna(0)) if not prev.empty else np.nan
+
+def delta(this, last):
+    if pd.isna(this) or pd.isna(last): return 0.0, "flat"
+    diff = float(this) - float(last)
+    cls = "up" if diff>0 else ("down" if diff<0 else "flat")
+    return diff, cls
+
+d_turn, cls_turn = delta(total_turn, prev_total_turn)
+d_conv, cls_conv = delta(avg_conv, prev_avg_conv)
+d_spv,  cls_spv  = delta(avg_spv,  prev_avg_spv)
+d_spsqm, cls_spsqm = delta(avg_spsqm, prev_avg_spsqm)
+
+c1,c2,c3,c4 = st.columns(4)
+with c1:
+    st.markdown(f"""<div class="kpi">
+    <div class="t">💶 Totale omzet</div>
+    <div class="v">{fmt_eur0(total_turn)}</div>
+    <span class="badge {cls_turn}">{'+' if d_turn>0 else ''}{fmt_eur0(abs(d_turn))} vs vorige periode</span>
+    </div>""", unsafe_allow_html=True)
+with c2:
+    st.markdown(f"""<div class="kpi">
+    <div class="t">🛒 Gem. conversie</div>
+    <div class="v">{fmt_pct2(avg_conv)}</div>
+    <span class="badge {cls_conv}">{'+' if d_conv>0 else ''}{abs(d_conv):.2f}pp vs vorige periode</span>
+    </div>""", unsafe_allow_html=True)
+with c3:
+    st.markdown(f"""<div class="kpi">
+    <div class="t">💸 Gem. SPV</div>
+    <div class="v">{fmt_eur2(avg_spv)}</div>
+    <span class="badge {cls_spv}">{'+' if d_spv>0 else ''}{fmt_eur2(abs(d_spv))} vs vorige periode</span>
+    </div>""", unsafe_allow_html=True)
+with c4:
+    st.markdown(f"""<div class="kpi">
+    <div class="t">🏁 Gem. sales/m²</div>
+    <div class="v">{fmt_eur2(avg_spsqm)}</div>
+    <span class="badge {cls_spsqm}">{'+' if d_spsqm>0 else ''}{fmt_eur2(abs(d_spsqm))} vs vorige periode</span>
+    </div>""", unsafe_allow_html=True)
+
+st.markdown("---")
+
+# ---------- Selectie & Radar ----------
+st.subheader("📈 Radarvergelijking (Conversie / SPV / Sales per m²)")
+metric_cols = ["conversion_rate","sales_per_visitor","sales_per_sqm"]
+
+# Normaliseer per metric (min-max 0..1) voor eerlijke radar
+norm = cur[["shop_id","shop_name"] + metric_cols].copy()
+for m in metric_cols:
+    v = norm[m].astype(float)
+    vmin, vmax = v.min(), v.max()
+    if pd.isna(vmin) or pd.isna(vmax) or vmax == vmin:
+        norm[m+"_norm"] = 0.0
+    else:
+        norm[m+"_norm"] = (v - vmin) / (vmax - vmin)
+
+default_names = list(SHOP_NAME_MAP.values())[:4]
+sel_names = st.multiselect("Vergelijk winkels (max 6)", list(SHOP_NAME_MAP.values()),
+                           default=default_names, max_selections=6)
+sel = norm[norm["shop_name"].isin(sel_names)]
+
+if not sel.empty:
+    categories = ["Conversie","SPV","Sales/m²"]
+    fig = go.Figure()
+    for _, row in sel.iterrows():
+        values = [row["conversion_rate_norm"], row["sales_per_visitor_norm"], row["sales_per_sqm_norm"]]
+        fig.add_trace(go.Scatterpolar(r=values + values[:1], theta=categories + categories[:1],
+                                      fill='toself', name=row["shop_name"]))
+    fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0,1])), showlegend=True, height=520)
+    st.plotly_chart(fig, use_container_width=True)
+else:
+    st.info("Kies één of meer winkels om de radar te tonen.")
+
+st.markdown("---")
+
+# ---------- Tops & Flops ----------
+st.subheader("🏆 Tops & Flops")
+
+rank_spm = cur[["shop_name","sales_per_sqm","turnover","count_in","conversion_rate","sales_per_visitor"]].copy()
+rank_spm = rank_spm.sort_values("sales_per_sqm", ascending=False)
+
+cA, cB = st.columns(2)
+with cA:
+    st.caption("Top 5 (sales/m²)")
+    top5 = rank_spm.head(5).copy()
+    top5["sales_per_sqm"]   = top5["sales_per_sqm"].map(fmt_eur2)
+    top5["turnover"]        = top5["turnover"].map(fmt_eur0)
+    top5["count_in"]        = top5["count_in"].map(lambda x: f"{int(x):,}".replace(",", "."))
+    top5["conversion_rate"] = top5["conversion_rate"].map(lambda x: f"{x:.2f}%")
+    top5["sales_per_visitor"] = top5["sales_per_visitor"].map(fmt_eur2)
+    st.dataframe(top5, use_container_width=True)
+
+with cB:
+    st.caption("Bottom 5 (sales/m²)")
+    flop5 = rank_spm.tail(5).copy().sort_values("sales_per_sqm", ascending=True)
+    flop5["sales_per_sqm"]   = flop5["sales_per_sqm"].map(fmt_eur2)
+    flop5["turnover"]        = flop5["turnover"].map(fmt_eur0)
+    flop5["count_in"]        = flop5["count_in"].map(lambda x: f"{int(x):,}".replace(",", "."))
+    flop5["conversion_rate"] = flop5["conversion_rate"].map(lambda x: f"{x:.2f}%")
+    flop5["sales_per_visitor"] = flop5["sales_per_visitor"].map(fmt_eur2)
+    st.dataframe(flop5, use_container_width=True)
+
+# ---------- 🤖 AI Region Coach ----------
+st.markdown("## 🤖 AI Region Coach")
+
+conv_med = float(cur["conversion_rate"].median())
+spv_med  = float(cur["sales_per_visitor"].median())
+
+def safe_div(a,b): 
+    return (a/b) if (b and not np.isnan(b) and b!=0) else 0.0
+def pct_to_float(p): 
+    try: return float(p)/100.0
+    except: return 0.0
+
+cc = cur.copy()
+cc["conv_f"] = cc["conversion_rate"].apply(pct_to_float)
+cc["ATV"]    = cc.apply(lambda r: safe_div(r["sales_per_visitor"], r["conv_f"]), axis=1)
+cc["target_conv"] = np.maximum(cc["conversion_rate"], conv_med)
+cc["target_spv"]  = np.maximum(cc["sales_per_visitor"], spv_med)
+
+cc["uplift_conv_eur"] = cc.apply(
+    lambda r: r["count_in"] * max(0.0, pct_to_float(r["target_conv"])-r["conv_f"]) * r["ATV"], axis=1)
+cc["uplift_spv_eur"] = cc.apply(
+    lambda r: r["count_in"] * max(0.0, r["target_spv"]-r["sales_per_visitor"]), axis=1)
+cc["uplift_total_eur"] = cc["uplift_conv_eur"] + cc["uplift_spv_eur"]
+
+# Profielen
+def profile(row):
+    hi_traf  = row["count_in"] >= cur["count_in"].median()
+    low_conv = row["conversion_rate"] < conv_med
+    low_spv  = row["sales_per_visitor"] < spv_med
+    if hi_traf and low_conv: return "High traffic, low conversion"
+    if low_conv and not low_spv: return "Low conversion"
+    if low_spv and not low_conv: return "Low SPV"
+    if low_spv and low_conv: return "Low conversion & SPV"
+    return "Healthy"
+
+cc["profile"] = cc.apply(profile, axis=1)
+opps = cc[["shop_name","count_in","conversion_rate","sales_per_visitor","ATV","uplift_conv_eur","uplift_spv_eur","uplift_total_eur","profile"]] \
+       .sort_values("uplift_total_eur", ascending=False).head(10)
+fmt = opps.copy()
+fmt["count_in"] = fmt["count_in"].map(lambda x: f"{int(x):,}".replace(",", "."))
+fmt["conversion_rate"] = fmt["conversion_rate"].map(lambda x: f"{x:.2f}%")
+fmt["sales_per_visitor"] = fmt["sales_per_visitor"].map(fmt_eur2)
+fmt["ATV"] = fmt["ATV"].map(fmt_eur2)
+fmt["uplift_conv_eur"] = fmt["uplift_conv_eur"].map(fmt_eur0)
+fmt["uplift_spv_eur"]  = fmt["uplift_spv_eur"].map(fmt_eur0)
+fmt["uplift_total_eur"]= fmt["uplift_total_eur"].map(fmt_eur0)
+
+st.markdown("**Top kansen (naar peermediaan):**")
+st.dataframe(fmt, use_container_width=True)
+
+cP1, cP2 = st.columns(2)
+with cP1:
+    st.markdown(f"""
+    <div class="box">
+      <h4>🎯 Conversie Playbook</h4>
+      <ul>
+        <li><b>FTE verschuiven</b> naar begroeten/paskamers in drukte-uren (op basis van footfall per uur).</li>
+        <li><b>3-vragen-regel</b> & demo/proefpassen afdwingen; huddle 2× per dag met conversiedoel.</li>
+        <li><b>Queue-busting</b> in piekuren; verkort wachttijd → hogere conversie.</li>
+      </ul>
+    </div>
+    """, unsafe_allow_html=True)
+with cP2:
+    st.markdown(f"""
+    <div class="box">
+      <h4>🛒 SPV / ATV Playbook</h4>
+      <ul>
+        <li>Activeer <b>bundle-promo</b> (“2e artikel −20%”) in stille uren; toon bundels bij kassa/paskamers.</li>
+        <li><b>Kassascripts</b>: 1 relevante add-on vraag per transactie (riem/sokken/onderhoud).</li>
+        <li>Review <b>attach-rate</b> top-3 producten en vul ze dagelijks bij op zichtlocaties.</li>
+      </ul>
+    </div>
+    """, unsafe_allow_html=True)
+
+# ---------- Debug ----------
+with st.expander("🔧 Debug — API calls en samples"):
+    st.write("Cur params:", p_cur, "status", s_cur)
+    st.write("Prev params:", p_prev, "status", s_prev)
+    st.write("Cur head:", df_cur.head())
+    st.write("Agg cur head:", cur.head())
+    st.write("Top opps head:", opps.head())
