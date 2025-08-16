@@ -288,7 +288,7 @@ else:
         styler = fmt.style
 
     # Render HTML in first column
-    styler = styler.format({"positie (nu vs lw)": lambda x: x}, escape="none")
+    styler = styler.format({"positie (nu vs lw)": lambda x: x}, escape=None)
     st.dataframe(styler, use_container_width=True)
 
 with st.expander("🔧 Debug"):
