@@ -15,12 +15,32 @@ st.title("🛍️ Store Live Ops – Gisteren vs Eergisteren + Leaderboard (WTD)
 
 API_URL = st.secrets["API_URL"]
 
-# ---------- PFM palette (adjust if you maintain a central palette module) ----------
+# ---------- PFM palette ----------
 PFM_RED = "#F04438"
 PFM_GREEN = "#22C55E"
-PFM_PURPLE = "#6C4EE3"     # highlight own store
-PFM_HEADER_BG = "#F7F7F8"
+PFM_PURPLE = "#6C4EE3"
 PFM_GRAY = "#6B7280"
+
+# ---------- Small CSS for cards ----------
+st.markdown(f'''
+<style>
+.kpi-card {{
+  border: 1px solid #EEE;
+  border-radius: 14px;
+  padding: 18px 18px 14px 18px;
+}}
+.kpi-title {{
+  color:#0C111D; font-weight:600; font-size:16px; margin-bottom:8px;
+}}
+.kpi-value {{
+  font-size:40px; font-weight:800; line-height:1.1; margin-bottom:6px;
+}}
+.kpi-delta {{ font-size:14px; font-weight:600; padding:4px 10px; border-radius:999px; display:inline-block; }}
+.kpi-delta.up {{ color:{PFM_GREEN}; background: rgba(34,197,94,.10); }}
+.kpi-delta.down {{ color:{PFM_RED}; background: rgba(240,68,56,.10); }}
+.kpi-delta.flat {{ color:{PFM_GRAY}; background: rgba(107,114,128,.10); }}
+</style>
+''', unsafe_allow_html=True)
 
 NAME_TO_ID = {v:k for k,v in SHOP_NAME_MAP.items()}
 ID_TO_NAME = {k:v for k,v in SHOP_NAME_MAP.items()}
@@ -56,8 +76,7 @@ params_cards += [("source","shops"), ("period","this_week"), ("step","day")]
 def pick_yesterday_pairs(js):
     df = normalize_vemcount_response(js, SHOP_NAME_MAP, kpi_keys=METRICS)
     dfd = add_effective_date(df).dropna(subset=["date_eff"]).copy()
-    if dfd.empty:
-        return None, None, None, None, dfd
+    if dfd.empty: return None, None, None, None, dfd
     # exclude today
     dfd = dfd[dfd["date_eff"] < TODAY]
     dates_sorted = sorted(dfd["date_eff"].unique())
@@ -65,7 +84,7 @@ def pick_yesterday_pairs(js):
         y, b = dates_sorted[-1], dates_sorted[-2]
         g_y = dfd[dfd["date_eff"]==y].groupby("shop_id")[METRICS].sum(numeric_only=True).reset_index()
         g_b = dfd[dfd["date_eff"]==b].groupby("shop_id")[METRICS].sum(numeric_only=True).reset_index()
-        return g_y, g_b, y.isoformat(), b.isoformat(), dfd
+        return g_y, g_b, y, b, dfd
     return None, None, None, None, dfd
 
 try:
@@ -88,19 +107,77 @@ if gy is None:
 ry = gy[gy["shop_id"]==store_id].iloc[0]
 rb = gb[gb["shop_id"]==store_id].iloc[0]
 
+def delta_block(diff, suffix="", reverse_good=False):
+    # return colored badge with bold delta and text "t.o.v. dag ervoor"
+    if isinstance(diff, str):
+        num = None
+    else:
+        num = diff
+    if num is not None:
+        if num > 0:
+            cls = "up" if not reverse_good else "down"; arrow = "↑"
+        elif num < 0:
+            cls = "down" if not reverse_good else "up"; arrow = "↓"
+        else:
+            cls = "flat"; arrow = "→"
+        content = f"{arrow} <b>{diff}{suffix}</b> t.o.v. dag ervoor"
+    else:
+        cls = "flat"; content = f"<b>{diff}{suffix}</b> t.o.v. dag ervoor"
+    return f'<span class="kpi-delta {cls}">{content}</span>'
+
+# Build four cards
 c1,c2,c3,c4 = st.columns(4)
+
+# Bezoekers
 with c1:
-    st.metric(f"Bezoekers ({ydate})", f"{int(ry['count_in']):,}".replace(",","."),
-              delta=f"{int(ry['count_in']-rb['count_in']):,} vs {bdate}".replace(",","."))
+    diff = int(ry['count_in'] - rb['count_in'])
+    html = f'''
+    <div class="kpi-card">
+      <div class="kpi-title">Bezoekers <small>(gisteren)</small></div>
+      <div class="kpi-value">{int(ry["count_in"]):,}</div>
+      {delta_block(diff)}
+    </div>
+    '''.replace(",", ".")
+    st.markdown(html, unsafe_allow_html=True)
+
+# Conversie (pp delta)
 with c2:
-    st.metric(f"Conversie ({ydate})", f"{ry['conversion_rate']:.2f}%",
-              delta=f"{(ry['conversion_rate']-rb['conversion_rate']):+.2f} pp")
+    val = f"{ry['conversion_rate']:.2f}%"
+    diff_pp = round(ry['conversion_rate'] - rb['conversion_rate'], 2)
+    html = f'''
+    <div class="kpi-card">
+      <div class="kpi-title">Conversie <small>(gisteren)</small></div>
+      <div class="kpi-value">{val}</div>
+      {delta_block(diff_pp,' pp')}
+    </div>
+    '''
+    st.markdown(html, unsafe_allow_html=True)
+
+# Omzet
 with c3:
-    st.metric(f"Omzet ({ydate})", f"€{ry['turnover']:,.0f}".replace(",","."),
-              delta=f"€{(ry['turnover']-rb['turnover']):+,.0f}".replace(",","."))
+    val = f"€{ry['turnover']:,.0f}".replace(",", ".")
+    diff_eur = f"€{(ry['turnover'] - rb['turnover']):+,.0f}".replace(",", ".")
+    html = f'''
+    <div class="kpi-card">
+      <div class="kpi-title">Omzet <small>(gisteren)</small></div>
+      <div class="kpi-value">{val}</div>
+      {delta_block(diff_eur)}
+    </div>
+    '''
+    st.markdown(html, unsafe_allow_html=True)
+
+# Sales per visitor
 with c4:
-    st.metric(f"Sales/visitor ({ydate})", f"€{ry['sales_per_visitor']:,.2f}".replace(",","."),
-              delta=f"{(ry['sales_per_visitor']-rb['sales_per_visitor']):+.2f}")
+    val = f"€{ry['sales_per_visitor']:,.2f}".replace(",", ".")
+    diff_spv = f"€{(ry['sales_per_visitor'] - rb['sales_per_visitor']):+,.2f}".replace(",", ".")
+    html = f'''
+    <div class="kpi-card">
+      <div class="kpi-title">Sales per visitor <small>(gisteren)</small></div>
+      <div class="kpi-value">{val}</div>
+      {delta_block(diff_spv)}
+    </div>
+    '''
+    st.markdown(html, unsafe_allow_html=True)
 
 st.markdown("---")
 
@@ -125,8 +202,8 @@ except Exception as e:
     st.stop()
 
 st.subheader("🏁 Leaderboard — huidige week (t/m gisteren)")
-# Inline toggle
-rank_choice = st.radio("Ranking op basis van", ["Conversie", "SPV"], horizontal=True, index=0, help="Kies of je sorteert op conversie of sales per visitor")
+rank_choice = st.radio("Ranking op basis van", ["Conversie", "SPV"], horizontal=True, index=0,
+                       help="Conversie is het meest actionabel; SPV voor upsell focus.")
 
 def wtd_agg(d: pd.DataFrame) -> pd.DataFrame:
     if d is None or d.empty:
@@ -151,7 +228,6 @@ else:
     rank_metric = metric_map[rank_choice]
     ascending = False
 
-    # huidige en vorige week rangen
     agg_this["rank_now"] = agg_this[rank_metric].rank(method="min", ascending=ascending).astype(int)
     tmp = agg_last[["shop_id", rank_metric]].copy()
     tmp["rank_last"] = tmp[rank_metric].rank(method="min", ascending=ascending).astype(int)
@@ -161,60 +237,32 @@ else:
     agg = agg.sort_values("rank_now")
     def pos_delta(r):
         change = int(r["rank_change"]) if pd.notna(r["rank_change"]) else 0
-        arrow = "🔺" if change>0 else ("🔻" if change<0 else "→")
-        return f"{int(r['rank_now'])} {arrow} {abs(change)}"
+        arrow = "▲" if change>0 else ("▼" if change<0 else "→")
+        color = PFM_GREEN if change>0 else (PFM_RED if change<0 else PFM_GRAY)
+        return f"<span style='color:{color};font-weight:600'>{int(r['rank_now'])} {arrow} {abs(change)}</span>"
 
     agg["positie (nu vs lw)"] = agg.apply(pos_delta, axis=1)
 
-    # progress bar kolom voor gekozen metric
-    maxv = agg[rank_metric].max() or 1.0
-    agg["score_pct"] = (agg[rank_metric] / maxv) * 100
-
-    # Format kopie
     show_cols = ["positie (nu vs lw)","shop_name","count_in","conversion_rate","sales_per_visitor","turnover"]
-    fmt = agg[show_cols + ["score_pct"]].copy()
+    fmt = agg[show_cols].copy()
 
-    # EU notatie
-    fmt["count_in"] = fmt["count_in"].map(lambda x: f"{int(x):,}".replace(",","."))
+    # EU notatie & units
+    fmt["count_in"] = fmt["count_in"].map(lambda x: f"{int(x):,}".replace(",", "."))
     fmt["conversion_rate"] = fmt["conversion_rate"].map(lambda x: f"{x:.2f}%")
-    fmt["sales_per_visitor"] = fmt["sales_per_visitor"].map(lambda x: f"€{x:,.2f}".replace(",","."))
-    fmt["turnover"] = fmt["turnover"].map(lambda x: f"€{x:,.0f}".replace(",","."))
-
-    # Styling: highlight eigen winkel (PFM purple), pijlen kleuren
-    def highlight_row(s):
-        return ["background-color: %s; color: white" % PFM_PURPLE if s["shop_name"] == store_name else "" for _ in s]
-
-    def style_position(col):
-        styled = []
-        for val in agg["rank_change"]:
-            if pd.isna(val) or val == 0:
-                color = PFM_GRAY
-                sym = "→"
-            elif val > 0:
-                color = PFM_GREEN
-                sym = "🔺"
-            else:
-                color = PFM_RED
-                sym = "🔻"
-            styled.append(f"color: {color}")
-        return styled
-
-    # Build Styler
-    styler = fmt.style
-    # progress bar only on a hidden column but we can't inject in st.dataframe easily;
-    # instead keep the numeric columns; (optional) could add a visual bar via background gradient:
-    bar_subset = ["conversion_rate"] if rank_metric=="conversion_rate" else ["sales_per_visitor"]
-    styler = styler.background_gradient(subset=bar_subset, cmap="Blues")
+    fmt["sales_per_visitor"] = fmt["sales_per_visitor"].map(lambda x: f"€{x:,.2f}".replace(",", "."))
+    fmt["turnover"] = fmt["turnover"].map(lambda x: f"€{x:,.0f}".replace(",", "."))
 
     try:
         highlight_idx = fmt.index[fmt["shop_name"] == store_name][0]
         def hl(s):
             return ["background-color: %s; color: white" % PFM_PURPLE if s.name==highlight_idx else "" for _ in s]
-        styler = styler.apply(hl, axis=1)
+        styler = fmt.style.apply(hl, axis=1)
     except Exception:
-        pass
+        styler = fmt.style
 
+    styler = styler.format({"positie (nu vs lw)": lambda x: x}, escape="html")
     st.dataframe(styler, use_container_width=True)
 
 with st.expander("🔧 Debug"):
     st.write("Vandaag (Europe/Amsterdam):", str(TODAY))
+    st.write("Laatste kaart-datums (na filter < vandaag):", sorted(dfd_cards["date_eff"].unique())[-7:])
