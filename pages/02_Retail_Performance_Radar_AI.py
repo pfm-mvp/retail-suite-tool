@@ -1,4 +1,4 @@
-# pages/02_Region_Performance_Radar.py
+# pages/02_Region_Performance_Radar.py  (of: 02_Retail_Performance_Radar_AI.py)
 import os, sys
 from datetime import datetime
 import pytz
@@ -141,11 +141,6 @@ total_turn = cur["turnover"].sum()
 total_vis  = cur["count_in"].sum()
 total_sqm  = cur["sq_meter"].fillna(0).sum()
 
-def weighted_avg(series, weights):
-    w = weights.fillna(0.0); s = series.fillna(0.0)
-    d = w.sum()
-    return (s*w).sum()/d if d else np.nan
-
 # Gewogen op bezoekers (conversie/SPV) + GEWOGEN sales/m² = Σ omzet / Σ m² ✅
 avg_conv   = weighted_avg(cur["conversion_rate"],   cur["count_in"])
 avg_spv    = weighted_avg(cur["sales_per_visitor"], cur["count_in"])
@@ -167,6 +162,20 @@ def delta(this, last):
     diff = float(this) - float(last)
     cls = "up" if diff>0 else ("down" if diff<0 else "flat")
     return (diff, cls, True)
+
+# ✅ badge(): toegevoegd (ontbrekende helper) -------------------------------
+def badge(label_value, cls, is_real_delta, money=False, pp=False):
+    """Maak een mooi label onder een card; toont 'n.v.t.' als er geen echte vergelijking is."""
+    if not is_real_delta:
+        return f'<span class="badge flat">n.v.t.</span>'
+    if money:
+        val = f"{'+' if label_value>0 else ''}{'€'}{abs(label_value):,.0f}".replace(",",".")
+    elif pp:
+        val = f"{'+' if label_value>0 else ''}{abs(label_value):.2f}pp"
+    else:
+        val = f"{'+' if label_value>0 else ''}{abs(label_value):.2f}"
+    return f'<span class="badge {cls}">{val} vs vorige periode</span>'
+# ---------------------------------------------------------------------------
 
 if has_true_previous:
     d_turn,  cls_turn,  ok1 = delta(total_turn, prev_total_turn)
@@ -212,7 +221,8 @@ st.subheader("📈 Radarvergelijking (Conversie / SPV / Sales per m²)")
 metric_cols = ["conversion_rate","sales_per_visitor","sales_per_sqm"]
 
 # Normaliseer per metric (min-max 0..1) voor eerlijke radar
-norm = cur[["shop_id","shop_name"] + metric_cols].copy()
+norm = cur[{"shop_id","shop_name"} | set(metric_cols)].copy()  # compact
+norm = cur[["shop_id","shop_name"] + metric_cols].copy()       # (fallback voor oudere Python)
 for m in metric_cols:
     v = norm[m].astype(float)
     vmin, vmax = v.min(), v.max()
@@ -271,11 +281,7 @@ with cB:
 st.subheader("🏁 Leaderboard — sales/m² t.o.v. regio-gemiddelde")
 
 comp = cur[["shop_name", "sales_per_sqm", "turnover", "sq_meter"]].copy()
-
-# Gebruik hetzelfde gewogen regio-gemiddelde als in de card ✅
 comp["region_avg_spsqm"] = avg_spsqm
-
-# Afwijkingen
 comp["delta_eur_sqm"] = comp["sales_per_sqm"] - comp["region_avg_spsqm"]
 comp["delta_pct"] = np.where(
     comp["region_avg_spsqm"] > 0,
