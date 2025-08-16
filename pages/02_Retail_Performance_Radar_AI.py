@@ -6,7 +6,6 @@ import requests
 import numpy as np
 import pandas as pd
 import streamlit as st
-import plotly.express as px
 import plotly.graph_objects as go
 
 # ---------- Imports / mapping ----------
@@ -90,20 +89,22 @@ def fmt_pct2(x): return f"{x:.2f}%"
 # ---------- Data ophalen ----------
 df_cur, p_cur, s_cur = fetch_df(ALL_IDS, period, "day", METRICS)
 
+# Alleen voor this_* is er een zinnige vorige periode (last_*)
 prev_map = {
     "this_week": "last_week",
-    "last_week": "last_week",
     "this_month": "last_month",
-    "last_month": "last_month",
     "this_quarter": "last_quarter",
-    "last_quarter": "last_quarter",
     "this_year": "last_year",
-    "last_year": "last_year",
 }
-period_prev = prev_map.get(period, "last_week")
-df_prev, p_prev, s_prev = fetch_df(ALL_IDS, period_prev, "day", METRICS)
+has_true_previous = period in prev_map
+period_prev = prev_map.get(period, None)
 
-# Voor 'this_*' enkel t/m gisteren nemen
+if has_true_previous:
+    df_prev, p_prev, s_prev = fetch_df(ALL_IDS, period_prev, "day", METRICS)
+else:
+    df_prev, p_prev, s_prev = (pd.DataFrame(), [], None)
+
+# Voor 'this_*' alleen t/m gisteren nemen
 if period.startswith("this_"):
     df_cur = df_cur[df_cur["date_eff"] < TODAY]
 
@@ -120,7 +121,11 @@ def agg_store(d: pd.DataFrame) -> pd.DataFrame:
            .apply(lambda s: float(s.dropna().iloc[-1]) if s.dropna().size else np.nan)
            ).reset_index()
     g = g.merge(sqm, on="shop_id", how="left")
-    g["sales_per_sqm"] = g.apply(lambda r: (r["turnover"]/r["sq_meter"]) if (pd.notna(r["sq_meter"]) and r["sq_meter"]>0) else np.nan, axis=1)
+    # store-level sales/m² (regionaal middelen we via Σ omzet / Σ m²)
+    g["sales_per_sqm"] = g.apply(
+        lambda r: (r["turnover"]/r["sq_meter"]) if (pd.notna(r["sq_meter"]) and r["sq_meter"]>0) else np.nan,
+        axis=1
+    )
     g["shop_name"] = g["shop_id"].map(SHOP_NAME_MAP)
     return g
 
@@ -131,57 +136,83 @@ if cur.empty:
     st.warning("Geen data voor deze periode.")
     st.stop()
 
-# ---------- Region KPI's + deltas ----------
+# ---------- Region KPI's: correcte gemiddelden ----------
 total_turn = cur["turnover"].sum()
-avg_conv   = weighted_avg(cur["conversion_rate"], cur["count_in"])
-avg_spv    = weighted_avg(cur["sales_per_visitor"], cur["count_in"])
-avg_spsqm  = weighted_avg(cur["sales_per_sqm"], cur["sq_meter"].fillna(0))
+total_vis  = cur["count_in"].sum()
+total_sqm  = cur["sq_meter"].fillna(0).sum()
 
-prev_total_turn = prev["turnover"].sum() if not prev.empty else np.nan
-prev_avg_conv   = weighted_avg(prev["conversion_rate"], prev["count_in"]) if not prev.empty else np.nan
-prev_avg_spv    = weighted_avg(prev["sales_per_visitor"], prev["count_in"]) if not prev.empty else np.nan
-prev_avg_spsqm  = weighted_avg(prev["sales_per_sqm"], prev["sq_meter"].fillna(0)) if not prev.empty else np.nan
+avg_conv   = weighted_avg(cur["conversion_rate"],   cur["count_in"])           # gewogen op bezoekers
+avg_spv    = weighted_avg(cur["sales_per_visitor"], cur["count_in"])           # gewogen op bezoekers
+avg_spsqm  = (total_turn / total_sqm) if total_sqm > 0 else np.nan            # Σ omzet / Σ m²   ✅
+
+# Vorige periode (alleen als we 'has_true_previous' hebben)
+if has_true_previous and not prev.empty:
+    prev_total_turn = prev["turnover"].sum()
+    prev_avg_conv   = weighted_avg(prev["conversion_rate"],   prev["count_in"])
+    prev_avg_spv    = weighted_avg(prev["sales_per_visitor"], prev["count_in"])
+    prev_total_sqm  = prev["sq_meter"].fillna(0).sum()
+    prev_avg_spsqm  = (prev_total_turn / prev_total_sqm) if prev_total_sqm > 0 else np.nan
+else:
+    prev_total_turn = prev_avg_conv = prev_avg_spv = prev_avg_spsqm = np.nan
 
 def delta(this, last):
-    if pd.isna(this) or pd.isna(last): return 0.0, "flat"
+    if pd.isna(this) or pd.isna(last):
+        return (np.nan, "flat", False)  # False = geen echte delta (n.v.t.)
     diff = float(this) - float(last)
     cls = "up" if diff>0 else ("down" if diff<0 else "flat")
-    return diff, cls
+    return (diff, cls, True)
 
-d_turn, cls_turn = delta(total_turn, prev_total_turn)
-d_conv, cls_conv = delta(avg_conv, prev_avg_conv)
-d_spv,  cls_spv  = delta(avg_spv,  prev_avg_spv)
-d_spsqm, cls_spsqm = delta(avg_spsqm, prev_avg_spsqm)
+if has_true_previous:
+    d_turn,  cls_turn,  ok1 = delta(total_turn, prev_total_turn)
+    d_conv,  cls_conv,  ok2 = delta(avg_conv,   prev_avg_conv)
+    d_spv,   cls_spv,   ok3 = delta(avg_spv,    prev_avg_spv)
+    d_spsqm, cls_spsqm, ok4 = delta(avg_spsqm,  prev_avg_spsqm)
+else:
+    d_turn = d_conv = d_spv = d_spsqm = np.nan
+    cls_turn = cls_conv = cls_spv = cls_spsqm = "flat"
+    ok1 = ok2 = ok3 = ok4 = False
 
+def badge(label_value, cls, is_real_delta, money=False, pp=False):
+    if not is_real_delta:
+        return f'<span class="badge flat">n.v.t.</span>'
+    if money:
+        val = f"{'+' if label_value>0 else ''}{'€'}{abs(label_value):,.0f}".replace(",",".")
+    elif pp:
+        val = f"{'+' if label_value>0 else ''}{abs(label_value):.2f}pp"
+    else:
+        val = f"{'+' if label_value>0 else ''}{abs(label_value):.2f}"
+    return f'<span class="badge {cls}">{val} vs vorige periode</span>'
+
+# ---------- KPI Cards ----------
 c1,c2,c3,c4 = st.columns(4)
 with c1:
     st.markdown(f"""<div class="kpi">
     <div class="t">💶 Totale omzet</div>
     <div class="v">{fmt_eur0(total_turn)}</div>
-    <span class="badge {cls_turn}">{'+' if d_turn>0 else ''}{fmt_eur0(abs(d_turn))} vs vorige periode</span>
+    {badge(d_turn, cls_turn, ok1, money=True)}
     </div>""", unsafe_allow_html=True)
 with c2:
     st.markdown(f"""<div class="kpi">
     <div class="t">🛒 Gem. conversie</div>
     <div class="v">{fmt_pct2(avg_conv)}</div>
-    <span class="badge {cls_conv}">{'+' if d_conv>0 else ''}{abs(d_conv):.2f}pp vs vorige periode</span>
+    {badge(d_conv, cls_conv, ok2, pp=True)}
     </div>""", unsafe_allow_html=True)
 with c3:
     st.markdown(f"""<div class="kpi">
     <div class="t">💸 Gem. SPV</div>
     <div class="v">{fmt_eur2(avg_spv)}</div>
-    <span class="badge {cls_spv}">{'+' if d_spv>0 else ''}{fmt_eur2(abs(d_spv))} vs vorige periode</span>
+    {badge(d_spv, cls_spv, ok3, money=True)}
     </div>""", unsafe_allow_html=True)
 with c4:
     st.markdown(f"""<div class="kpi">
     <div class="t">🏁 Gem. sales/m²</div>
     <div class="v">{fmt_eur2(avg_spsqm)}</div>
-    <span class="badge {cls_spsqm}">{'+' if d_spsqm>0 else ''}{fmt_eur2(abs(d_spsqm))} vs vorige periode</span>
+    {badge(d_spsqm, cls_spsqm, ok4, money=True)}
     </div>""", unsafe_allow_html=True)
 
 st.markdown("---")
 
-# ---------- Selectie & Radar ----------
+# ---------- Radarvergelijking (Conversie / SPV / Sales per m²) ----------
 st.subheader("📈 Radarvergelijking (Conversie / SPV / Sales per m²)")
 metric_cols = ["conversion_rate","sales_per_visitor","sales_per_sqm"]
 
@@ -214,7 +245,7 @@ else:
 
 st.markdown("---")
 
-# ---------- Tops & Flops ----------
+# ---------- Tops & Flops (sales/m²) ----------
 st.subheader("🏆 Tops & Flops")
 
 rank_spm = cur[["shop_name","sales_per_sqm","turnover","count_in","conversion_rate","sales_per_visitor"]].copy()
@@ -224,22 +255,72 @@ cA, cB = st.columns(2)
 with cA:
     st.caption("Top 5 (sales/m²)")
     top5 = rank_spm.head(5).copy()
-    top5["sales_per_sqm"]   = top5["sales_per_sqm"].map(fmt_eur2)
-    top5["turnover"]        = top5["turnover"].map(fmt_eur0)
-    top5["count_in"]        = top5["count_in"].map(lambda x: f"{int(x):,}".replace(",", "."))
-    top5["conversion_rate"] = top5["conversion_rate"].map(lambda x: f"{x:.2f}%")
+    top5["sales_per_sqm"]     = top5["sales_per_sqm"].map(fmt_eur2)
+    top5["turnover"]          = top5["turnover"].map(fmt_eur0)
+    top5["count_in"]          = top5["count_in"].map(lambda x: f"{int(x):,}".replace(",", "."))
+    top5["conversion_rate"]   = top5["conversion_rate"].map(lambda x: f"{x:.2f}%")
     top5["sales_per_visitor"] = top5["sales_per_visitor"].map(fmt_eur2)
     st.dataframe(top5, use_container_width=True)
 
 with cB:
     st.caption("Bottom 5 (sales/m²)")
     flop5 = rank_spm.tail(5).copy().sort_values("sales_per_sqm", ascending=True)
-    flop5["sales_per_sqm"]   = flop5["sales_per_sqm"].map(fmt_eur2)
-    flop5["turnover"]        = flop5["turnover"].map(fmt_eur0)
-    flop5["count_in"]        = flop5["count_in"].map(lambda x: f"{int(x):,}".replace(",", "."))
-    flop5["conversion_rate"] = flop5["conversion_rate"].map(lambda x: f"{x:.2f}%")
+    flop5["sales_per_sqm"]     = flop5["sales_per_sqm"].map(fmt_eur2)
+    flop5["turnover"]          = flop5["turnover"].map(fmt_eur0)
+    flop5["count_in"]          = flop5["count_in"].map(lambda x: f"{int(x):,}".replace(",", "."))
+    flop5["conversion_rate"]   = flop5["conversion_rate"].map(lambda x: f"{x:.2f}%")
     flop5["sales_per_visitor"] = flop5["sales_per_visitor"].map(fmt_eur2)
     st.dataframe(flop5, use_container_width=True)
+
+# ---------- Leaderboard: sales/m² vs regio-gemiddelde ----------
+st.subheader("🏁 Leaderboard — sales/m² t.o.v. regio-gemiddelde")
+
+comp = cur[["shop_name", "sales_per_sqm", "turnover", "sq_meter"]].copy()
+comp["region_avg_spsqm"] = avg_spsqm
+comp["delta_eur_sqm"] = comp["sales_per_sqm"] - comp["region_avg_spsqm"]
+comp["delta_pct"] = np.where(
+    comp["region_avg_spsqm"] > 0,
+    (comp["delta_eur_sqm"] / comp["region_avg_spsqm"]) * 100.0,
+    np.nan
+)
+
+sort_best_first = st.toggle("Beste afwijking eerst", value=True)
+comp = comp.sort_values("delta_eur_sqm", ascending=not sort_best_first)
+
+show = comp[["shop_name","sales_per_sqm","region_avg_spsqm","delta_eur_sqm","delta_pct"]].rename(columns={
+    "shop_name": "winkel",
+    "sales_per_sqm": "sales/m²",
+    "region_avg_spsqm": "gem. sales/m² (regio)",
+    "delta_eur_sqm": "Δ vs gem. (€/m²)",
+    "delta_pct": "Δ vs gem. (%)",
+})
+
+def color_delta(series):
+    colors = []
+    for v in series:
+        if pd.isna(v) or v == 0:
+            colors.append("color: #6B7280;")     # grijs
+        elif v > 0:
+            colors.append("color: #22C55E;")     # groen
+        else:
+            colors.append("color: #F04438;")     # rood
+    return colors
+
+styler = (
+    show.style
+        .format({
+            "sales/m²": "€{:.2f}",
+            "gem. sales/m² (regio)": "€{:.2f}",
+            "Δ vs gem. (€/m²)": "€{:+.2f}",
+            "Δ vs gem. (%)": "{:+.1f}%"
+        })
+        .apply(color_delta, subset=["Δ vs gem. (€/m²)"])
+        .apply(color_delta, subset=["Δ vs gem. (%)"])
+)
+
+st.dataframe(styler, use_container_width=True)
+
+st.markdown("---")
 
 # ---------- 🤖 AI Region Coach ----------
 st.markdown("## 🤖 AI Region Coach")
@@ -265,7 +346,6 @@ cc["uplift_spv_eur"] = cc.apply(
     lambda r: r["count_in"] * max(0.0, r["target_spv"]-r["sales_per_visitor"]), axis=1)
 cc["uplift_total_eur"] = cc["uplift_conv_eur"] + cc["uplift_spv_eur"]
 
-# Profielen
 def profile(row):
     hi_traf  = row["count_in"] >= cur["count_in"].median()
     low_conv = row["conversion_rate"] < conv_med
@@ -277,16 +357,19 @@ def profile(row):
     return "Healthy"
 
 cc["profile"] = cc.apply(profile, axis=1)
-opps = cc[["shop_name","count_in","conversion_rate","sales_per_visitor","ATV","uplift_conv_eur","uplift_spv_eur","uplift_total_eur","profile"]] \
+
+opps = cc[["shop_name","count_in","conversion_rate","sales_per_visitor","ATV",
+           "uplift_conv_eur","uplift_spv_eur","uplift_total_eur","profile"]] \
        .sort_values("uplift_total_eur", ascending=False).head(10)
+
 fmt = opps.copy()
-fmt["count_in"] = fmt["count_in"].map(lambda x: f"{int(x):,}".replace(",", "."))
-fmt["conversion_rate"] = fmt["conversion_rate"].map(lambda x: f"{x:.2f}%")
+fmt["count_in"]          = fmt["count_in"].map(lambda x: f"{int(x):,}".replace(",", "."))
+fmt["conversion_rate"]   = fmt["conversion_rate"].map(lambda x: f"{x:.2f}%")
 fmt["sales_per_visitor"] = fmt["sales_per_visitor"].map(fmt_eur2)
-fmt["ATV"] = fmt["ATV"].map(fmt_eur2)
-fmt["uplift_conv_eur"] = fmt["uplift_conv_eur"].map(fmt_eur0)
-fmt["uplift_spv_eur"]  = fmt["uplift_spv_eur"].map(fmt_eur0)
-fmt["uplift_total_eur"]= fmt["uplift_total_eur"].map(fmt_eur0)
+fmt["ATV"]               = fmt["ATV"].map(fmt_eur2)
+fmt["uplift_conv_eur"]   = fmt["uplift_conv_eur"].map(fmt_eur0)
+fmt["uplift_spv_eur"]    = fmt["uplift_spv_eur"].map(fmt_eur0)
+fmt["uplift_total_eur"]  = fmt["uplift_total_eur"].map(fmt_eur0)
 
 st.markdown("**Top kansen (naar peermediaan):**")
 st.dataframe(fmt, use_container_width=True)
@@ -298,7 +381,7 @@ with cP1:
       <h4>🎯 Conversie Playbook</h4>
       <ul>
         <li><b>FTE verschuiven</b> naar begroeten/paskamers in drukte-uren (op basis van footfall per uur).</li>
-        <li><b>3-vragen-regel</b> & demo/proefpassen afdwingen; huddle 2× per dag met conversiedoel.</li>
+        <li><b>3-vragen-regel</b> & demo/proefpassen; huddle 2× per dag met conversiedoel.</li>
         <li><b>Queue-busting</b> in piekuren; verkort wachttijd → hogere conversie.</li>
       </ul>
     </div>
@@ -321,4 +404,5 @@ with st.expander("🔧 Debug — API calls en samples"):
     st.write("Prev params:", p_prev, "status", s_prev)
     st.write("Cur head:", df_cur.head())
     st.write("Agg cur head:", cur.head())
+    st.write("Leaderboard sample:", show.head())
     st.write("Top opps head:", opps.head())
