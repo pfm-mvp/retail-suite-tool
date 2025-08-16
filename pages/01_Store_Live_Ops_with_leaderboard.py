@@ -28,33 +28,41 @@ def fetch(params):
     r.raise_for_status()
     return r.json()
 
+def add_effective_date(df: pd.DataFrame) -> pd.DataFrame:
+    d = df.copy()
+    if "date" not in d.columns:
+        d["date"] = pd.Series([None]*len(d))
+    ts = pd.to_datetime(d.get("timestamp"), errors="coerce")
+    date_series = d["date"]
+    date_fallback = ts.dt.date.astype("string")
+    d["date_eff"] = date_series.fillna(date_fallback)
+    return d
+
 # ---------- Cards: gisteren vs eergisteren ----------
-# Geen show_hours_* meer; we werken met dagtotalen via step=day
 params_cards = [("data", store_id)]
 params_cards += [("data_output", m) for m in METRICS]
 params_cards += [("source","shops"), ("period","this_week"), ("step","day")]
 
-def get_last_two_days(js):
+def get_last_two(js):
     df = normalize_vemcount_response(js, SHOP_NAME_MAP, kpi_keys=METRICS)
-    dfd = df.dropna(subset=["date"]).copy()
-    dates_sorted = sorted(dfd["date"].unique())
+    dfd = add_effective_date(df)
+    dates_sorted = [x for x in sorted(dfd["date_eff"].dropna().unique()) if x]
     if len(dates_sorted) >= 2:
         y, b = dates_sorted[-1], dates_sorted[-2]
-        g_y = dfd[dfd["date"]==y].groupby("shop_id")[METRICS].sum(numeric_only=True).reset_index()
-        g_b = dfd[dfd["date"]==b].groupby("shop_id")[METRICS].sum(numeric_only=True).reset_index()
+        g_y = dfd[dfd["date_eff"]==y].groupby("shop_id")[METRICS].sum(numeric_only=True).reset_index()
+        g_b = dfd[dfd["date_eff"]==b].groupby("shop_id")[METRICS].sum(numeric_only=True).reset_index()
         return g_y, g_b, y, b, dfd
     return None, None, None, None, dfd
 
 try:
     js_cards = fetch(params_cards)
-    gy, gb, ydate, bdate, dfd = get_last_two_days(js_cards)
-    # fallback naar last_week als this_week nog maar 1 dag heeft
+    gy, gb, ydate, bdate, dfd_cards = get_last_two(js_cards)
     if gy is None:
         params_cards_fallback = [("data", store_id)]
         params_cards_fallback += [("data_output", m) for m in METRICS]
         params_cards_fallback += [("source","shops"), ("period","last_week"), ("step","day")]
         js_cards = fetch(params_cards_fallback)
-        gy, gb, ydate, bdate, dfd = get_last_two_days(js_cards)
+        gy, gb, ydate, bdate, dfd_cards = get_last_two(js_cards)
 except Exception as e:
     st.error(f"API fout (cards): {e}")
     st.stop()
@@ -82,7 +90,7 @@ with c4:
 
 st.markdown("---")
 
-# ---------- Leaderboard: WTD t/m gisteren ----------
+# ---------- Leaderboard WTD (t/m gisteren) ----------
 all_ids = list(SHOP_NAME_MAP.keys())
 
 def fetch_week(period: str):
@@ -92,7 +100,7 @@ def fetch_week(period: str):
     params += [("source","shops"), ("period", period), ("step","day")]
     js = fetch(params)
     df = normalize_vemcount_response(js, SHOP_NAME_MAP, kpi_keys=METRICS)
-    return df
+    return add_effective_date(df)
 
 try:
     df_this = fetch_week("this_week")
@@ -104,31 +112,26 @@ except Exception as e:
 if df_this.empty:
     st.warning("Geen data voor leaderboard.")
 else:
-    dates_this = sorted([d for d in df_this["date"].dropna().unique()])
+    dates_this = [x for x in sorted(df_this["date_eff"].dropna().unique()) if x]
     cutoff = dates_this[-1] if dates_this else None
 
-    def wtd_aggregate(df: pd.DataFrame, upto_date: str | None) -> pd.DataFrame:
-        if df is None or df.empty:
+    def wtd_agg(d: pd.DataFrame, upto: str | None) -> pd.DataFrame:
+        if d is None or d.empty:
             return pd.DataFrame()
-        d = df.dropna(subset=["date"]).copy()
-        if upto_date:
-            d = d[d["date"] <= upto_date]
-        g = d.groupby("shop_id", as_index=False).agg({
-            "count_in":"sum",
-            "turnover":"sum"
-        })
-        # Weighted metrics
-        # SPV = turnover / count_in
+        if upto:
+            d = d[d["date_eff"] <= upto]
+        g = d.groupby("shop_id", as_index=False).agg({"count_in":"sum", "turnover":"sum"})
         g["sales_per_visitor"] = g.apply(lambda r: (r["turnover"]/r["count_in"]) if r["count_in"] else 0.0, axis=1)
-        # Weighted conversion = sum(conv * count_in) / sum(count_in)
-        conv = d.groupby("shop_id").apply(lambda x: (x["conversion_rate"]*x["count_in"]).sum()/x["count_in"].sum() if x["count_in"].sum() else x["conversion_rate"].mean()).reset_index()
+        conv = d.groupby("shop_id").apply(
+            lambda x: (x["conversion_rate"]*x["count_in"]).sum()/x["count_in"].sum() if x["count_in"].sum() else x["conversion_rate"].mean()
+        ).reset_index()
         conv.columns = ["shop_id","conversion_rate"]
         g = g.merge(conv, on="shop_id", how="left")
         g["shop_name"] = g["shop_id"].map(SHOP_NAME_MAP)
         return g
 
-    agg_this = wtd_aggregate(df_this, cutoff)
-    agg_last = wtd_aggregate(df_last, None)
+    agg_this = wtd_agg(df_this, cutoff)
+    agg_last = wtd_agg(df_last, None)
 
     rank_metric = metric_for_rank
     ascending = False
@@ -147,7 +150,6 @@ else:
 
     agg["positie (nu vs lw)"] = agg.apply(pos_delta, axis=1)
 
-    # Format & highlight your store
     show_cols = ["positie (nu vs lw)","shop_name","count_in","conversion_rate","sales_per_visitor","turnover"]
     fmt = agg[show_cols].copy()
     fmt["count_in"] = fmt["count_in"].map(lambda x: f"{int(x):,}".replace(",","."))
@@ -158,7 +160,6 @@ else:
     st.subheader("🏁 Leaderboard — huidige week (t/m gisteren)")
     st.caption(f"Ranking op: **{rank_metric}** · Jouw winkel gemarkeerd")
 
-    # find index for your store
     try:
         highlight_idx = fmt.index[fmt["shop_name"] == store_name][0]
         style = fmt.style.apply(lambda s: ["background-color: #FFF3CD" if s.name==highlight_idx else "" for _ in s], axis=1)
@@ -166,7 +167,6 @@ else:
     except Exception:
         st.dataframe(fmt, use_container_width=True)
 
-# ---------- Debug ----------
-with st.expander("🔧 Debug (API params)"):
-    st.write("Cards params:", params_cards)
-    st.caption("Let op: er worden GEEN show_hours_* parameters meer gestuurd; alle KPI's zijn dagtotalen (step=day).")
+with st.expander("🔧 Debug"):
+    st.write("Kaarten params:", params_cards)
+    st.write("Beschikbare laatste datums (cards):", sorted(dfd_cards["date_eff"].dropna().unique())[-7:])
