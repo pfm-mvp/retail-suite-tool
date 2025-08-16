@@ -1,153 +1,164 @@
 # pages/01_Store_Live_Ops_with_leaderboard.py
-import os, sys
-import pandas as pd
-import requests
-import streamlit as st
-import numpy as np
-import plotly.express as px
 
-# === Imports
-sys.path.append(os.path.abspath(os.path.dirname(__file__) + '/../'))
+import streamlit as st
+import pandas as pd
+import numpy as np
+import requests
+from datetime import datetime, timedelta
+
 from shop_mapping import SHOP_NAME_MAP
 
-st.set_page_config(page_title="Store Live Ops + Leaderboard", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Store Live Ops Leaderboard", page_icon="📊", layout="wide")
 
-# === Styling
-PFM_PURPLE = "#762181"
-PFM_RED = "#F04438"
-PFM_GREEN = "#12B76A"
-PFM_GRAY = "#6B7280"
-
-def metric_card(title, value, diff, fmt="int", is_currency=False):
-    """Render een card met waarde en vergelijking t.o.v. dag ervoor"""
-    if diff > 0:
-        arrow, color = "↑", PFM_GREEN
-    elif diff < 0:
-        arrow, color = "↓", PFM_RED
-    else:
-        arrow, color = "→", PFM_GRAY
-
-    if fmt == "pct":
-        val_str = f"{value:.1f}%"
-        diff_str = f"{arrow} {abs(diff):.1f}% t.o.v. dag ervoor"
-    elif is_currency:
-        val_str = f"€{value:,.0f}".replace(",", ".")
-        diff_str = f"{arrow} €{abs(diff):,.0f} t.o.v. dag ervoor".replace(",", ".")
-    else:
-        val_str = f"{int(value):,}".replace(",", ".")
-        diff_str = f"{arrow} {abs(int(diff))} t.o.v. dag ervoor"
-
-    st.markdown(
-        f"""
-        <div style="background-color:#F9FAFB;padding:1rem;border-radius:0.8rem;
-                    border:1px solid #E5E7EB;min-width:180px">
-          <div style="font-size:0.9rem;color:{PFM_GRAY};margin-bottom:0.3rem">{title}</div>
-          <div style="font-size:1.6rem;font-weight:700">{val_str}</div>
-          <div style="font-size:0.9rem;color:{color};font-weight:600">{diff_str}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-# === API Call
 API_URL = st.secrets["API_URL"]
 
-def fetch_report(shop_ids, period, step, metrics):
+# ========================
+# Helpers
+# ========================
+
+def fetch_report(shop_ids, period="last_week", step="day", metrics=None):
+    if metrics is None:
+        metrics = ["count_in", "conversion_rate", "turnover", "sales_per_visitor"]
+
     params = [("data", sid) for sid in shop_ids]
     params += [("data_output", m) for m in metrics]
-    params += [("source","shops"), ("period",period), ("step",step)]
+    params += [
+        ("source", "shops"),
+        ("period", period),
+        ("step", step),
+    ]
+
     r = requests.post(API_URL, params=params, timeout=40)
     r.raise_for_status()
     return r.json()
 
-def normalize_day(js, shop_ids, metrics):
-    rows=[]
-    for sid in shop_ids:
-        if "data" not in js: continue
-        recs = js["data"].get(str(sid),{}).get("dates",{})
-        for date,v in recs.items():
-            row={"shop_id":sid,"date":date}
+
+def normalize_vemcount_daylevel(js, shop_ids, metrics):
+    """Parse nested vemcount response into flat DataFrame with 'date' col."""
+    rows = []
+    for date_key, shops in js.get("data", {}).items():
+        if not date_key.startswith("date_"):
+            continue
+        date = date_key.replace("date_", "")
+        for sid in shop_ids:
+            values = shops.get(str(sid), {})
+            row = {"date": date, "shop_id": sid}
             for m in metrics:
-                row[m]=v["data"].get(m,np.nan)
+                row[m] = values.get(m, None)
             rows.append(row)
     return pd.DataFrame(rows)
 
-# === UI
-shop_options = list(SHOP_NAME_MAP.values())
-default_shop = shop_options[0]
-selected_shop = st.selectbox("Selecteer vestiging", shop_options, index=0)
-selected_id = [k for k,v in SHOP_NAME_MAP.items() if v==selected_shop][0]
 
-# === Data ophalen: gisteren & eergisteren
-metrics = ["count_in","conversion_rate","turnover","sales_per_visitor"]
-js = fetch_report(list(SHOP_NAME_MAP.keys()), "last_week", "day", metrics)
-df = normalize_day(js, list(SHOP_NAME_MAP.keys()), metrics)
+def fmt_delta(val, is_pct=False, is_eur=False):
+    if pd.isna(val):
+        return "–"
+    arrow = "▲" if val > 0 else "▼"
+    color = "green" if val > 0 else "red"
+    if is_pct:
+        return f"<span style='color:{color};font-weight:600'>{arrow} {val:.1f}%</span> tov dag ervoor"
+    if is_eur:
+        return f"<span style='color:{color};font-weight:600'>{arrow} €{val:,.0f}</span> tov dag ervoor".replace(",", ".")
+    return f"<span style='color:{color};font-weight:600'>{arrow} {val:.0f}</span> tov dag ervoor"
 
-df["date"]=pd.to_datetime(df["date"])
-df=df.sort_values("date")
 
-# Pak gisteren & dag ervoor
-last_date = df["date"].max()
-yesterday = last_date
-day_before = last_date - pd.Timedelta(days=1)
-df_y = df[df["date"]==yesterday]
-df_d = df[df["date"]==day_before]
+# ========================
+# UI
+# ========================
 
-# Metrics voor geselecteerde winkel
-my_y = df_y[df_y["shop_id"]==selected_id].set_index("shop_id")
-my_d = df_d[df_d["shop_id"]==selected_id].set_index("shop_id")
+NAME_TO_ID = {v: k for k, v in SHOP_NAME_MAP.items()}
+ID_TO_NAME = {k: v for k, v in SHOP_NAME_MAP.items()}
 
-# === Cards
-st.subheader(f"📊 Store metrics — {selected_shop}")
-c1,c2,c3,c4=st.columns(4)
+selected_name = st.selectbox("Selecteer je vestiging", list(NAME_TO_ID.keys()), index=0)
+shop_id = NAME_TO_ID[selected_name]
+
+metrics = ["count_in", "conversion_rate", "turnover", "sales_per_visitor"]
+
+# Fetch laatste week (dag-niveau)
+js = fetch_report([shop_id] + list(SHOP_NAME_MAP.keys()), period="last_week", step="day", metrics=metrics)
+df = normalize_vemcount_daylevel(js, [shop_id] + list(SHOP_NAME_MAP.keys()), metrics)
+
+if df.empty:
+    st.error("Geen data gevonden")
+    st.stop()
+
+df["date"] = pd.to_datetime(df["date"])
+df = df.sort_values("date")
+
+# ========================
+# Yesterday vs Day before
+# ========================
+
+yesterday = (datetime.today() - timedelta(days=1)).date()
+day_before = (datetime.today() - timedelta(days=2)).date()
+
+df_y = df[df["date"].dt.date == yesterday]
+df_d = df[df["date"].dt.date == day_before]
+
+row_y = df_y[df_y["shop_id"] == shop_id]
+row_d = df_d[df_d["shop_id"] == shop_id]
+
+if row_y.empty or row_d.empty:
+    st.warning("Niet genoeg data om gisteren vs dag ervoor te vergelijken.")
+    st.stop()
+
+row_y = row_y.iloc[0]
+row_d = row_d.iloc[0]
+
+# Deltas
+delta_visitors = row_y["count_in"] - row_d["count_in"]
+delta_conv = (row_y["conversion_rate"] - row_d["conversion_rate"]) * 100
+delta_turnover = row_y["turnover"] - row_d["turnover"]
+delta_spv = row_y["sales_per_visitor"] - row_d["sales_per_visitor"]
+
+# ========================
+# KPI Cards
+# ========================
+
+c1, c2, c3, c4 = st.columns(4)
+
 with c1:
-    metric_card("Bezoekers gisteren",
-                my_y["count_in"].values[0],
-                my_y["count_in"].values[0]-my_d["count_in"].values[0])
+    st.metric("👥 Bezoekers gisteren", f"{int(row_y['count_in']):,}".replace(",", "."),
+              delta=None)
+    st.markdown(fmt_delta(delta_visitors), unsafe_allow_html=True)
+
 with c2:
-    metric_card("Conversie",
-                my_y["conversion_rate"].values[0]*100,
-                (my_y["conversion_rate"].values[0]-my_d["conversion_rate"].values[0])*100,
-                fmt="pct")
+    st.metric("🎯 Conversie gisteren", f"{row_y['conversion_rate']*100:.1f}%",
+              delta=None)
+    st.markdown(fmt_delta(delta_conv, is_pct=True), unsafe_allow_html=True)
+
 with c3:
-    metric_card("Omzet",
-                my_y["turnover"].values[0],
-                my_y["turnover"].values[0]-my_d["turnover"].values[0],
-                is_currency=True)
+    st.metric("💶 Omzet gisteren", f"€{row_y['turnover']:,.0f}".replace(",", "."),
+              delta=None)
+    st.markdown(fmt_delta(delta_turnover, is_eur=True), unsafe_allow_html=True)
+
 with c4:
-    metric_card("Sales/Visitor",
-                my_y["sales_per_visitor"].values[0],
-                my_y["sales_per_visitor"].values[0]-my_d["sales_per_visitor"].values[0],
-                is_currency=True)
+    st.metric("🛍️ Sales/Visitor gisteren", f"€{row_y['sales_per_visitor']:,.2f}".replace(",", "."),
+              delta=None)
+    st.markdown(fmt_delta(delta_spv, is_eur=True), unsafe_allow_html=True)
 
-# === Leaderboard
-st.subheader("🏆 Leaderboard (week t/m gisteren)")
-mode = st.radio("Ranking op basis van:", ["Conversie","Sales per Visitor"], horizontal=True)
+# ========================
+# Leaderboard
+# ========================
 
-df_lb = df_y.copy()
-df_lb["store_name"]=df_lb["shop_id"].map(SHOP_NAME_MAP)
+st.subheader("🏆 Leaderboard")
 
-if mode=="Conversie":
-    df_lb["rank_metric"]=df_lb["conversion_rate"]
-else:
-    df_lb["rank_metric"]=df_lb["sales_per_visitor"]
+toggle_metric = st.radio("Rangschik op:", ["conversion_rate", "sales_per_visitor"], horizontal=True)
 
-df_lb=df_lb.sort_values("rank_metric",ascending=False)
-df_lb["Rank"]=range(1,len(df_lb)+1)
+# Pak gisteren per store
+df_rank = df[df["date"].dt.date == yesterday].copy()
+df_rank["store_name"] = df_rank["shop_id"].map(ID_TO_NAME)
 
-# Vergelijk met dag ervoor
-df_cmp=df_d[["shop_id",mode.lower().replace(" ","_")]].rename(columns={mode.lower().replace(" ","_"):"prev"})
-df_lb=df_lb.merge(df_cmp,on="shop_id",how="left")
-df_lb["PosΔ"]=df_lb["Rank"].diff().fillna(0).astype(int)
+df_rank = df_rank[["store_name", "conversion_rate", "sales_per_visitor", "turnover", "count_in"]]
 
-def highlight(val, sid, my_sid):
-    if sid==my_sid:
-        return f"background-color:{PFM_PURPLE};color:white;font-weight:700"
-    return ""
+df_rank["Rank"] = df_rank[toggle_metric].rank(ascending=False, method="min").astype(int)
+df_rank = df_rank.sort_values("Rank")
 
-styled = df_lb[["Rank","store_name","rank_metric"]].style.apply(
-    lambda s:[highlight(v, df_lb.loc[s.name,"shop_id"], selected_id) for v in s],
-    axis=1
-)
+# Markeer geselecteerde store
+def highlight_row(row):
+    if row["store_name"] == selected_name:
+        return [f"background-color:#762181; color:white; font-weight:600"] * len(row)
+    return [""] * len(row)
 
-st.dataframe(styled,use_container_width=True)
+styler = df_rank.style.apply(highlight_row, axis=1)
+
+st.dataframe(styler, use_container_width=True)
