@@ -1,22 +1,22 @@
 
 import os, sys
-import streamlit as st
-import requests
-import pandas as pd
 from datetime import datetime
 import pytz
+import requests
+import pandas as pd
+import streamlit as st
 
 # ---------- Imports / mapping ----------
 sys.path.append(os.path.abspath(os.path.dirname(__file__) + '/../'))
 from shop_mapping import SHOP_NAME_MAP
 from helpers_normalize import normalize_vemcount_response
 
-st.set_page_config(page_title="Store Live Ops", page_icon="🛍️", layout="wide")
-st.title("🛍️ Store Live Ops – Gisteren vs Eergisteren + Leaderboard (WTD)")
+st.set_page_config(page_title="Store Live Ops — Gisteren vs Eergisteren + Leaderboard", page_icon="🛍️", layout="wide")
+st.title("🛍️ Store Live Ops — Gisteren vs Eergisteren + Leaderboard")
 
 API_URL = st.secrets["API_URL"]
 
-# ---------- PFM palette ----------
+# ---------- Colors ----------
 PFM_RED = "#F04438"
 PFM_GREEN = "#22C55E"
 PFM_PURPLE = "#6C4EE3"
@@ -24,32 +24,20 @@ PFM_GRAY = "#6B7280"
 PFM_GRAY_BG = "rgba(107,114,128,.10)"
 
 # ---------- Small CSS for cards ----------
-st.markdown(f'''
+st.markdown(f"""
 <style>
-.kpi-card {{
-  border: 1px solid #EEE;
-  border-radius: 14px;
-  padding: 18px 18px 14px 18px;
-}}
-.kpi-title {{
-  color:#0C111D; font-weight:600; font-size:16px; margin-bottom:8px;
-}}
-.kpi-value {{
-  font-size:40px; font-weight:800; line-height:1.1; margin-bottom:6px;
-}}
+.kpi-card {{ border: 1px solid #EEE; border-radius: 14px; padding: 18px 18px 14px 18px; }}
+.kpi-title {{ color:#0C111D; font-weight:600; font-size:16px; margin-bottom:8px; }}
+.kpi-value {{ font-size:40px; font-weight:800; line-height:1.1; margin-bottom:6px; }}
 .kpi-delta {{ font-size:14px; font-weight:700; padding:4px 10px; border-radius:999px; display:inline-block; }}
 .kpi-delta.up {{ color:{PFM_GREEN}; background: rgba(34,197,94,.10); }}
 .kpi-delta.down {{ color:{PFM_RED}; background: rgba(240,68,56,.10); }}
 .kpi-delta.flat {{ color:{PFM_GRAY}; background: {PFM_GRAY_BG}; }}
-
-.lb-card {{
-  border: 1px dashed #DDD; border-radius: 12px; padding: 12px 14px; margin-bottom: 8px;
-  background: #FAFAFC;
-}}
+.lb-card {{ border: 1px dashed #DDD; border-radius: 12px; padding: 12px 14px; margin-bottom: 8px; background: #FAFAFC; }}
 .lb-title {{ font-size:14px; color:#0C111D; font-weight:600; }}
 .lb-val {{ font-size:18px; font-weight:800; }}
 </style>
-''', unsafe_allow_html=True)
+""", unsafe_allow_html=True)
 
 NAME_TO_ID = {v:k for k,v in SHOP_NAME_MAP.items()}
 ID_TO_NAME = {k:v for k,v in SHOP_NAME_MAP.items()}
@@ -57,16 +45,14 @@ ID_TO_NAME = {k:v for k,v in SHOP_NAME_MAP.items()}
 store_name = st.selectbox("Kies winkel", list(NAME_TO_ID.keys()), index=0)
 store_id = NAME_TO_ID[store_name]
 
-# Metrics we use
 METRICS = ["count_in","conversion_rate","turnover","sales_per_visitor"]
-
 TZ = pytz.timezone("Europe/Amsterdam")
 TODAY = datetime.now(TZ).date()
 
-def fetch(params):
+def post_report(params):
     r = requests.post(API_URL, params=params, timeout=45)
     r.raise_for_status()
-    return r.json()
+    return r
 
 def add_effective_date(df: pd.DataFrame) -> pd.DataFrame:
     d = df.copy()
@@ -77,152 +63,101 @@ def add_effective_date(df: pd.DataFrame) -> pd.DataFrame:
     d["date_eff"] = date_series.fillna(ts).dt.date
     return d
 
-# ---------- Cards: gisteren vs eergisteren ----------
-params_cards = [("data", store_id)]
-params_cards += [("data_output", m) for m in METRICS]
-params_cards += [("source","shops"), ("period","this_week"), ("step","day")]
+def fetch_df(shop_ids, period, step, metrics):
+    params = [("data", sid) for sid in shop_ids]
+    params += [("data_output", m) for m in metrics]
+    params += [("source","shops"), ("period", period), ("step", step)]
+    resp = post_report(params)
+    js = resp.json()
+    df = normalize_vemcount_response(js, SHOP_NAME_MAP, kpi_keys=metrics)
+    dfe = add_effective_date(df)
+    return dfe, params, resp.status_code
 
-def pick_yesterday_pairs(js):
-    df = normalize_vemcount_response(js, SHOP_NAME_MAP, kpi_keys=METRICS)
-    dfd = add_effective_date(df).dropna(subset=["date_eff"]).copy()
-    if dfd.empty: return None, None, None, None, dfd
-    # exclude today
-    dfd = dfd[dfd["date_eff"] < TODAY]
-    dates_sorted = sorted(dfd["date_eff"].unique())
-    if len(dates_sorted) >= 2:
-        y, b = dates_sorted[-1], dates_sorted[-2]
-        g_y = dfd[dfd["date_eff"]==y].groupby("shop_id")[METRICS].sum(numeric_only=True).reset_index()
-        g_b = dfd[dfd["date_eff"]==b].groupby("shop_id")[METRICS].sum(numeric_only=True).reset_index()
-        return g_y, g_b, y, b, dfd
-    return None, None, None, None, dfd
+# ---------- Cards (gisteren vs eergisteren) ----------
+df_cards, p_cards, status_cards = fetch_df([store_id], "this_week", "day", METRICS)
+df_cards = df_cards[df_cards["date_eff"] < TODAY]
+dates = sorted(df_cards["date_eff"].unique())
+if len(dates) < 2:
+    df_cards, p_cards, status_cards = fetch_df([store_id], "last_week", "day", METRICS)
+    df_cards = df_cards[df_cards["date_eff"] < TODAY]
+    dates = sorted(df_cards["date_eff"].unique())
 
-try:
-    js_cards = fetch(params_cards)
-    gy, gb, ydate, bdate, dfd_cards = pick_yesterday_pairs(js_cards)
-    if gy is None:
-        params_cards_fallback = [("data", store_id)]
-        params_cards_fallback += [("data_output", m) for m in METRICS]
-        params_cards_fallback += [("source","shops"), ("period","last_week"), ("step","day")]
-        js_cards = fetch(params_cards_fallback)
-        gy, gb, ydate, bdate, dfd_cards = pick_yesterday_pairs(js_cards)
-except Exception as e:
-    st.error(f"API fout (cards): {e}")
+if len(dates) < 2:
+    st.error("Niet genoeg dagdata om kaarten te tonen.")
     st.stop()
 
-if gy is None:
-    st.warning("Geen voldoende dagdata om kaarten te tonen (na filter < vandaag).")
-    st.stop()
-
-ry = gy[gy["shop_id"]==store_id].iloc[0]
-rb = gb[gb["shop_id"]==store_id].iloc[0]
-
-def signed_text(value: float, kind: str) -> str:
-    sign = "+" if value >= 0 else "-"
-    v = abs(value)
-    if kind == "eur0":
-        num = f"€{v:,.0f}".replace(",", ".")
-    elif kind == "eur2":
-        num = f"€{v:,.2f}".replace(",", ".")
-    elif kind == "pct2":
-        num = f"{v:.2f}%"
-    elif kind == "int":
-        num = f"{int(v):,}".replace(",", ".")
-    else:
-        num = f"{v}"
-    return f"{sign} {num}"
+ydate, bdate = dates[-1], dates[-2]
+gy = df_cards[(df_cards["date_eff"]==ydate) & (df_cards["shop_id"]==store_id)][METRICS].sum(numeric_only=True)
+gb = df_cards[(df_cards["date_eff"]==bdate) & (df_cards["shop_id"]==store_id)][METRICS].sum(numeric_only=True)
 
 def delta_badge(value: float, kind: str):
-    if value > 0:
-        cls = "up"; arrow = "↑"
-    elif value < 0:
-        cls = "down"; arrow = "↓"
-    else:
-        cls = "flat"; arrow = "→"
-    return f'<span class="kpi-delta {cls}">{arrow} <b>{signed_text(value, kind)}</b> t.o.v. dag ervoor</span>'
+    if value > 0: cls, arrow = "up","↑"
+    elif value < 0: cls, arrow = "down","↓"
+    else: cls, arrow = "flat","→"
+    if kind=="int": disp = f"{abs(int(value)):,}".replace(",", ".")
+    elif kind=="pct2": disp = f"{abs(value):.2f}%"
+    elif kind=="eur0": disp = f"€{abs(value):,.0f}".replace(",", ".")
+    elif kind=="eur2": disp = f"€{abs(value):,.2f}".replace(",", ".")
+    else: disp = f"{abs(value)}"
+    return f'<span class="kpi-delta {cls}">{arrow} <b>{disp}</b> t.o.v. dag ervoor</span>'
 
-# Build four cards
 c1,c2,c3,c4 = st.columns(4)
 
 with c1:
-    diff = float(ry['count_in'] - rb['count_in'])
-    html = f'''
-    <div class="kpi-card">
-      <div class="kpi-title">Bezoekers <small>(gisteren)</small></div>
-      <div class="kpi-value">{int(ry["count_in"]):,}</div>
-      {delta_badge(diff, "int")}
-    </div>
-    '''.replace(",", ".")
-    st.markdown(html, unsafe_allow_html=True)
+    val = int(gy.get("count_in", 0))
+    diff = gy.get("count_in", 0) - gb.get("count_in", 0)
+    st.markdown(f"""
+<div class="kpi-card"><div class="kpi-title">Bezoekers <small>(gisteren)</small></div>
+<div class="kpi-value">{val:,}</div>{delta_badge(float(diff),"int")}</div>
+""".replace(",", "."), unsafe_allow_html=True)
 
 with c2:
-    val = f"{ry['conversion_rate']:.2f}%"
-    diff_pct = float(ry['conversion_rate'] - rb['conversion_rate'])
-    html = f'''
-    <div class="kpi-card">
-      <div class="kpi-title">Conversie <small>(gisteren)</small></div>
-      <div class="kpi-value">{val}</div>
-      {delta_badge(diff_pct, "pct2")}
-    </div>
-    '''
-    st.markdown(html, unsafe_allow_html=True)
+    conv_y = float(gy.get("conversion_rate", 0.0))
+    conv_b = float(gb.get("conversion_rate", 0.0))
+    st.markdown(f"""
+<div class="kpi-card"><div class="kpi-title">Conversie <small>(gisteren)</small></div>
+<div class="kpi-value">{conv_y:.2f}%</div>{delta_badge((conv_y-conv_b),"pct2")}</div>
+""", unsafe_allow_html=True)
 
 with c3:
-    val = f"€{ry['turnover']:,.0f}".replace(",", ".")
-    diff_eur = float(ry['turnover'] - rb['turnover'])
-    html = f'''
-    <div class="kpi-card">
-      <div class="kpi-title">Omzet <small>(gisteren)</small></div>
-      <div class="kpi-value">{val}</div>
-      {delta_badge(diff_eur, "eur0")}
-    </div>
-    '''
-    st.markdown(html, unsafe_allow_html=True)
+    turn_y = float(gy.get("turnover", 0.0)); turn_b = float(gb.get("turnover", 0.0))
+    st.markdown(f"""
+<div class="kpi-card"><div class="kpi-title">Omzet <small>(gisteren)</small></div>
+<div class="kpi-value">€{turn_y:,.0f}</div>{delta_badge((turn_y-turn_b),"eur0")}</div>
+""".replace(",", "."), unsafe_allow_html=True)
 
 with c4:
-    val = f"€{ry['sales_per_visitor']:,.2f}".replace(",", ".")
-    diff_spv = float(ry['sales_per_visitor'] - rb['sales_per_visitor'])
-    html = f'''
-    <div class="kpi-card">
-      <div class="kpi-title">Sales per visitor <small>(gisteren)</small></div>
-      <div class="kpi-value">{val}</div>
-      {delta_badge(diff_spv, "eur2")}
-    </div>
-    '''
-    st.markdown(html, unsafe_allow_html=True)
+    spv_y = float(gy.get("sales_per_visitor", 0.0)); spv_b = float(gb.get("sales_per_visitor", 0.0))
+    if spv_y==0 and val>0: spv_y = turn_y/val
+    val_b = int(gb.get("count_in", 0))
+    if spv_b==0 and val_b>0: spv_b = turn_b/val_b
+    st.markdown(f"""
+<div class="kpi-card"><div class="kpi-title">Sales per visitor <small>(gisteren)</small></div>
+<div class="kpi-value">€{spv_y:,.2f}</div>{delta_badge((spv_y-spv_b),"eur2")}</div>
+""".replace(",", "."), unsafe_allow_html=True)
 
 st.markdown("---")
 
-# ---------- Leaderboard WTD (t/m gisteren) ----------
+# ---------- Leaderboard (WTD t/m gisteren) ----------
 all_ids = list(SHOP_NAME_MAP.keys())
 
-def fetch_week(period: str):
-    params = []
-    for sid in all_ids: params.append(("data", sid))
-    for m in METRICS: params.append(("data_output", m))
-    params += [("source","shops"), ("period", period), ("step","day")]
-    js = fetch(params)
-    df = normalize_vemcount_response(js, SHOP_NAME_MAP, kpi_keys=METRICS)
-    d = add_effective_date(df)
-    return d[d["date_eff"] < TODAY]
+def fetch_wtd(period):
+    df, p, s = fetch_df(all_ids, period, "day", METRICS)
+    df = df[df["date_eff"] < TODAY]
+    return df, p, s
 
-try:
-    df_this = fetch_week("this_week")
-    df_last = fetch_week("last_week")
-except Exception as e:
-    st.error(f"API fout (leaderboard): {e}")
-    st.stop()
+df_this, p_this, s_this = fetch_wtd("this_week")
+df_last, p_last, s_last = fetch_wtd("last_week")
 
 st.subheader("🏁 Leaderboard — huidige week (t/m gisteren)")
-rank_choice = st.radio("Ranking op basis van", ["Conversie", "SPV"], horizontal=True, index=0,
-                       help="Conversie is het meest actionabel; SPV voor upsell focus.")
+rank_choice = st.radio("Ranking op basis van", ["Conversie", "SPV"], horizontal=True, index=0)
 
 def wtd_agg(d: pd.DataFrame) -> pd.DataFrame:
-    if d is None or d.empty:
-        return pd.DataFrame()
+    if d is None or d.empty: return pd.DataFrame()
     g = d.groupby("shop_id", as_index=False).agg({"count_in":"sum","turnover":"sum"})
     g["sales_per_visitor"] = g.apply(lambda r: (r["turnover"]/r["count_in"]) if r["count_in"] else 0.0, axis=1)
     conv = d.groupby("shop_id").apply(
-        lambda x: (x["conversion_rate"]*x["count_in"]).sum()/x["count_in"].sum() if x["count_in"].sum() else x["conversion_rate"].mean()
+        lambda x: (x["conversion_rate"]*x["count_in"]).sum()/x["count_in"].sum() if x["count_in"].sum() else float(x["conversion_rate"].mean())
     ).reset_index()
     conv.columns = ["shop_id","conversion_rate"]
     g = g.merge(conv, on="shop_id", how="left")
@@ -238,80 +173,77 @@ if agg_this.empty:
 
 metric_map = {"Conversie":"conversion_rate", "SPV":"sales_per_visitor"}
 rank_metric = metric_map[rank_choice]
-ascending = False
 
-agg_this["rank_now"] = agg_this[rank_metric].rank(method="min", ascending=ascending).astype(int)
+agg_this["rank_now"] = agg_this[rank_metric].rank(method="min", ascending=False).astype(int)
 tmp = agg_last[["shop_id", rank_metric]].copy()
-tmp["rank_last"] = tmp[rank_metric].rank(method="min", ascending=ascending).astype(int)
+tmp["rank_last"] = tmp[rank_metric].rank(method="min", ascending=False)
 agg = agg_this.merge(tmp[["shop_id","rank_last"]], on="shop_id", how="left")
-agg["rank_change"] = agg["rank_last"] - agg["rank_now"]
 
-# Leaderboard mini-card for this store (updates with toggle)
+def safe_int(x):
+    try:
+        return int(x) if pd.notna(x) else None
+    except Exception:
+        return None
+
+agg["rank_last_int"] = agg["rank_last"].apply(safe_int)
+agg["rank_change"] = agg.apply(lambda r: (r["rank_last_int"] - r["rank_now"]) if r["rank_last_int"] is not None else 0, axis=1)
+
 me = agg[agg["shop_id"]==store_id].iloc[0]
-change = int(me["rank_change"]) if pd.notna(me["rank_change"]) else 0
-arrow = "🔺" if change>0 else ("🔻" if change<0 else "→")
-col = PFM_GREEN if change>0 else (PFM_RED if change<0 else PFM_GRAY)
-st.markdown(f'''
+ch = int(me["rank_change"]) if pd.notna(me["rank_change"]) else 0
+arrow = "🔺" if ch>0 else ("🔻" if ch<0 else "→")
+col = PFM_PURPLE if ch>0 else (PFM_RED if ch<0 else PFM_GRAY)
+st.markdown(f"""
 <div class="lb-card">
   <div class="lb-title">Jouw positie op <b>{'Conversie' if rank_metric=='conversion_rate' else 'SPV'}</b></div>
-  <div class="lb-val" style="color:{col}">#{int(me["rank_now"])} {arrow} {abs(change)} t.o.v. vorige week</div>
+  <div class="lb-val" style="color:{col}">#{int(me["rank_now"])} {arrow} {abs(ch)} t.o.v. vorige week</div>
 </div>
-''', unsafe_allow_html=True)
+""", unsafe_allow_html=True)
 
-# Build display table
 agg = agg.sort_values("rank_now").reset_index(drop=True)
 def pos_text(r):
-    ch = int(r["rank_change"]) if pd.notna(r["rank_change"]) else 0
-    arrow = "🔺" if ch>0 else ("🔻" if ch<0 else "→")
-    return f"{int(r['rank_now'])} {arrow} {abs(ch)}"
-
+    last = r["rank_last_int"]; now = int(r["rank_now"])
+    last_txt = "–" if last is None else str(last)
+    arrow = "⬆" if r["rank_change"]>0 else ("⬇" if r["rank_change"]<0 else "→")
+    return f"{now} {arrow} {last_txt}"
 agg["positie (nu vs lw)"] = agg.apply(pos_text, axis=1)
 
 show_cols = ["positie (nu vs lw)","shop_name","count_in","conversion_rate","sales_per_visitor","turnover"]
 fmt = agg[show_cols].copy()
-
-# EU notatie & units
 fmt["count_in"] = fmt["count_in"].map(lambda x: f"{int(x):,}".replace(",", "."))
-fmt["conversion_rate"] = fmt["conversion_rate"].map(lambda x: f"{x:.2f}%")
-fmt["sales_per_visitor"] = fmt["sales_per_visitor"].map(lambda x: f"€{x:,.2f}".replace(",", "."))
-fmt["turnover"] = fmt["turnover"].map(lambda x: f"€{x:,.0f}".replace(",", "."))
+fmt["conversion_rate"] = fmt["conversion_rate"].map(lambda x: f"{float(x):.2f}%")
+fmt["sales_per_visitor"] = fmt["sales_per_visitor"].map(lambda x: f"€{float(x):,.2f}".replace(",", "."))
+fmt["turnover"] = fmt["turnover"].map(lambda x: f"€{float(x):,.0f}".replace(",", "."))
 
-# Row highlight: selected store in purple if climbed, red if dropped, gray if flat
 try:
-    idx_me = fmt.index[agg["shop_id"] == store_id][0]
+    idx_me = fmt.index[agg["shop_name"] == store_name][0]
 except Exception:
     idx_me = None
 
 def highlight_rows(row):
     if idx_me is not None and row.name == idx_me:
         ch = int(agg.loc[row.name, "rank_change"]) if pd.notna(agg.loc[row.name, "rank_change"]) else 0
-        if ch > 0:
-            bg = PFM_PURPLE
-        elif ch < 0:
-            bg = PFM_RED
-        else:
-            bg = PFM_GRAY
+        if ch > 0: bg = PFM_PURPLE
+        elif ch < 0: bg = PFM_RED
+        else: bg = PFM_GRAY
         return [f"background-color: {bg}; color: white" for _ in row]
-    return [""] * len(row)
+    return [""]*len(row)
 
 styler = fmt.style.apply(highlight_rows, axis=1)
 
-# Color the first column text based on change (no HTML in cell)
 def color_pos_col(col):
-    styles = []
-    for i, _ in enumerate(col):
+    styles=[]
+    for i,_ in enumerate(col):
         ch = int(agg.loc[fmt.index[i], "rank_change"]) if pd.notna(agg.loc[fmt.index[i], "rank_change"]) else 0
-        if ch > 0:
-            styles.append(f"color: {PFM_GREEN}; font-weight: 600")
-        elif ch < 0:
-            styles.append(f"color: {PFM_RED}; font-weight: 600")
-        else:
-            styles.append(f"color: {PFM_GRAY}; font-weight: 600")
+        if ch > 0: styles.append(f"color: {PFM_PURPLE}; font-weight: 700")
+        elif ch < 0: styles.append(f"color: {PFM_RED}; font-weight: 700")
+        else: styles.append(f"color: {PFM_GRAY}; font-weight: 700")
     return styles
 
 styler = styler.apply(color_pos_col, subset=["positie (nu vs lw)"])
-
 st.dataframe(styler, use_container_width=True)
 
-with st.expander("🔧 Debug"):
-    st.write("Vandaag (Europe/Amsterdam):", str(TODAY))
+with st.expander("🔧 Debug — API calls"):
+    st.write("Cards call params:", p_cards)
+    st.write("Cards HTTP status:", status_cards)
+    st.write("Leaderboard this_week params:", p_this)
+    st.write("Leaderboard last_week params:", p_last)
