@@ -8,7 +8,7 @@ import streamlit as st
 
 # ---------- Imports / mapping ----------
 sys.path.append(os.path.abspath(os.path.dirname(__file__) + '/../'))
-from shop_mapping import SHOP_NAME_MAP
+from helpers_shop import ID_TO_NAME, NAME_TO_ID, REGIONS, get_ids_by_region, get_name_by_id, get_region_by_id
 from helpers_normalize import normalize_vemcount_response
 
 st.set_page_config(page_title="Store Live Ops — Gisteren vs Eergisteren + Leaderboard", page_icon="🛍️", layout="wide")
