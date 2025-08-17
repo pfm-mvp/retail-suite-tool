@@ -1,4 +1,3 @@
-
 import os, sys
 from pathlib import Path
 import streamlit as st
@@ -12,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from shop_mapping import SHOP_NAME_MAP
+from helpers_shop import ID_TO_NAME, REGIONS, get_ids_by_region
 from utils_pfmx import api_get_report, friendly_error, inject_css
 from helpers_normalize import normalize_vemcount_response, to_wide
 
