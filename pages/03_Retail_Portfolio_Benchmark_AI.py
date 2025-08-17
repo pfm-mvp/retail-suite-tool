@@ -7,11 +7,11 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.express as px
-import calendar  # ← voor maandnamen en sortering
+import calendar  # voor maandnamen en sortering
 
 # ---------- Imports / mapping ----------
 sys.path.append(os.path.abspath(os.path.dirname(__file__) + '/../'))
-from helpers_shop import ID_TO_NAME, NAME_TO_ID, REGIONS, get_ids_by_region, get_name_by_id, get_region_by_id
+from helpers_shop import ID_TO_NAME, NAME_TO_ID, REGIONS, get_ids_by_region
 from helpers_normalize import normalize_vemcount_response
 
 st.set_page_config(page_title="Portfolio Benchmark (AI)", page_icon="📊", layout="wide")
@@ -38,8 +38,8 @@ st.markdown(f"""
 
 # ---------- Inputs ----------
 PERIODS = ["this_week","last_week","this_month","last_month","this_quarter","last_quarter","this_year","last_year"]
-period = st.selectbox("Periode", PERIODS, index=4)
-regio = st.selectbox("Regio", REGIONS, index=0)
+period = st.selectbox("Periode", PERIODS, index=4, key="p03_period")
+regio  = st.selectbox("Regio", REGIONS, index=0, key="p03_region")
 shop_ids = get_ids_by_region(regio)
 if not shop_ids:
     st.warning("Geen winkels in deze regio.")
@@ -48,21 +48,13 @@ if not shop_ids:
 # ---------- Helpers ----------
 TZ     = pytz.timezone("Europe/Amsterdam")
 TODAY  = datetime.now(TZ).date()
-ALL_ID = list(SHOP_NAME_MAP.keys())
 METRICS = ["count_in","conversion_rate","turnover","sales_per_visitor","sq_meter"]
 
 def step_for(period: str) -> str:
-    """Use day for week/month, month for quarter/year."""
+    """Gebruik day voor week/maand, month voor kwartaal/jaar."""
     if period.endswith("week") or period.endswith("month"):
         return "day"
     return "month"
-
-def prev_of(period: str) -> str | None:
-    m = {
-        "this_week":"last_week", "this_month":"last_month",
-        "this_quarter":"last_quarter", "this_year":"last_year"
-    }
-    return m.get(period)
 
 def post(params):
     r = requests.post(API_URL, params=params, timeout=45)
@@ -80,20 +72,22 @@ def add_effective_date(df: pd.DataFrame) -> pd.DataFrame:
     d["month"] = pd.to_datetime(d["date_eff"]).dt.month
     return d
 
-def fetch(period: str) -> pd.DataFrame:
-    params = [("data", sid) for sid in ALL_ID]
+def fetch(period: str, ids: list[int]) -> pd.DataFrame:
+    params = [("data", sid) for sid in ids]
     params += [("data_output", m) for m in METRICS]
     params += [("source","shops"), ("period", period), ("step", step_for(period))]
     r  = post(params)
     js = r.json()
-    df = normalize_vemcount_response(js, SHOP_NAME_MAP, kpi_keys=METRICS)
+    # naam-mapping alleen voor gekozen regio
+    id2name = {sid: ID_TO_NAME.get(sid, str(sid)) for sid in ids}
+    df = normalize_vemcount_response(js, id2name, kpi_keys=METRICS)
     df = add_effective_date(df)
 
-    # Exclude today for “this_*”
+    # Exclude vandaag voor “this_*”
     if period.startswith("this_"):
         df = df[df["date_eff"] < TODAY]
 
-    # Forward-fill sq_meter per shop so sales/m² is defined
+    # Forward/backward-fill sq_meter per shop
     df = df.sort_values(["shop_id","date_eff"])
     df["sq_meter"] = df.groupby("shop_id")["sq_meter"].ffill().bfill()
     return df
@@ -108,9 +102,9 @@ def weighted_avg(series, weights):
     return (s*w).sum()/d if d else np.nan
 
 # ---------- Get data ----------
-df = fetch(period)
+df = fetch(period, shop_ids)
 if df.empty:
-    st.warning("Geen data voor deze periode.")
+    st.warning("Geen data voor deze periode/regio.")
     st.stop()
 
 # ---------- Portfolio KPIs ----------
@@ -121,12 +115,14 @@ w = df.groupby("shop_id").apply(lambda x: pd.Series({
     "sales_per_visitor": weighted_avg(x["sales_per_visitor"], x["count_in"]),
 })).reset_index()
 g = g.merge(w, on="shop_id", how="left")
+
 sqm = (df.groupby("shop_id")["sq_meter"]
          .apply(lambda s: float(s.dropna().iloc[-1]) if s.dropna().size else np.nan)
          .reset_index())
 g = g.merge(sqm, on="shop_id", how="left")
+
 g["sales_per_sqm"] = np.where(g["sq_meter"]>0, g["turnover"]/g["sq_meter"], np.nan)
-g["shop_name"] = g["shop_id"].map(SHOP_NAME_MAP)
+g["shop_name"] = g["shop_id"].map(ID_TO_NAME)
 
 # Region totals / averages
 total_turn = g["turnover"].sum()
@@ -153,7 +149,6 @@ with c4:
 st.markdown("---")
 
 # ---------- 🔥 Sales/m² Heatmap per winkel (maanden) ----------
-# ---------- 🔥 Sales/m² Heatmap per winkel (maanden) ----------
 st.subheader("🔥 Sales/m² Heatmap per winkel (maanden)")
 
 # 1) Bouw maanddata: Σ omzet per shop/maand / laatste m² van die shop
@@ -164,7 +159,7 @@ monthly = (
 monthly["sales_per_sqm"] = np.where(
     monthly["sq_meter"] > 0, monthly["turnover"] / monthly["sq_meter"], np.nan
 )
-monthly["shop_name"] = monthly["shop_id"].map(SHOP_NAME_MAP)
+monthly["shop_name"] = monthly["shop_id"].map(ID_TO_NAME)
 
 # 2) Maandnaam-kolom + chronologische volgorde (Jan…Dec)
 monthly["month_name"] = monthly["month"].apply(lambda m: calendar.month_abbr[int(m)])
@@ -197,6 +192,8 @@ else:
     )
     st.plotly_chart(fig, use_container_width=True)
 
+st.markdown("---")
+
 # ---------- 🥇 vs regio-gemiddelde (sales/m²) ----------
 st.subheader("🏁 Leaderboard — sales/m² t.o.v. regio-gemiddelde")
 
@@ -215,8 +212,8 @@ st.dataframe(styled, use_container_width=True)
 
 # ---------- 🤖 Mini AI summary ----------
 st.markdown("## 🤖 Portfolio Coach (samenvatting)")
-top_up  = comp.nlargest(3, "Δ €/m²")[["shop_name","Δ €/m²"]]
-top_down= comp.nsmallest(3, "Δ €/m²")[["shop_name","Δ €/m²"]]
+top_up   = comp.nlargest(3, "Δ €/m²")[["shop_name","Δ €/m²"]]
+top_down = comp.nsmallest(3, "Δ €/m²")[["shop_name","Δ €/m²"]]
 
 def list_lines(df):
     return "<br>".join([f"• {r['shop_name']}: {fmt_eur2(r['Δ €/m²'])}/m²" for _,r in df.iterrows()])
@@ -230,6 +227,7 @@ st.markdown(f"""
 # ---------- Debug ----------
 with st.expander("🔧 Debug"):
     st.write("period:", period, "step:", step_for(period))
+    st.write("regio:", regio, "ids:", shop_ids[:10], "… (totaal", len(shop_ids), ")")
     st.write("df head:", df.head())
     st.write("monthly head:", monthly.head())
     st.write("agg per shop head:", g.head())
