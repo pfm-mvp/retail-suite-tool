@@ -220,35 +220,40 @@ st.markdown("---")
 st.subheader("📈 Radarvergelijking (Conversie / SPV / Sales per m²)")
 metric_cols = ["conversion_rate","sales_per_visitor","sales_per_sqm"]
 
+# Gebruik altijd een LIJST als kolomselector (geen set!)
+norm = cur[["shop_id","shop_name"] + metric_cols].copy()
+
 # Normaliseer per metric (min-max 0..1) voor eerlijke radar
-norm = cur[{"shop_id","shop_name"} | set(metric_cols)].copy()  # compact
-norm = cur[["shop_id","shop_name"] + metric_cols].copy()       # (fallback voor oudere Python)
 for m in metric_cols:
-    v = norm[m].astype(float)
-    vmin, vmax = v.min(), v.max()
+    v = pd.to_numeric(norm[m], errors="coerce")
+    vmin, vmax = v.min(skipna=True), v.max(skipna=True)
     if pd.isna(vmin) or pd.isna(vmax) or vmax == vmin:
-        norm[m+"_norm"] = 0.0
+        norm[m + "_norm"] = 0.0
     else:
-        norm[m+"_norm"] = (v - vmin) / (vmax - vmin)
+        norm[m + "_norm"] = (v - vmin) / (vmax - vmin)
 
 default_names = list(SHOP_NAME_MAP.values())[:4]
-sel_names = st.multiselect("Vergelijk winkels (max 6)", list(SHOP_NAME_MAP.values()),
+sel_names = st.multiselect("Vergelijk winkels (max 6)",
+                           list(SHOP_NAME_MAP.values()),
                            default=default_names, max_selections=6)
 sel = norm[norm["shop_name"].isin(sel_names)]
 
 if not sel.empty:
+    import plotly.graph_objects as go
     categories = ["Conversie","SPV","Sales/m²"]
     fig = go.Figure()
     for _, row in sel.iterrows():
         values = [row["conversion_rate_norm"], row["sales_per_visitor_norm"], row["sales_per_sqm_norm"]]
-        fig.add_trace(go.Scatterpolar(r=values + values[:1], theta=categories + categories[:1],
-                                      fill='toself', name=row["shop_name"]))
+        fig.add_trace(go.Scatterpolar(
+            r=values + values[:1],
+            theta=categories + categories[:1],
+            fill='toself',
+            name=row["shop_name"]
+        ))
     fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0,1])), showlegend=True, height=520)
     st.plotly_chart(fig, use_container_width=True)
 else:
     st.info("Kies één of meer winkels om de radar te tonen.")
-
-st.markdown("---")
 
 # ---------- Tops & Flops (sales/m²) ----------
 st.subheader("🏆 Tops & Flops")
