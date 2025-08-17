@@ -39,6 +39,11 @@ st.markdown(f"""
 # ---------- Inputs ----------
 PERIODS = ["this_week","last_week","this_month","last_month","this_quarter","last_quarter","this_year","last_year"]
 period = st.selectbox("Periode", PERIODS, index=4)
+regio = st.selectbox("Regio", REGIONS, index=0)
+shop_ids = get_ids_by_region(regio)
+if not shop_ids:
+    st.warning("Geen winkels in deze regio.")
+    st.stop()
 
 # ---------- Helpers ----------
 TZ     = pytz.timezone("Europe/Amsterdam")
