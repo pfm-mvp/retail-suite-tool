@@ -31,6 +31,12 @@ shop_ids = get_ids_by_region(regio)
 if not shop_ids:
     st.warning("Geen winkels in deze regio.")
     st.stop()
+    
+regio = st.selectbox("Regio", REGIONS, index=0)
+shop_ids = get_ids_by_region(regio)
+if not shop_ids:
+    st.warning("Geen winkels in deze regio.")
+    st.stop()
 
 # Minimaal aantal bezoekers om een uur “betekenisvol” te noemen
 traffic_threshold = st.slider("Traffic-drempel (min. bezoekers/uur)", 10, 100, 30, 5)
