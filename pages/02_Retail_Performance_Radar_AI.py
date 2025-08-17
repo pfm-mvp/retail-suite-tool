@@ -1,4 +1,4 @@
-# pages/02_Region_Performance_Radar.py  (of: 02_Retail_Performance_Radar_AI.py)
+# pages/02_Retail_Performance_Radar_AI.py
 import os, sys
 from datetime import datetime
 import pytz
@@ -40,12 +40,18 @@ st.markdown(f"""
 
 # ---------- Inputs ----------
 PERIODS = ["this_week","last_week","this_month","last_month","this_quarter","last_quarter","this_year","last_year"]
-period = st.selectbox("Periode", PERIODS, index=1)
+period = st.selectbox("Periode", PERIODS, index=1, key="p02_period")
+regio  = st.selectbox("Regio", REGIONS, index=0, key="p02_region")
+
+# Bepaal shop_ids op basis van regio
+shop_ids = get_ids_by_region(regio)
+if not shop_ids:
+    st.warning("Geen winkels in deze regio.")
+    st.stop()
 
 # ---------- Helpers ----------
 TZ = pytz.timezone("Europe/Amsterdam")
 TODAY = datetime.now(TZ).date()
-ALL_IDS = list(SHOP_NAME_MAP.keys())
 METRICS = ["count_in","conversion_rate","turnover","sales_per_visitor","sq_meter"]
 
 def post_report(params):
@@ -69,7 +75,9 @@ def fetch_df(shop_ids, period, step, metrics):
     params += [("source","shops"), ("period", period), ("step", step)]
     r = post_report(params)
     js = r.json()
-    df = normalize_vemcount_response(js, SHOP_NAME_MAP, kpi_keys=metrics)
+    # Naam-mapping alleen voor gekozen regio (robust voor oud/nieuw mapping-schema)
+    id2name_region = {sid: ID_TO_NAME.get(sid, str(sid)) for sid in shop_ids}
+    df = normalize_vemcount_response(js, id2name_region, kpi_keys=metrics)
     dfe = add_effective_date(df)
     return dfe, params, r.status_code
 
@@ -87,7 +95,7 @@ def fmt_eur2(x): return f"€{x:,.2f}".replace(",", ".")
 def fmt_pct2(x): return f"{x:.2f}%"
 
 # ---------- Data ophalen ----------
-df_cur, p_cur, s_cur = fetch_df(ALL_IDS, period, "day", METRICS)
+df_cur, p_cur, s_cur = fetch_df(shop_ids, period, "day", METRICS)
 
 # Alleen voor this_* is er een zinnige vorige periode (last_*)
 prev_map = {
@@ -100,7 +108,7 @@ has_true_previous = period in prev_map
 period_prev = prev_map.get(period, None)
 
 if has_true_previous:
-    df_prev, p_prev, s_prev = fetch_df(ALL_IDS, period_prev, "day", METRICS)
+    df_prev, p_prev, s_prev = fetch_df(shop_ids, period_prev, "day", METRICS)
 else:
     df_prev, p_prev, s_prev = (pd.DataFrame(), [], None)
 
@@ -126,14 +134,14 @@ def agg_store(d: pd.DataFrame) -> pd.DataFrame:
         lambda r: (r["turnover"]/r["sq_meter"]) if (pd.notna(r["sq_meter"]) and r["sq_meter"]>0) else np.nan,
         axis=1
     )
-    g["shop_name"] = g["shop_id"].map(SHOP_NAME_MAP)
+    g["shop_name"] = g["shop_id"].map(ID_TO_NAME)  # ← mapping via helper
     return g
 
 cur = agg_store(df_cur)
 prev = agg_store(df_prev)
 
 if cur.empty:
-    st.warning("Geen data voor deze periode.")
+    st.warning("Geen data voor deze periode/regio.")
     st.stop()
 
 # ---------- Region KPI's: correcte gemiddelden ----------
@@ -163,7 +171,7 @@ def delta(this, last):
     cls = "up" if diff>0 else ("down" if diff<0 else "flat")
     return (diff, cls, True)
 
-# ✅ badge(): toegevoegd (ontbrekende helper) -------------------------------
+# ✅ badge helper
 def badge(label_value, cls, is_real_delta, money=False, pp=False):
     """Maak een mooi label onder een card; toont 'n.v.t.' als er geen echte vergelijking is."""
     if not is_real_delta:
@@ -175,7 +183,6 @@ def badge(label_value, cls, is_real_delta, money=False, pp=False):
     else:
         val = f"{'+' if label_value>0 else ''}{abs(label_value):.2f}"
     return f'<span class="badge {cls}">{val} vs vorige periode</span>'
-# ---------------------------------------------------------------------------
 
 if has_true_previous:
     d_turn,  cls_turn,  ok1 = delta(total_turn, prev_total_turn)
@@ -232,14 +239,17 @@ for m in metric_cols:
     else:
         norm[m + "_norm"] = (v - vmin) / (vmax - vmin)
 
-default_names = list(SHOP_NAME_MAP.values())[:4]
+# Opties beperken tot de winkels in de gekozen regio
+region_names = [ID_TO_NAME[sid] for sid in shop_ids if sid in ID_TO_NAME]
+default_names = region_names[:min(4, len(region_names))] or []
 sel_names = st.multiselect("Vergelijk winkels (max 6)",
-                           list(SHOP_NAME_MAP.values()),
-                           default=default_names, max_selections=6)
+                           region_names,
+                           default=default_names,
+                           max_selections=6,
+                           key="p02_compare_shops")
 sel = norm[norm["shop_name"].isin(sel_names)]
 
 if not sel.empty:
-    import plotly.graph_objects as go
     categories = ["Conversie","SPV","Sales/m²"]
     fig = go.Figure()
     for _, row in sel.iterrows():
@@ -254,6 +264,8 @@ if not sel.empty:
     st.plotly_chart(fig, use_container_width=True)
 else:
     st.info("Kies één of meer winkels om de radar te tonen.")
+
+st.markdown("---")
 
 # ---------- Tops & Flops (sales/m²) ----------
 st.subheader("🏆 Tops & Flops")
@@ -282,11 +294,13 @@ with cB:
     flop5["sales_per_visitor"] = flop5["sales_per_visitor"].map(fmt_eur2)
     st.dataframe(flop5, use_container_width=True)
 
+st.markdown("---")
+
 # ---------- Leaderboard: sales/m² vs regio-gemiddelde ----------
 st.subheader("🏁 Leaderboard — sales/m² t.o.v. regio-gemiddelde")
 
 comp = cur[["shop_name", "sales_per_sqm", "turnover", "sq_meter"]].copy()
-comp["region_avg_spsqm"] = avg_spsqm
+comp["region_avg_spsqm"] = (cur["turnover"].sum() / cur["sq_meter"].fillna(0).sum()) if cur["sq_meter"].fillna(0).sum() > 0 else np.nan
 comp["delta_eur_sqm"] = comp["sales_per_sqm"] - comp["region_avg_spsqm"]
 comp["delta_pct"] = np.where(
     comp["region_avg_spsqm"] > 0,
@@ -294,7 +308,7 @@ comp["delta_pct"] = np.where(
     np.nan
 )
 
-sort_best_first = st.toggle("Beste afwijking eerst", value=True)
+sort_best_first = st.toggle("Beste afwijking eerst", value=True, key="p02_sort_best")
 comp = comp.sort_values("delta_eur_sqm", ascending=not sort_best_first)
 
 show = comp[["shop_name","sales_per_sqm","region_avg_spsqm","delta_eur_sqm","delta_pct"]].rename(columns={
@@ -329,6 +343,8 @@ styler = (
 )
 
 st.dataframe(styler, use_container_width=True)
+
+st.markdown("---")
 
 # ---------- 🤖 AI Region Coach ----------
 st.markdown("## 🤖 AI Region Coach")
@@ -382,32 +398,9 @@ fmt["uplift_total_eur"]  = fmt["uplift_total_eur"].map(fmt_eur0)
 st.markdown("**Top kansen (naar peermediaan):**")
 st.dataframe(fmt, use_container_width=True)
 
-cP1, cP2 = st.columns(2)
-with cP1:
-    st.markdown(f"""
-    <div class="box">
-      <h4>🎯 Conversie Playbook</h4>
-      <ul>
-        <li><b>FTE verschuiven</b> naar begroeten/paskamers in drukte-uren (op basis van footfall per uur).</li>
-        <li><b>3-vragen-regel</b> & demo/proefpassen; huddle 2× per dag met conversiedoel.</li>
-        <li><b>Queue-busting</b> in piekuren; verkort wachttijd → hogere conversie.</li>
-      </ul>
-    </div>
-    """, unsafe_allow_html=True)
-with cP2:
-    st.markdown(f"""
-    <div class="box">
-      <h4>🛒 SPV / ATV Playbook</h4>
-      <ul>
-        <li>Activeer <b>bundle-promo</b> (“2e artikel −20%”) in stille uren; toon bundels bij kassa/paskamers.</li>
-        <li><b>Kassascripts</b>: 1 relevante add-on vraag per transactie (riem/sokken/onderhoud).</li>
-        <li>Review <b>attach-rate</b> top-3 producten en vul ze dagelijks bij op zichtlocaties.</li>
-      </ul>
-    </div>
-    """, unsafe_allow_html=True)
-
 # ---------- Debug ----------
 with st.expander("🔧 Debug — API calls en samples"):
+    st.write("Regio:", regio)
     st.write("Cur params:", p_cur, "status", s_cur)
     st.write("Prev params:", p_prev, "status", s_prev)
     st.write("Cur head:", df_cur.head())
