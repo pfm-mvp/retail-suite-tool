@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.express as px
+import calendar  # ← voor maandnamen en sortering
 
 # ---------- Imports / mapping ----------
 sys.path.append(os.path.abspath(os.path.dirname(__file__) + '/../'))
@@ -147,29 +148,49 @@ with c4:
 st.markdown("---")
 
 # ---------- 🔥 Sales/m² Heatmap per winkel (maanden) ----------
+# ---------- 🔥 Sales/m² Heatmap per winkel (maanden) ----------
 st.subheader("🔥 Sales/m² Heatmap per winkel (maanden)")
 
-# Build monthly sales/m²: Σ omzet per shop per maand / laatste m² per shop
-monthly = (df.groupby(["shop_id","month"], as_index=False)
-             .agg(turnover=("turnover","sum"), sq_meter=("sq_meter","last")))
-monthly["sales_per_sqm"] = np.where(monthly["sq_meter"]>0,
-                                    monthly["turnover"]/monthly["sq_meter"], np.nan)
+# 1) Bouw maanddata: Σ omzet per shop/maand / laatste m² van die shop
+monthly = (
+    df.groupby(["shop_id","month"], as_index=False)
+      .agg(turnover=("turnover","sum"), sq_meter=("sq_meter","last"))
+)
+monthly["sales_per_sqm"] = np.where(
+    monthly["sq_meter"] > 0, monthly["turnover"] / monthly["sq_meter"], np.nan
+)
 monthly["shop_name"] = monthly["shop_id"].map(SHOP_NAME_MAP)
 
-# Pivot to heatmap (shops x months)
-hm = monthly.pivot(index="shop_name", columns="month", values="sales_per_sqm").sort_index()
-hm = hm.reindex(sorted(hm.columns), axis=1)
+# 2) Maandnaam-kolom + chronologische volgorde (Jan…Dec)
+monthly["month_name"] = monthly["month"].apply(lambda m: calendar.month_abbr[int(m)])
+month_order = [calendar.month_abbr[i] for i in range(1, 13)]
+
+# 3) Pivot naar heatmap (shops × maanden met namen)
+hm = (monthly
+      .pivot(index="shop_name", columns="month_name", values="sales_per_sqm")
+      .sort_index()
+)
+# Kolommen reordenen naar Jan…Dec, maar alleen de maanden die aanwezig zijn
+hm = hm.reindex([m for m in month_order if m in hm.columns], axis=1)
 
 if hm.isna().all(None):
     st.info("Geen maanddata beschikbaar voor deze periode.")
 else:
-    fig = px.imshow(hm, color_continuous_scale="Viridis",
-                    labels=dict(color="€ / m²"),
-                    aspect="auto")
-    fig.update_layout(height=520, margin=dict(l=0,r=0,t=10,b=10))
-    st.plotly_chart(fig, use_container_width=True)
+    # 4) PFM-brand colorscale (3-kleuren gradient)
+    pfm_colorscale = ["#762181", "#D8456C", "#FEAC76"]
 
-st.markdown("---")
+    fig = px.imshow(
+        hm,
+        color_continuous_scale=pfm_colorscale,
+        labels=dict(color="€ / m²"),
+        aspect="auto",
+    )
+    fig.update_layout(
+        height=520,
+        margin=dict(l=0, r=0, t=10, b=10),
+        coloraxis_colorbar=dict(title="€ / m²"),
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
 # ---------- 🥇 vs regio-gemiddelde (sales/m²) ----------
 st.subheader("🏁 Leaderboard — sales/m² t.o.v. regio-gemiddelde")
