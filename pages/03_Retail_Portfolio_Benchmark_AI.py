@@ -1,4 +1,4 @@
-# pages/03_Portfolio_Benchmark_AI.py
+# pages/03_Retail_Portfolio_Benchmark_AI.py
 import os, sys
 from datetime import datetime
 import pytz
@@ -13,15 +13,14 @@ sys.path.append(os.path.abspath(os.path.dirname(__file__) + '/../'))
 from shop_mapping import SHOP_NAME_MAP
 from helpers_normalize import normalize_vemcount_response
 
-st.set_page_config(page_title="Retail Portfolio Benchmark (AI)", page_icon="🌍", layout="wide")
-st.title("🌍 Retail Portfolio Benchmark (AI)")
+st.set_page_config(page_title="Portfolio Benchmark (AI)", page_icon="📊", layout="wide")
+st.title("📊 Portfolio Benchmark (AI)")
 
 API_URL = st.secrets["API_URL"]
 
-# ---------- Styling ----------
+# ---------- PFM-styling ----------
 PFM_RED    = "#F04438"
 PFM_GREEN  = "#22C55E"
-PFM_PURPLE = "#6C4EE3"
 PFM_GRAY   = "#6B7280"
 
 st.markdown(f"""
@@ -29,101 +28,108 @@ st.markdown(f"""
 .kpi {{ border:1px solid #eee; border-radius:14px; padding:16px; }}
 .kpi .t {{ font-weight:600; color:#0C111D; }}
 .kpi .v {{ font-size:38px; font-weight:800; }}
-.box {{ border:1px dashed #ddd; border-radius:12px; padding:14px; background:#FAFAFC; }}
+.badge {{ font-size:13px; font-weight:700; padding:4px 10px; border-radius:999px; display:inline-block; }}
+.badge.up {{ color:{PFM_GREEN}; background: rgba(34,197,94,.10); }}
+.badge.down {{ color:{PFM_RED}; background: rgba(240,68,56,.10); }}
+.badge.flat {{ color:{PFM_GRAY}; background: rgba(107,114,128,.10); }}
 </style>
 """, unsafe_allow_html=True)
 
 # ---------- Inputs ----------
-PERIODS = ["this_year","last_year","this_quarter","last_quarter"]
-period = st.selectbox("Periode", PERIODS, index=0)
+PERIODS = ["this_week","last_week","this_month","last_month","this_quarter","last_quarter","this_year","last_year"]
+period = st.selectbox("Periode", PERIODS, index=4)
 
 # ---------- Helpers ----------
-TZ = pytz.timezone("Europe/Amsterdam")
-ALL_IDS = list(SHOP_NAME_MAP.keys())
+TZ     = pytz.timezone("Europe/Amsterdam")
+TODAY  = datetime.now(TZ).date()
+ALL_ID = list(SHOP_NAME_MAP.keys())
 METRICS = ["count_in","conversion_rate","turnover","sales_per_visitor","sq_meter"]
 
-def post_report(params):
+def step_for(period: str) -> str:
+    """Use day for week/month, month for quarter/year."""
+    if period.endswith("week") or period.endswith("month"):
+        return "day"
+    return "month"
+
+def prev_of(period: str) -> str | None:
+    m = {
+        "this_week":"last_week", "this_month":"last_month",
+        "this_quarter":"last_quarter", "this_year":"last_year"
+    }
+    return m.get(period)
+
+def post(params):
     r = requests.post(API_URL, params=params, timeout=45)
     r.raise_for_status()
     return r
 
 def add_effective_date(df: pd.DataFrame) -> pd.DataFrame:
     d = df.copy()
-    # prefer 'date' if present, else fallback to timestamp
+    if "date" not in d.columns:
+        d["date"] = pd.NaT
     ts = pd.to_datetime(d.get("timestamp"), errors="coerce")
-    d["date_eff"] = pd.to_datetime(d.get("date", ts), errors="coerce").dt.date
+    d["date_eff"] = pd.to_datetime(d["date"], errors="coerce").fillna(ts)
+    d["date_eff"] = d["date_eff"].dt.date
+    d["year"]  = pd.to_datetime(d["date_eff"]).dt.year
+    d["month"] = pd.to_datetime(d["date_eff"]).dt.month
     return d
 
-def fetch_df(shop_ids, period, step, metrics):
-    params = [("data", sid) for sid in shop_ids]
-    params += [("data_output", m) for m in metrics]
-    params += [("source","shops"), ("period", period), ("step", step)]
-    r = post_report(params)
+def fetch(period: str) -> pd.DataFrame:
+    params = [("data", sid) for sid in ALL_ID]
+    params += [("data_output", m) for m in METRICS]
+    params += [("source","shops"), ("period", period), ("step", step_for(period))]
+    r  = post(params)
     js = r.json()
-    df = normalize_vemcount_response(js, SHOP_NAME_MAP, kpi_keys=metrics)
-    return add_effective_date(df)
+    df = normalize_vemcount_response(js, SHOP_NAME_MAP, kpi_keys=METRICS)
+    df = add_effective_date(df)
+
+    # Exclude today for “this_*”
+    if period.startswith("this_"):
+        df = df[df["date_eff"] < TODAY]
+
+    # Forward-fill sq_meter per shop so sales/m² is defined
+    df = df.sort_values(["shop_id","date_eff"])
+    df["sq_meter"] = df.groupby("shop_id")["sq_meter"].ffill().bfill()
+    return df
 
 def fmt_eur0(x): return f"€{x:,.0f}".replace(",", ".")
 def fmt_eur2(x): return f"€{x:,.2f}".replace(",", ".")
 def fmt_pct2(x): return f"{x:.2f}%"
 
-# ---------- Data ophalen (maandstap om trends te zien) ----------
-raw = fetch_df(ALL_IDS, period, "month", METRICS)
-if raw.empty:
-    st.warning("Geen data gevonden voor deze periode.")
+def weighted_avg(series, weights):
+    w = weights.fillna(0.0); s = series.fillna(0.0)
+    d = w.sum()
+    return (s*w).sum()/d if d else np.nan
+
+# ---------- Get data ----------
+df = fetch(period)
+if df.empty:
+    st.warning("Geen data voor deze periode.")
     st.stop()
 
-# ---------- Aggregatie per winkel en maand (NO groupby.apply/reset_index) ----------
-# 1) sommen
-grp_sum = (
-    raw.groupby(["shop_id","date_eff"], as_index=False)
-       .agg(count_in=("count_in","sum"), turnover=("turnover","sum"))
-)
+# ---------- Portfolio KPIs ----------
+# Aggregate per shop (Σ traffic/turnover; conversie/SPV gewogen op traffic; laatste m²)
+g = df.groupby("shop_id", as_index=False).agg({"count_in":"sum","turnover":"sum"})
+w = df.groupby("shop_id").apply(lambda x: pd.Series({
+    "conversion_rate": weighted_avg(x["conversion_rate"], x["count_in"]),
+    "sales_per_visitor": weighted_avg(x["sales_per_visitor"], x["count_in"]),
+})).reset_index()
+g = g.merge(w, on="shop_id", how="left")
+sqm = (df.groupby("shop_id")["sq_meter"]
+         .apply(lambda s: float(s.dropna().iloc[-1]) if s.dropna().size else np.nan)
+         .reset_index())
+g = g.merge(sqm, on="shop_id", how="left")
+g["sales_per_sqm"] = np.where(g["sq_meter"]>0, g["turnover"]/g["sq_meter"], np.nan)
+g["shop_name"] = g["shop_id"].map(SHOP_NAME_MAP)
 
-# 2) gewogen sommen voorbereiden en aggregeren
-tmp = raw.copy()
-tmp["w"]      = tmp["count_in"].fillna(0.0)
-tmp["conv_w"] = tmp["conversion_rate"].fillna(0.0)   * tmp["w"]
-tmp["spv_w"]  = tmp["sales_per_visitor"].fillna(0.0) * tmp["w"]
+# Region totals / averages
+total_turn = g["turnover"].sum()
+avg_conv   = weighted_avg(g["conversion_rate"],   g["count_in"])
+avg_spv    = weighted_avg(g["sales_per_visitor"], g["count_in"])
+region_sqm = g["sq_meter"].fillna(0).sum()
+avg_spsqm  = (total_turn/region_sqm) if region_sqm>0 else np.nan
 
-grp_w = (
-    tmp.groupby(["shop_id","date_eff"], as_index=False)
-       .agg(w=("w","sum"), conv_w=("conv_w","sum"), spv_w=("spv_w","sum"))
-)
-
-agg = grp_sum.merge(grp_w, on=["shop_id","date_eff"], how="left")
-
-# 3) vaste m² per winkel (laatst bekende niet-NaN)
-sq = (
-    raw.sort_values("date_eff")
-       .groupby("shop_id")["sq_meter"]
-       .apply(lambda s: float(s.dropna().iloc[-1]) if s.dropna().size else np.nan)
-       .rename("sq_meter")
-       .reset_index()
-)
-agg = agg.merge(sq, on="shop_id", how="left")
-
-# 4) weighted metrics + sales_per_sqm
-agg["conversion_rate"]   = np.where(agg["w"]>0,   agg["conv_w"]/agg["w"], np.nan)
-agg["sales_per_visitor"] = np.where(agg["w"]>0,   agg["spv_w"]/agg["w"],  np.nan)
-agg["sales_per_sqm"]     = np.where(agg["sq_meter"]>0, agg["turnover"]/agg["sq_meter"], np.nan)
-agg["shop_name"]         = agg["shop_id"].map(SHOP_NAME_MAP)
-
-# ---------- Regionale KPI's ----------
-total_turn = agg["turnover"].sum()
-total_vis  = agg["count_in"].sum()
-total_sqm  = agg["sq_meter"].fillna(0).sum()
-
-# gewogen op bezoekers
-avg_conv  = (agg["conversion_rate"].fillna(0.0)   * agg["count_in"].fillna(0.0)).sum()
-avg_conv  = (avg_conv / total_vis) if total_vis > 0 else np.nan
-
-avg_spv   = (agg["sales_per_visitor"].fillna(0.0) * agg["count_in"].fillna(0.0)).sum()
-avg_spv   = (avg_spv / total_vis) if total_vis > 0 else np.nan
-
-avg_spsqm = (total_turn / total_sqm) if total_sqm > 0 else np.nan
-
-# ---------- KPI Cards ----------
+# KPI cards
 c1,c2,c3,c4 = st.columns(4)
 with c1:
     st.markdown(f"""<div class="kpi"><div class="t">💶 Totale omzet</div>
@@ -140,94 +146,64 @@ with c4:
 
 st.markdown("---")
 
-# ---------- Heatmap (sales/m² per winkel over tijd) ----------
+# ---------- 🔥 Sales/m² Heatmap per winkel (maanden) ----------
 st.subheader("🔥 Sales/m² Heatmap per winkel (maanden)")
-heat = agg.pivot_table(index="shop_name", columns="date_eff",
-                       values="sales_per_sqm", aggfunc="mean").sort_index()
-fig = px.imshow(
-    heat,
-    text_auto=".1f",
-    aspect="auto",
-    color_continuous_scale="Viridis",
-    labels=dict(x="Periode", y="Winkel", color="Sales/m²")
-)
-st.plotly_chart(fig, use_container_width=True)
+
+# Build monthly sales/m²: Σ omzet per shop per maand / laatste m² per shop
+monthly = (df.groupby(["shop_id","month"], as_index=False)
+             .agg(turnover=("turnover","sum"), sq_meter=("sq_meter","last")))
+monthly["sales_per_sqm"] = np.where(monthly["sq_meter"]>0,
+                                    monthly["turnover"]/monthly["sq_meter"], np.nan)
+monthly["shop_name"] = monthly["shop_id"].map(SHOP_NAME_MAP)
+
+# Pivot to heatmap (shops x months)
+hm = monthly.pivot(index="shop_name", columns="month", values="sales_per_sqm").sort_index()
+hm = hm.reindex(sorted(hm.columns), axis=1)
+
+if hm.isna().all(None):
+    st.info("Geen maanddata beschikbaar voor deze periode.")
+else:
+    fig = px.imshow(hm, color_continuous_scale="Viridis",
+                    labels=dict(color="€ / m²"),
+                    aspect="auto")
+    fig.update_layout(height=520, margin=dict(l=0,r=0,t=10,b=10))
+    st.plotly_chart(fig, use_container_width=True)
 
 st.markdown("---")
 
-# ---------- Leaderboard: Δ vs regio-gemiddelde sales/m² ----------
+# ---------- 🥇 vs regio-gemiddelde (sales/m²) ----------
 st.subheader("🏁 Leaderboard — sales/m² t.o.v. regio-gemiddelde")
 
-last_period = agg["date_eff"].max()
-snap = agg[agg["date_eff"] == last_period].copy()
+comp = g[["shop_name","sales_per_sqm"]].copy()
+comp["reg_avg_spsqm"] = avg_spsqm
+comp["Δ €/m²"] = comp["sales_per_sqm"] - comp["reg_avg_spsqm"]
+comp["Δ %"]   = np.where(comp["reg_avg_spsqm"]>0, (comp["Δ €/m²"]/comp["reg_avg_spsqm"])*100, np.nan)
+comp = comp.sort_values("Δ €/m²", ascending=False)
 
-snap["region_avg_spsqm"] = avg_spsqm
-snap["delta_eur_sqm"] = snap["sales_per_sqm"] - snap["region_avg_spsqm"]
-snap["delta_pct"] = np.where(
-    snap["region_avg_spsqm"] > 0,
-    (snap["delta_eur_sqm"] / snap["region_avg_spsqm"]) * 100.0,
-    np.nan
-)
+styled = (comp.rename(columns={"shop_name":"winkel","sales_per_sqm":"sales/m²","reg_avg_spsqm":"gem. sales/m² (regio)"})
+          .style.format({"sales/m²":"€{:.2f}","gem. sales/m² (regio)":"€{:.2f}","Δ €/m²":"€{:+.2f}","Δ %":"{:+.1f}%"})
+          .apply(lambda s: ["color:#22C55E" if v>0 else ("color:#F04438" if v<0 else "color:#6B7280")
+                            for v in s], subset=["Δ €/m²","Δ %"])
+         )
+st.dataframe(styled, use_container_width=True)
 
-sort_best_first = st.toggle("Beste afwijking eerst", value=True)
-snap = snap.sort_values("delta_eur_sqm", ascending=not sort_best_first)
+# ---------- 🤖 Mini AI summary ----------
+st.markdown("## 🤖 Portfolio Coach (samenvatting)")
+top_up  = comp.nlargest(3, "Δ €/m²")[["shop_name","Δ €/m²"]]
+top_down= comp.nsmallest(3, "Δ €/m²")[["shop_name","Δ €/m²"]]
 
-show = snap[["shop_name","sales_per_sqm","region_avg_spsqm","delta_eur_sqm","delta_pct"]].rename(columns={
-    "shop_name": "winkel",
-    "sales_per_sqm": "sales/m²",
-    "region_avg_spsqm": "gem. sales/m² (regio)",
-    "delta_eur_sqm": "Δ vs gem. (€/m²)",
-    "delta_pct": "Δ vs gem. (%)",
-})
+def list_lines(df):
+    return "<br>".join([f"• {r['shop_name']}: {fmt_eur2(r['Δ €/m²'])}/m²" for _,r in df.iterrows()])
 
-def color_delta(series):
-    styles = []
-    for v in series:
-        if pd.isna(v) or v == 0:
-            styles.append("color: #6B7280;")
-        elif v > 0:
-            styles.append("color: #22C55E;")
-        else:
-            styles.append("color: #F04438;")
-    return styles
-
-styler = (
-    show.style
-        .format({
-            "sales/m²": "€{:.2f}",
-            "gem. sales/m² (regio)": "€{:.2f}",
-            "Δ vs gem. (€/m²)": "€{:+.2f}",
-            "Δ vs gem. (%)": "{:+.1f}%"
-        })
-        .apply(color_delta, subset=["Δ vs gem. (€/m²)"])
-        .apply(color_delta, subset=["Δ vs gem. (%)"])
-)
-st.dataframe(styler, use_container_width=True)
-
-st.markdown("---")
-
-# ---------- 🤖 AI Portfolio Coach ----------
-st.subheader("🤖 AI Portfolio Coach")
-
-median_spsqm = agg.groupby("shop_name")["sales_per_sqm"].median().median()
-underperf = agg.groupby("shop_name")["sales_per_sqm"].median().sort_values().head(3)
-overperf  = agg.groupby("shop_name")["sales_per_sqm"].median().sort_values(ascending=False).head(3)
-
-cA, cB = st.columns(2)
-with cA:
-    st.markdown("**📉 Onderpresteerders (kandidaten herziening):**")
-    st.table(underperf.map(fmt_eur2))
-with cB:
-    st.markdown("**🚀 Sterke presteerders (opschalen of benchmarken):**")
-    st.table(overperf.map(fmt_eur2))
-
-st.markdown("""
-<div class="box">
-  <h4>AI Aanbevelingen</h4>
-  <ul>
-    <li>Winkels met <b>sales/m² &lt; regio-median</b> → check huurcontracten, routing en assortiment.</li>
-    <li>Gebruik top-3 winkels als <b>best practices</b> voor coaching en schappenplan.</li>
-    <li>Monitor heatmap op <b>doorlopende dalers</b> (3+ maanden): actieplan voor conversie en SPV.</li>
-  </ul>
-</div>
+st.markdown(f"""
+**Sterk t.o.v. regio-gemiddelde (€/m²):**<br>{list_lines(top_up)}<br><br>
+**Zwak t.o.v. regio-gemiddelde (€/m²):**<br>{list_lines(top_down)}<br><br>
+**Tip:** focus op winkels <span style="color:{PFM_RED};font-weight:600">onder</span> het gemiddelde; check conversie-uurtoppen en SPV-bundels.
 """, unsafe_allow_html=True)
+
+# ---------- Debug ----------
+with st.expander("🔧 Debug"):
+    st.write("period:", period, "step:", step_for(period))
+    st.write("df head:", df.head())
+    st.write("monthly head:", monthly.head())
+    st.write("agg per shop head:", g.head())
