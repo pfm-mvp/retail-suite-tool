@@ -44,7 +44,7 @@ NAME_TO_ID = {v:k for k,v in SHOP_NAME_MAP.items()}
 ID_TO_NAME = {k:v for k,v in SHOP_NAME_MAP.items()}
 
 store_name = st.selectbox("Kies winkel", list(NAME_TO_ID.keys()), index=0)
-store_id = NAME_TO_ID[store_name]
+store_id   = NAME_TO_ID[store_name]
 
 METRICS = ["count_in","conversion_rate","turnover","sales_per_visitor"]
 TZ = pytz.timezone("Europe/Amsterdam")
