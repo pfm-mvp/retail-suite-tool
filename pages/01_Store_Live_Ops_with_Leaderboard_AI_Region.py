@@ -208,17 +208,28 @@ st.markdown("---")
 # ───────────────────── Leaderboard (WTD t/m gisteren) ──────────────────────────
 all_ids = list(ID_TO_NAME.keys())
 
-def fetch_wtd(period):
-    df, p, s, dbg = fetch_df(all_ids, period, "day", METRICS, label=f"wtd:{period}")
-    total_before = len(df)
-    df = df[df.get("date_eff") < TODAY]
-    return df, p, s, dbg, total_before, len(df)
+def fetch_wtd(period, label="wtd"):
+    df, p, s = fetch_df(all_ids, period, "day", METRICS)
+    df = df[df["date_eff"] < TODAY]
+    return df, p, s, {"label": label, "n_rows": len(df), "date_min": str(df["date_eff"].min()) if not df.empty else None,
+                      "date_max": str(df["date_eff"].max()) if not df.empty else None}
 
-df_this, p_this, s_this, dbg_this, rows_before_this, rows_after_this = fetch_wtd("this_week")
-df_last, p_last, s_last, dbg_last, rows_before_last, rows_after_last = fetch_wtd("last_week")
+df_this, p_this, s_this, dbg_this = fetch_wtd("this_week", "this_week")
+df_last, p_last, s_last, dbg_last = fetch_wtd("last_week", "last_week")
 
 st.subheader("🏁 Leaderboard — huidige week (t/m gisteren)")
 rank_choice = st.radio("Ranking op basis van", ["Conversie", "SPV"], horizontal=True, index=0)
+
+# ... (rest blijft gelijk)
+
+# ────────────────────────────── Debug (optioneel) ───────────────────────────────
+with st.expander("🔧 Debug — API calls"):
+    st.write("Cards call params:", p_cards, "| status:", status_cards)
+    st.json(dbg_cards)   # extra info over cards call
+    st.write("Leaderboard this_week params:", p_this, "| status:", s_this)
+    st.json(dbg_this)
+    st.write("Leaderboard last_week params:", p_last, "| status:", s_last)
+    st.json(dbg_last)
 
 def wtd_agg(d: pd.DataFrame) -> pd.DataFrame:
     if d is None or d.empty: return pd.DataFrame()
