@@ -155,72 +155,140 @@ with c4:
 
 st.markdown("---")
 
-# ── Uur-Heatmap: gemiddelde per uur in de gekozen periode ──────────────────────
-st.subheader("⏱️ Uur-heatmap per winkel (gemiddeld in periode)")
+# ───────────────────────── KPI-keuze + openingstijden + heatmap ─────────────────────────
+st.subheader("📊 Uurprofiel — heatmap")
 
-# KPI kolom bepalen
-if kpi_choice == "Sales/m²":
-    df["sales_per_sqm"] = np.where(df["sq_meter"]>0, df["turnover"]/df["sq_meter"], np.nan)
-    value_col = "sales_per_sqm"
-    colorbar_title = "€ / m²"
-elif kpi_choice == "Conversie":
-    value_col = "conversion_rate"
-    colorbar_title = "%"
-else:  # SPV
-    value_col = "sales_per_visitor"
-    colorbar_title = "€ / bezoeker"
+# 1) KPI-keuze
+KPI_CHOICES = {
+    "Sales per m²": "sales_per_sqm",           # wordt zo nodig berekend
+    "Conversie": "conversion_rate",            # gewogen op traffic
+    "SPV (sales/visitor)": "sales_per_visitor" # wordt zo nodig berekend
+}
+kpi_label = st.selectbox("Kies KPI", list(KPI_CHOICES.keys()), index=0, key="kpi_heat")
+kpi_key   = KPI_CHOICES[kpi_label]
 
-# Alleen openingstijden tonen: mask buiten range naar NaN (blijft wit)
-if "hour" in df.columns:
-    df.loc[(df["hour"] < open_from) | (df["hour"] > open_to), value_col] = np.nan
-else:
-    df["hour"] = np.nan  # failsafe
-
-# Gemiddelde per shop per uur
-heat = (
-    df.groupby(["shop_id","hour"], as_index=False)
-      .agg(val=(value_col, "mean"))
+# 2) Openingstijden-slider (inclusief start, exclusief einduur)
+open_start, open_end = st.slider(
+    "Openingstijden (uur, lokaal)",
+    min_value=0, max_value=24, value=(10, 18), step=1, key="open_hours_slider"
 )
-heat["shop_name"] = heat["shop_id"].map(ID_TO_NAME)
 
-# Zorg dat alle uren 0..23 aanwezig zijn (ook als NaN) zodat as compleet is
-full_hours = pd.DataFrame({"hour": list(range(24))})
-shops = heat["shop_id"].unique()
-completed = []
-for sid in shops:
-    h_s = heat[heat["shop_id"]==sid][["hour","val"]].merge(full_hours, on="hour", how="right")
-    h_s["shop_id"] = sid
-    h_s["shop_name"] = ID_TO_NAME.get(sid, str(sid))
-    completed.append(h_s)
-heat = pd.concat(completed, ignore_index=True)
-
-# Pivot: rijen = shop_name, kolommen = hour
-hm = heat.pivot(index="shop_name", columns="hour", values="val").sort_index()
-
-# Kleurschaal (PFM gradient)
-pfm_colorscale = ["#21114E", "#5B167E", "#922B80", "#CC3F71", "#F56B5C", "#FEAC76"]
-
-if hm.isna().all(None):
-    st.info("Geen uurdata beschikbaar voor deze selectie.")
+# 3) Zorg voor een robuuste hour-kolom in lokale tijd
+df_hsrc = df.copy()
+if "hour" not in df_hsrc.columns:
+    # timestamp -> Europe/Amsterdam uur
+    ts = pd.to_datetime(df_hsrc.get("timestamp"), errors="coerce", utc=True)
+    # ts is nu UTC tz-aware; converteer naar Amsterdam en haal uur
+    df_hsrc["hour"] = ts.dt.tz_convert("Europe/Amsterdam").dt.hour
 else:
-    fig = px.imshow(
-        hm,
-        color_continuous_scale=pfm_colorscale,
-        labels=dict(color=colorbar_title),
-        aspect="auto",
-    )
-    fig.update_layout(
-        height=560,
-        margin=dict(l=0, r=0, t=10, b=10),
-        coloraxis_colorbar=dict(title=colorbar_title),
-    )
-    st.plotly_chart(fig, use_container_width=True)
+    # Forceer int en range-beperking 0..23
+    df_hsrc["hour"] = pd.to_numeric(df_hsrc["hour"], errors="coerce").fillna(-1).astype(int)
+    df_hsrc = df_hsrc[(df_hsrc["hour"] >= 0) & (df_hsrc["hour"] <= 23)]
 
-# Tooltip / uitleg
+# 4) Hulpfunctie: filter urenvenster (ook als het over middernacht loopt)
+def in_window(h: pd.Series, start: int, end: int) -> pd.Series:
+    # inclusieve start, exclusieve eind (zoals openingstijden meestal)
+    if start == end:
+        # 24u open -> geen filter
+        return pd.Series([True] * len(h), index=h.index)
+    if start < end:
+        return (h >= start) & (h < end)
+    else:
+        # over middernacht, b.v. 20 → 3
+        return (h >= start) | (h < end)
+
+mask = in_window(df_hsrc["hour"], open_start, open_end)
+df_hsrc = df_hsrc[mask]
+
+# 5) KPI-afleidingen (indien nodig)
+#    - SPV = turnover / count_in
+#    - Sales per m² = turnover / sq_meter (laatste bekende/typisch constante waarde per shop)
+if "sales_per_visitor" not in df_hsrc.columns or df_hsrc["sales_per_visitor"].isna().all():
+    df_hsrc["sales_per_visitor"] = np.where(
+        df_hsrc["count_in"] > 0, df_hsrc["turnover"] / df_hsrc["count_in"], np.nan
+    )
+
+def last_non_null(s):
+    s = s.dropna()
+    return s.iloc[-1] if len(s) else np.nan
+
+if "sales_per_sqm" not in df_hsrc.columns or df_hsrc["sales_per_sqm"].isna().all():
+    # neem per rij een benadering, maar we aggregeren per shop+uur straks toch opnieuw
+    # en gebruiken dan de som(omzet) / (laatste niet-nul m² per shop)
+    pass  # we rekenen dit pas in de aggregator hieronder
+
+# 6) Aggregatie per shop+uur volgens KPI
+def agg_for_kpi(block: pd.DataFrame, kpi: str) -> float:
+    if kpi == "conversion_rate":
+        w = block["count_in"].fillna(0)
+        conv = block["conversion_rate"].fillna(0)
+        denom = w.sum()
+        return float((conv * w).sum() / denom) if denom > 0 else np.nan
+
+    if kpi == "sales_per_visitor":
+        # som omzet / som bezoekers
+        turn = block["turnover"].sum(skipna=True)
+        vis  = block["count_in"].sum(skipna=True)
+        return float(turn / vis) if vis > 0 else np.nan
+
+    if kpi == "sales_per_sqm":
+        # som omzet / (laatste bekende m² voor die shop in de block)
+        turn = block["turnover"].sum(skipna=True)
+        sqm  = last_non_null(block.get("sq_meter", pd.Series(dtype=float)))
+        # val terug op gemiddelde m² als laatste niet beschikbaar is
+        if (pd.isna(sqm) or sqm == 0) and "sq_meter" in block.columns:
+            sqm = block["sq_meter"].replace(0, np.nan).mean()
+        return float(turn / sqm) if (pd.notna(sqm) and sqm > 0) else np.nan
+
+    # fallback
+    return float(block[kpi].mean(skipna=True))
+
+agg = (
+    df_hsrc
+    .groupby(["shop_id", "shop_name", "hour"], as_index=False)
+    .apply(lambda g: pd.Series({ "value": agg_for_kpi(g, kpi_key) }))
+)
+
+# 7) Kolomvolgorde alleen gekozen uren
+if open_start == open_end:
+    # 24u open (geen beperking)
+    hours_order = list(range(0, 24))
+elif open_start < open_end:
+    hours_order = list(range(open_start, open_end))
+else:
+    hours_order = list(range(open_start, 24)) + list(range(0, open_end))
+
+# 8) Pivot -> heatmapmatrix (shop x uur)
+matrix = (
+    agg.pivot(index="shop_name", columns="hour", values="value")
+    .reindex(columns=hours_order)
+    .sort_index()
+)
+
+# 9) Titel/eenheid
+unit = {
+    "conversion_rate": "%",
+    "sales_per_visitor": "€",
+    "sales_per_sqm": "€"
+}.get(kpi_key, "")
+
+title = f"{kpi_label} per uur (alleen {open_start}:00–{open_end}:00)"
+
+# 10) Plotly express heatmap
+import plotly.express as px
+fig = px.imshow(
+    matrix,
+    labels=dict(x="hour", y="shop_name", color=unit),
+    aspect="auto",
+    color_continuous_scale="Magma"  # kies je eigen palette
+)
+fig.update_layout(title=title, height=520)
+st.plotly_chart(fig, use_container_width=True)
+
+# Kleine toelichting
 st.caption(
-    "Tip: de heatmap toont het **gemiddelde per uur** in de gekozen periode. "
-    "Witte vakken = buiten openingstijden of geen data. "
-    f"KPI = **{kpi_choice}**. Pas de openingstijden-slider aan om ‘dode uren’ te maskeren."
+    "De heatmap toont alleen de door jou gekozen openingstijden. "
+    "Voor **Conversie** is gewogen gemiddeld per uur (gewogen op traffic)."
 )
 
 # ── Debug ──────────────────────────────────────────────────────────────────────
