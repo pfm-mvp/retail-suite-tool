@@ -5,8 +5,6 @@ import requests
 import numpy as np
 import pandas as pd
 import streamlit as st
-st.caption(f"Loaded shops: {len(ID_TO_NAME)}")
-# st.write(list(ID_TO_NAME.items())[:5])  # desnoods even kijken
 
 # ---------- Imports / mapping ----------
 sys.path.append(os.path.abspath(os.path.dirname(__file__) + '/../'))
@@ -14,6 +12,9 @@ sys.path.append(os.path.abspath(os.path.dirname(__file__) + '/../'))
 # ✅ Use the helper (do NOT rebuild dicts yourself)
 from helpers_shop import ID_TO_NAME, NAME_TO_ID   # {id->name}, {name->id}
 from helpers_normalize import normalize_vemcount_response
+
+st.caption(f"Loaded shops: {len(ID_TO_NAME)}")
+# st.write(list(ID_TO_NAME.items())[:5])  # desnoods even kijken
 
 st.set_page_config(page_title="Store Live Ops — Gisteren vs Eergisteren + Leaderboard",
                    page_icon="🛍️", layout="wide")
