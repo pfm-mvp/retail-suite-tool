@@ -1,4 +1,3 @@
-# pages/01_Store_Live_Ops_with_leaderboard_ai.py
 import os, sys, math
 from datetime import datetime
 import pytz
@@ -7,50 +6,50 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-# ---------------- Path & imports ----------------
+# ---------- Imports / mapping ----------
 sys.path.append(os.path.abspath(os.path.dirname(__file__) + '/../'))
-
-# 1) Probeer helpers_shop (nieuwe manier)
-H_ID_TO_NAME, H_NAME_TO_ID = {}, {}
-try:
-    from helpers_shop import ID_TO_NAME as H_ID_TO_NAME, NAME_TO_ID as H_NAME_TO_ID
-except Exception:
-    H_ID_TO_NAME, H_NAME_TO_ID = {}, {}
-
-# 2) Zo niet, val terug op shop_mapping (ondersteunt oud en nieuw formaat)
-ID_TO_NAME, NAME_TO_ID = H_ID_TO_NAME, H_NAME_TO_ID
-if not NAME_TO_ID:
-    try:
-        from shop_mapping import SHOP_NAME_MAP as RAW_MAP
-        # RAW_MAP kan zijn:
-        # - {int: "Naam"}  (oud)
-        # - {int: {"name": "Naam", "region": "Regio", ...}} (nieuw)
-        first_val = next(iter(RAW_MAP.values()))
-        if isinstance(first_val, dict):
-            ID_TO_NAME = {sid: (meta.get("name") or str(sid)) for sid, meta in RAW_MAP.items()}
-        else:
-            ID_TO_NAME = dict(RAW_MAP)  # int -> naam
-        NAME_TO_ID = {name: sid for sid, name in ID_TO_NAME.items()}
-    except Exception:
-        ID_TO_NAME, NAME_TO_ID = {}, {}
-
+from helpers_shop import ID_TO_NAME, NAME_TO_ID     # gebruik helpers_shop als bron
 from helpers_normalize import normalize_vemcount_response
 
-# ---------------- Page setup ----------------
 st.set_page_config(page_title="Store Live Ops — Gisteren vs Eergisteren + Leaderboard",
                    page_icon="🛍️", layout="wide")
 st.title("🛍️ Store Live Ops — Gisteren vs Eergisteren + Leaderboard")
 
 API_URL = st.secrets["API_URL"]
 
-# ---------------- Guards & picker ----------------
+# ---- Sanity: zijn er winkels? ----
 if not NAME_TO_ID:
     st.error("Geen winkels geladen (NAME_TO_ID is leeg). Controleer helpers_shop.py of shop_mapping.py.")
     st.stop()
 
-store_options = sorted(list(ID_TO_NAME.values()))
+# ---------- Colors ----------
+PFM_RED = "#F04438"
+PFM_GREEN = "#22C55E"
+PFM_PURPLE = "#6C4EE3"
+PFM_GRAY = "#6B7280"
+PFM_GRAY_BG = "rgba(107,114,128,.10)"
+
+# ---------- Small CSS for cards ----------
+st.markdown(f"""
+<style>
+.kpi-card {{ border: 1px solid #EEE; border-radius: 14px; padding: 18px 18px 14px 18px; }}
+.kpi-title {{ color:#0C111D; font-weight:600; font-size:16px; margin-bottom:8px; }}
+.kpi-value {{ font-size:40px; font-weight:800; line-height:1.1; margin-bottom:6px; }}
+.kpi-delta {{ font-size:14px; font-weight:700; padding:4px 10px; border-radius:999px; display:inline-block; }}
+.kpi-delta.up {{ color:{PFM_GREEN}; background: rgba(34,197,94,.10); }}
+.kpi-delta.down {{ color:{PFM_RED}; background: rgba(240,68,56,.10); }}
+.kpi-delta.flat {{ color:{PFM_GRAY}; background: {PFM_GRAY_BG}; }}
+.lb-card {{ border: 1px dashed #DDD; border-radius: 12px; padding: 12px 14px; margin-bottom: 8px; background: #FAFAFC; }}
+.lb-title {{ font-size:14px; color:#0C111D; font-weight:600; }}
+.lb-val {{ font-size:18px; font-weight:800; }}
+</style>
+""", unsafe_allow_html=True)
+
+# ---- Enkelvoudige, correcte selectbox (toon namen, map naar id) ----
+store_options = sorted(ID_TO_NAME.values())           # ['Amersfoort', ...]
 store_name    = st.selectbox("Kies winkel", store_options, index=0)
-store_id      = NAME_TO_ID.get(store_name)
+store_id      = NAME_TO_ID.get(store_name)            # int id
+
 if store_id is None:
     st.error("Kon de geselecteerde winkel niet mappen naar een ID.")
     st.stop()
