@@ -112,18 +112,22 @@ conv_f_base = (base["conversion_rate"] / 100.0).clip(lower=0.0, upper=1.0)
 base["ATV"] = np.where(conv_f_base > 0, base["sales_per_visitor"] / conv_f_base, 0.0)
 
 # ── Scenario ───────────────────────────────────────────────────────────────────
-# nieuwe conversie (pp → % → fractie)
-conv_f_new = ((base["conversion_rate"] + conv_add_pp) / 100.0).clip(lower=0.0, upper=1.0)
-# nieuwe ATV na uplift
-ATV_new = base["ATV"] * (1.0 + atv_uplift_pct)
-# nieuwe SPV = nieuwe conversie × nieuwe ATV
-spv_new = conv_f_new * ATV_new
-# basis SPV (zou ~ base["sales_per_visitor"] moeten zijn)
-spv_base = conv_f_base * base["ATV"]
+# Compute ATV from SPV and conversion: SPV = conv * ATV  =>  ATV = SPV/conv
+base["ATV"] = np.where(base["conversion_rate"] > 0,
+                       base["sales_per_visitor"] / base["conversion_rate"],
+                       0.0)
 
-# extra omzet & brutowinst
-extra_rev = base["count_in"] * (spv_new - spv_base)
-extra_gp  = extra_rev * gross_margin
+# ✅ Nieuwe conversie (in procentpunten, pp)
+new_conv = base["conversion_rate"] + conv_add
+
+# Nieuwe SPV = nieuwe conversie × ATV × (1 + SPV uplift)
+new_spv = new_conv * base["ATV"] * (1 + spv_uplift)
+
+# Extra omzet = aantal bezoekers × (nieuw SPV – huidig SPV)
+extra_rev = base["count_in"] * (new_spv - base["sales_per_visitor"])
+
+# Extra brutowinst
+extra_gp = extra_rev * gross_margin
 
 # ── Payback/ROI ────────────────────────────────────────────────────────────────
 stores = len(base)
