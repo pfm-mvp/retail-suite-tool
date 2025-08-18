@@ -290,81 +290,76 @@ styler = (
 )
 st.dataframe(styler, use_container_width=True)
 
-# ───────── UUR-HEATMAP (proto in dezelfde pagina) ─────────
-with st.expander("🔥 Uur-heatmap (proto) — vergelijk max 30 winkels", expanded=False):
-    cA, cB, cC = st.columns([1, 1, 1.2])
-    with cA:
-        kpi_heat = st.selectbox("KPI voor heatmap", 
-                                ["sales_per_sqm","conversion_rate","sales_per_visitor"],
-                                index=0, key="p03_heat_kpi")
-    with cB:
-        hour_min, hour_max = st.slider("Toon uren (openingstijden)", 0, 23, (10, 18), step=1, key="p03_hour_range")
-    with cC:
-        # standaard de “beste” 6 winkels op basis van omzet voor overzicht
-        top_default = base.sort_values("turnover", ascending=False)["shop_name"].head(6).tolist()
-        sel_names = st.multiselect("Vergelijk winkels", 
-                                   base["shop_name"].tolist(),
-                                   default=top_default, 
-                                   max_selections=30,
-                                   key="p03_heat_shops")
-    if not sel_names:
-        st.info("Kies ≥1 winkel om de heatmap te tonen.")
-        st.stop()
+# ── UUR-INZICHT (PROTO) — heatmap per uur per winkel ───────────────────────────
+st.subheader("⏱️ Uur-heatmap per winkel")
 
-    sel_ids = base[base["shop_name"].isin(sel_names)]["shop_id"].tolist()
+# Zorg dat we een 'hour' kolom hebben en filter op openingstijden
+df_hr = df.copy()
+if "hour" not in df_hr.columns:
+    # herleid uur uit timestamp indien nodig
+    df_hr["hour"] = pd.to_datetime(df_hr.get("timestamp"), errors="coerce").dt.hour
 
-    # Hourly pull (alleen voor de gekozen winkels om het lichter te houden)
-    df_hr, p_hr, s_hr = fetch_df(sel_ids, period, "hour", KPI_KEYS_HOURLY)
-    if period.startswith("this_"):
-        df_hr = df_hr[df_hr["date_only"] < TODAY]
+# filter op openingstijden (incl. grenzen)
+df_hr = df_hr[(df_hr["hour"] >= open_start) & (df_hr["hour"] <= open_end)]
 
-    if df_hr.empty:
-        st.info("Geen uurdataset voor de gekozen instellingen.")
-        st.stop()
+# Kies de KPI-kolom op basis van selectie
+val_col = kpi_key_map[kpi_sel]  # bijv. "turnover", "count_in", "conversion_rate", "sales_per_visitor"
 
-    # fix hour kolom
-    if "hour" not in df_hr.columns:
-        df_hr["hour"] = pd.to_datetime(df_hr["date_eff"], errors="coerce").dt.hour
+# Aggregatie-logica:
+# - additief (turnover, count_in): som per shop/uur
+# - rate/SPV: gemiddeld per shop/uur (optioneel: gewogen gemiddelde op count_in als je die voorkeur hebt)
+agg_func = "sum" if val_col in ("turnover", "count_in") else "mean"
 
-    # filter uren
-    df_hr = df_hr[(df_hr["hour"] >= hour_min) & (df_hr["hour"] <= hour_max)]
+hourly = (
+    df_hr.groupby(["shop_id", "hour"], as_index=False)
+         .agg(val=(val_col, agg_func))
+)
 
-    # voeg sq_meter per shop toe en bereken sales_per_sqm per uur
-    sqm_map = base.set_index("shop_id")["sq_meter"]
-    df_hr["sq_meter"] = df_hr["shop_id"].map(sqm_map)
-    df_hr["sales_per_sqm"] = np.where(df_hr["sq_meter"]>0, df_hr["turnover"]/df_hr["sq_meter"], np.nan)
+# % van winkel-totaal alleen voor additieve KPIs (anders heeft 'aandeel' weinig betekenis)
+if val_col in ("turnover", "count_in"):
+    totals = hourly.groupby("shop_id")["val"].transform("sum")
+    hourly["val_pct"] = np.where(totals > 0, 100.0 * hourly["val"] / totals, np.nan)
+else:
+    hourly["val_pct"] = np.nan
 
-    # maak de te plotten waarde
-    val_col = kpi_heat
-    # normaliseer per winkel naar % van eigen piek: goed om "dead hours" te spotten
-    def per_shop_pct(g: pd.DataFrame, col: str):
-        v = g[col].astype(float)
-        mx = v.max(skipna=True)
-        return (v / mx * 100.0) if (mx and not pd.isna(mx) and mx>0) else np.zeros(len(g))
-    df_hr["val_pct"] = df_hr.groupby("shop_id").apply(lambda g: per_shop_pct(g, val_col)).reset_index(level=0, drop=True)
+hourly["shop_name"] = hourly["shop_id"].map(ID_TO_NAME)
 
-    # alleen geselecteerde winkels en kolommen
-    plot_df = df_hr[df_hr["shop_id"].isin(sel_ids)][["shop_id","shop_name","hour","val_pct"]].copy()
-    # Sorteer shops op totale omzet (volgorde in heatmap)
-    order_names = base.sort_values("turnover", ascending=False)["shop_name"].tolist()
-    plot_df["shop_name"] = pd.Categorical(plot_df["shop_name"], categories=order_names, ordered=True)
+# Zorg dat alle uren in de gekozen range als kolommen bestaan (leeg = NaN)
+all_hours = list(range(open_start, open_end + 1))
+hm = (hourly.pivot(index="shop_name", columns="hour", values="val")
+             .reindex(columns=all_hours))
 
-    # categorievolgorde voor uren (beperk tot gekozen range)
-    hour_ticks = list(range(hour_min, hour_max+1))
-    plot_df["hour"] = pd.Categorical(plot_df["hour"], categories=hour_ticks, ordered=True)
+# Heatmap renderen
+import plotly.express as px
 
+# PFM-kleuren (zelfde volgorde als eerder)
+pfm_colorscale = ["#21114E", "#5B167E", "#922B80", "#CC3F71", "#F56B5C", "#FEAC76"]
+
+if hm.isna().all(None):
+    st.info("Geen uurdata beschikbaar voor deze combinatie van periode/regio/openingstijden.")
+else:
+    # x-as als strings met "u"
+    hm.columns = [f"{int(h)}u" for h in hm.columns]
     fig = px.imshow(
-        plot_df.pivot_table(index="shop_name", columns="hour", values="val_pct", aggfunc="mean").sort_index(),
-        color_continuous_scale="Magma",
-        origin="lower",
+        hm,
         aspect="auto",
-        labels=dict(color="%")
+        color_continuous_scale=pfm_colorscale,
+        labels=dict(color=kpi_sel),
     )
-    fig.update_layout(height=540, margin=dict(l=10,r=10,t=10,b=10), coloraxis_colorbar_title="%")
+    fig.update_layout(
+        height=520,
+        margin=dict(l=0, r=0, t=10, b=10),
+        coloraxis_colorbar=dict(title=kpi_sel),
+    )
     st.plotly_chart(fig, use_container_width=True)
 
-    st.caption("Tip: kleur = % van eigen piek in de gekozen periode. Donker = ‘dead hours’ voor die winkel. "
-               "Schakel KPI om te kijken of het zit in traffic → conversie of in SPV/ATV.")
+    # Kleine uitleg/tooltip
+    with st.expander("ℹ️ Hoe lees je deze heatmap?"):
+        st.markdown(
+            "- Elke rij is een winkel; kolommen zijn uren binnen de gekozen openingstijden.\n"
+            "- **Kleurintensiteit** = hogere waarde van de gekozen KPI.\n"
+            "- Voor **omzet** en **bezoekers** is per uur ook het aandeel t.o.v. winkel-totaal berekend (voor de heatmap gebruiken we de absolute waarde)."
+        )
 
 # ───────── Debug (optioneel) ─────────
 with st.expander("🔧 Debug — API params"):
