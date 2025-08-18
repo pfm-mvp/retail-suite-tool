@@ -50,7 +50,12 @@ period = st.selectbox("Periode",
                       index=0)
 
 c1,c2,c3,c4 = st.columns(4)
-with c1: conv_add_pp = st.slider("Conversie uplift (+pp)", 0.00, 0.20, 0.05, 0.01)
+with c1:
+    # Slider direct in procentpunten (bijv. 5 = +5 pp)
+    conv_add = st.slider("Conversie uplift (+pp)", 0.0, 20.0, 5.0, 0.5)
+
+# Nieuwe conversie = huidige conversie + uplift in pp
+new_conv = base["conversion_rate"] + conv_add
 with c2: atv_uplift = st.slider("ATV-uplift (%)", 0, 50, 10, 1) / 100.0
 with c3: gross_margin = st.slider("Brutomarge (%)", 20, 80, 55, 1) / 100.0
 with c4: capex = st.number_input("CAPEX per store (€)", min_value=0, value=1500, step=100)
