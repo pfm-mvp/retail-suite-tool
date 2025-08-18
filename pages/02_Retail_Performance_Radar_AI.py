@@ -320,6 +320,13 @@ fig.update_layout(
 )
 st.plotly_chart(fig, use_container_width=True)
 
+st.caption("""
+ℹ️ **Hoe lees je deze radar:**  
+Conversie, SPV en Sales/m² zijn genormaliseerd naar 0–1 binnen deze regio/periode.  
+- Een **hoekig vlak** betekent dat de winkel duidelijke sterktes/zwaktes heeft.  
+- Een **rond vlak of stip** betekent dat de winkel overal ongeveer gelijk scoort.  
+""")
+
 # ---------- Tops & Flops ----------
 st.subheader("🏆 Tops & Flops")
 rank_spm = cur[["shop_name","sales_per_sqm","turnover","count_in","conversion_rate","sales_per_visitor"]].copy()
