@@ -243,6 +243,42 @@ def wtd_agg(d: pd.DataFrame) -> pd.DataFrame:
 agg_this = wtd_agg(df_this)
 agg_last = wtd_agg(df_last)
 
+# ==== Grote card: jouw positie op OMZET (vorige week) =========================
+def _eur0(x: float) -> str:
+    try:
+        return f"€{float(x):,.0f}".replace(",", ".")
+    except Exception:
+        return "€0"
+
+if agg_last is not None and not agg_last.empty:
+    # Rang op basis van week-omzet (desc)
+    agg_last = agg_last.copy()
+    agg_last["rank_turnover"] = agg_last["turnover"].rank(method="min", ascending=False).astype(int)
+
+    # Jouw winkel
+    me_last = agg_last.loc[agg_last["shop_id"] == store_id]
+    if not me_last.empty:
+        my_rank = int(me_last.iloc[0]["rank_turnover"])
+        my_turn = float(me_last.iloc[0]["turnover"])
+        n_shops = int(len(agg_last))
+
+        # Card renderen
+        st.markdown(
+            f"""
+            <div class="kpi-card" style="margin-top: 6px; margin-bottom: 12px;">
+              <div class="kpi-title">📊 Jouw omzetpositie (vorige week)</div>
+              <div class="kpi-value">#{my_rank} <span style="font-size:18px; font-weight:700; color:#6B7280;">van {n_shops}</span></div>
+              <span class="kpi-delta flat">{_eur0(my_turn)} totale weekomzet</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    else:
+        st.info("Geen omzetpositie voor vorige week voor deze winkel.")
+else:
+    st.info("Geen gegevens om de omzetpositie van vorige week te berekenen.")
+# ==============================================================================
+
 if agg_this.empty:
     with st.expander("🔧 WTD Debug (openen bij lege tabel)"):
         st.write("this_week (multi/fallback):", dbg_this)
