@@ -240,96 +240,75 @@ def wtd_agg(d: pd.DataFrame) -> pd.DataFrame:
     g["shop_name"] = g["shop_id"].map(ID_TO_NAME)
     return g
 
-# ───────────────────── Omzetpositie vorige week (nieuwe grote kaart) ─────────────────────
-# Gebruik reeds opgehaald df_last (period = last_week)
-wk_turn = pd.DataFrame()
-if not df_last.empty:
-    wk_turn = (df_last.groupby("shop_id", as_index=False)["turnover"].sum())
-    wk_turn["shop_name"] = wk_turn["shop_id"].map(ID_TO_NAME)
-    wk_turn = wk_turn.sort_values("turnover", ascending=False).reset_index(drop=True)
+# ── Omzetpositie vorige week (compacte card, 1x) ───────────────────────────────
+# Gebruik df_last (al opgehaald als: df_last, p_last, s_last, dbg_last)
+_last = df_last.copy()
+if not _last.empty:
+    grp = (
+        _last.groupby("shop_id", as_index=False)
+             .agg(turnover=("turnover", "sum"))
+    )
+    grp["shop_name"] = grp["shop_id"].map(ID_TO_NAME)
+    grp = grp.sort_values("turnover", ascending=False).reset_index(drop=True)
 
-if not wk_turn.empty and (wk_turn["turnover"].fillna(0).sum() > 0):
-    n_shops      = int(wk_turn["shop_id"].nunique())
-    leader_row   = wk_turn.iloc[0]
-    leader_name  = str(leader_row["shop_name"])
-    leader_turn  = float(leader_row["turnover"])
+    # Top en jouw winkel
+    top_turn = float(grp.iloc[0]["turnover"]) if len(grp) else 0.0
+    top_name = grp.iloc[0]["shop_name"] if len(grp) else "—"
 
-    me_row       = wk_turn[wk_turn["shop_id"] == store_id]
-    my_rank      = int(me_row.index[0]) + 1 if not me_row.empty else None
-    my_turn      = float(me_row["turnover"].values[0]) if not me_row.empty else 0.0
-    pct_vs_1     = (my_turn / leader_turn * 100.0) if leader_turn > 0 else 0.0
+    me = grp[grp["shop_id"] == store_id]
+    my_turn = float(me["turnover"].iloc[0]) if not me.empty else 0.0
+    my_rank = (int(me.index[0]) + 1) if not me.empty else None
+    n_shops = int(grp["shop_id"].nunique())
+
+    pct_vs_top = (my_turn / top_turn * 100.0) if top_turn > 0 else float("nan")
 
     def eur0(x): return f"€{x:,.0f}".replace(",", ".")
-    pct_badge    = f"{pct_vs_1:.0f}% van #{1} {leader_name}"
-    total_label  = f"{eur0(wk_turn['turnover'].sum())} totale weekomzet"
+    def pct0(x):
+        try:
+            return f"{x:.0f}%"
+        except:
+            return "—"
 
-    # zachte kaartstijl
-    st.markdown("""
-    <style>
-      .bigcard {border:1px solid #EEE; border-radius:16px; padding:18px 20px; background:#FAFAFC;}
-      .bigcard h3 {margin:0 0 14px 0;}
-      .pos {font-size:56px; font-weight:900; line-height:1;}
-      .ofn {font-size:22px; font-weight:700; color:#6B7280; margin-left:10px;}
-      .chip {display:inline-block; padding:8px 12px; border-radius:999px; font-weight:800; margin-right:8px;
-             background: rgba(34,197,94,.10); color:#22C55E; }
-      .chip.gray { background:rgba(107,114,128,.10); color:#6B7280; }
-    </style>
-    """, unsafe_allow_html=True)
-
-    c_full = st.container()
-    with c_full:
-        st.markdown(f"""
-        <div class="bigcard">
-          <h3>📊 Jouw omzetpositie <small>(vorige week)</small></h3>
-          <div>
-            <span class="pos">#{my_rank if my_rank else '–'}</span>
-            <span class="ofn">van {n_shops}</span>
+    # Kleine, strakke card
+    st.markdown(
+        f"""
+        <div style="
+            border:1px solid #EEE; border-radius:14px; padding:16px 18px;
+            background:#FBFBFD; margin:6px 0 18px 0;
+        ">
+          <div style="font-weight:700; font-size:16px; margin-bottom:8px;">
+            📊 Jouw omzetpositie <span style="color:#6B7280">(vorige week)</span>
           </div>
-          <div style="margin-top:14px;">
-            <span class="chip">{pct_badge}</span>
-            <span class="chip gray">{total_label}</span>
+
+          <div style="display:flex; align-items:baseline; gap:10px; margin-bottom:10px;">
+            <div style="font-size:48px; font-weight:900; line-height:1;">#{my_rank if my_rank else '—'}</div>
+            <div style="font-size:20px; color:#6B7280;">van {n_shops}</div>
+          </div>
+
+          <div style="display:flex; gap:10px; flex-wrap:wrap;">
+            <span style="
+              display:inline-block; padding:8px 12px; border-radius:999px;
+              background:rgba(34,197,94,.10); color:#22C55E; font-weight:700; font-size:14px;
+            ">
+              {pct0(pct_vs_top)} van #1 {top_name}
+            </span>
+
+            <span style="
+              display:inline-block; padding:8px 12px; border-radius:999px;
+              background:#F3F4F6; color:#0C111D; font-weight:700; font-size:14px;
+            ">
+              {eur0(my_turn)} (jouw weekomzet)
+            </span>
           </div>
         </div>
-        """, unsafe_allow_html=True)
+        """,
+        unsafe_allow_html=True
+    )
+
+# -- leaderbaord
 
 agg_this = wtd_agg(df_this)
 agg_last = wtd_agg(df_last)
-
-# ==== Grote card: jouw positie op OMZET (vorige week) =========================
-def _eur0(x: float) -> str:
-    try:
-        return f"€{float(x):,.0f}".replace(",", ".")
-    except Exception:
-        return "€0"
-
-if agg_last is not None and not agg_last.empty:
-    # Rang op basis van week-omzet (desc)
-    agg_last = agg_last.copy()
-    agg_last["rank_turnover"] = agg_last["turnover"].rank(method="min", ascending=False).astype(int)
-
-    # Jouw winkel
-    me_last = agg_last.loc[agg_last["shop_id"] == store_id]
-    if not me_last.empty:
-        my_rank = int(me_last.iloc[0]["rank_turnover"])
-        my_turn = float(me_last.iloc[0]["turnover"])
-        n_shops = int(len(agg_last))
-
-        # Card renderen
-        st.markdown(
-            f"""
-            <div class="kpi-card" style="margin-top: 6px; margin-bottom: 12px;">
-              <div class="kpi-title">📊 Jouw omzetpositie (vorige week)</div>
-              <div class="kpi-value">#{my_rank} <span style="font-size:18px; font-weight:700; color:#6B7280;">van {n_shops}</span></div>
-              <span class="kpi-delta flat">{_eur0(my_turn)} totale weekomzet</span>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    else:
-        st.info("Geen omzetpositie voor vorige week voor deze winkel.")
-else:
-    st.info("Geen gegevens om de omzetpositie van vorige week te berekenen.")
-# ==============================================================================
 
 if agg_this.empty:
     with st.expander("🔧 WTD Debug (openen bij lege tabel)"):
