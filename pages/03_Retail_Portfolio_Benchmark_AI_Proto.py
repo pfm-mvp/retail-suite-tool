@@ -1,140 +1,180 @@
 # pages/03_Retail_Portfolio_Benchmark_AI_Proto.py
 import os, sys
 from datetime import datetime
-import pandas as pd
+import pytz
+import requests
 import numpy as np
+import pandas as pd
 import streamlit as st
+import plotly.express as px
 
-# ── Imports uit projectroot ─────────────────────────────────────────────────────
+# ---------- Imports / mapping ----------
 sys.path.append(os.path.abspath(os.path.dirname(__file__) + '/../'))
-from helpers_shop import ID_TO_NAME, REGIONS, get_ids_by_region
+from helpers_shop import ID_TO_NAME, NAME_TO_ID, REGIONS, get_ids_by_region
 from helpers_normalize import normalize_vemcount_response
-from utils_pfmx import api_get_report, friendly_error, inject_css
 
-# ── Page config + styling ──────────────────────────────────────────────────────
-st.set_page_config(page_title="Retail Portfolio Benchmark — Proto", page_icon="🧪", layout="wide")
-inject_css()
-st.title("🧪 Retail Portfolio Benchmark — Proto (uurgemiddelden)")
+# ---------- Page ----------
+st.set_page_config(page_title="Portfolio Benchmark (AI) — Proto", page_icon="🧪", layout="wide")
+st.title("🧪 Portfolio Benchmark (AI) — Proto")
 
-# ── UI: periode + regio + KPI (ELKE widget heeft unieke key!) ──────────────────
-PERIODS = ["this_week","last_week","this_month","last_month","this_quarter","last_quarter"]
-period = st.selectbox("Periode", PERIODS, index=1, key="p3_period")
+API_URL = st.secrets["API_URL"]
 
-regio = st.selectbox("Regio", ["All"] + REGIONS, index=0, key="p3_region")
+# ---------- PFM-styling / colors ----------
+PFM_COLORSCALE = ["#21114E", "#5B167E", "#922B80", "#CC3F71", "#F56B5C", "#FEAC76"]  # brand
+PFM_GRAY = "#6B7280"
 
-KPI_KEYS = {
-    "Conversie (%)": "conversion_rate",
-    "SPV (€)": "sales_per_visitor",
-    "Omzet (€)": "turnover",
-    "Bezoekers": "count_in",
-}
-kpi_label = st.selectbox("KPI", list(KPI_KEYS.keys()), index=0, key="p3_kpi")
-kpi = KPI_KEYS[kpi_label]
+st.markdown("""
+<style>
+.kpi { border:1px solid #eee; border-radius:14px; padding:16px; }
+.kpi .t { font-weight:600; color:#0C111D; }
+.kpi .v { font-size:38px; font-weight:800; }
+.tip { color:#6B7280; font-size:13px; margin-top:6px; }
+</style>
+""", unsafe_allow_html=True)
 
-# ── Regio → shop selectie ──────────────────────────────────────────────────────
+# ---------- Inputs ----------
+TZ     = pytz.timezone("Europe/Amsterdam")
+TODAY  = datetime.now(TZ).date()
+
+PERIODS = ["this_week","last_week","this_month","last_month","this_quarter","last_quarter","this_year","last_year"]
+
+col1, col2, col3 = st.columns([1,1,1.2])
+with col1:
+    period = st.selectbox("Periode", PERIODS, index=1, key="proto_period")
+with col2:
+    regio = st.selectbox("Regio", ["All"] + REGIONS, index=0, key="proto_region")
+with col3:
+    # Openingstijden -> mask voor heatmap (alleen deze uren zichtbaar)
+    open_from, open_to = st.slider("Openingstijden (in uren, 24h)", 0, 23, (10, 18), 1, key="proto_opening_hours")
+    max_shops = st.slider("Max winkels in vergelijking", 5, 30, 30, 1, key="proto_max_shops")
+
+# Bepaal shop_ids o.b.v. regio
 if regio == "All":
-    sel_ids = list(ID_TO_NAME.keys())
+    SHOP_IDS = list(ID_TO_NAME.keys())
 else:
-    sel_ids = get_ids_by_region(regio) or list(ID_TO_NAME.keys())
+    SHOP_IDS = get_ids_by_region(regio) or list(ID_TO_NAME.keys())
 
-sel_names_default = [ID_TO_NAME[i] for i in sel_ids][:6]
-sel_names = st.multiselect(
-    "Winkels in vergelijking (max 8)",
-    [ID_TO_NAME[i] for i in sel_ids],
-    default=sel_names_default,
-    max_selections=8,
-    key="p3_shops"
+if not SHOP_IDS:
+    st.warning("Geen winkels gevonden (mapping/regio leeg).")
+    st.stop()
+
+# ---------- Helpers ----------
+def step_for(p: str) -> str:
+    # uurdata voor week/maand; dag/maand voor langere perioden
+    if p.endswith("week") or p.endswith("month"):
+        return "hour"
+    return "day"
+
+def post(params):
+    r = requests.post(API_URL, params=params, timeout=45)
+    r.raise_for_status()
+    return r
+
+def add_effective_date(df: pd.DataFrame) -> pd.DataFrame:
+    d = df.copy()
+    if "date" not in d.columns:
+        d["date"] = pd.NaT
+    ts = pd.to_datetime(d.get("timestamp"), errors="coerce")
+    d["date_eff"] = pd.to_datetime(d["date"], errors="coerce").fillna(ts)
+    # bewaar datetime voor uur-extractie; voor filters op “t/m gisteren” gebruiken we .dt.date
+    return d
+
+def fetch(shop_ids, period, metrics):
+    params = [("data", sid) for sid in shop_ids]
+    params += [("data_output", m) for m in metrics]
+    params += [("source","shops"), ("period", period), ("step", step_for(period))]
+    r = post(params)
+    js = r.json()
+    df = normalize_vemcount_response(js, ID_TO_NAME, kpi_keys=metrics)
+    df = add_effective_date(df)
+
+    # Alleen t/m gisteren als het een “this_*” periode is
+    ddate = ddate = pd.to_datetime(df["date_eff"], errors="coerce")
+    df = df.assign(date_eff=ddate, date_only=ddate.dt.date)
+    if period.startswith("this_"):
+        df = df[df["date_only"] < TODAY]
+
+    # hour kolom (0–23) voor heatmap
+    df["hour"] = pd.to_datetime(df["date_eff"], errors="coerce").dt.hour
+
+    # sq_meter netjes vullen per winkel
+    df = df.sort_values(["shop_id","date_eff"])
+    df["sq_meter"] = df.groupby("shop_id")["sq_meter"].ffill().bfill()
+    return df
+
+def fmt_eur2(x): return f"€{x:,.2f}".replace(",", ".")
+
+# ---------- Data ophalen ----------
+METRICS = ["count_in","conversion_rate","turnover","sales_per_visitor","sq_meter"]
+df = fetch(SHOP_IDS, period, METRICS)
+
+if df.empty:
+    st.info("Geen data beschikbaar voor deze periode/regio.")
+    st.stop()
+
+# ---------- Gemiddelde sales/m² per uur (per winkel) ----------
+# Som omzet per uur en deel door laatste/laatst bekende m² per winkel in periode
+# (alternatief zou omzet/m² per record zijn en dan middelen op traffic, maar voor overzicht is dit prima)
+agg = (
+    df.groupby(["shop_id","hour"], as_index=False)
+      .agg(turnover=("turnover","sum"), sq_meter=("sq_meter","last"))
 )
-shop_ids = [sid for sid, nm in ID_TO_NAME.items() if nm in sel_names]
-if not shop_ids:
-    st.warning("Selecteer ten minste één winkel.")
-    st.stop()
+agg["sales_per_sqm"] = np.where(agg["sq_meter"]>0, agg["turnover"]/agg["sq_meter"], np.nan)
+agg["shop_name"] = agg["shop_id"].map(ID_TO_NAME)
 
-# ── Data ophalen (step='hour') ─────────────────────────────────────────────────
-def fetch_hourly(shop_ids, period, metrics):
-    params = []
-    for sid in shop_ids:
-        params.append(("data", sid))
-    for m in metrics:
-        params.append(("data_output", m))
-    params += [("source","shops"), ("period", period), ("step","hour")]
-    js = api_get_report(params)
-    return js, params
+# ---------- Openingstijden-masker toepassen ----------
+# Behoud alleen uren binnen [open_from, open_to). Buiten dit venster -> NaN
+def mask_closed_hours(d: pd.DataFrame, h_from: int, h_to: int) -> pd.DataFrame:
+    x = d.copy()
+    ok = (x["hour"]>=h_from) & (x["hour"]<h_to)
+    x.loc[~ok, "sales_per_sqm"] = np.nan
+    return x
 
-js, params = fetch_hourly(shop_ids, period, metrics=["count_in","conversion_rate","turnover","sales_per_visitor"])
-if friendly_error(js, period):
-    st.stop()
+agg = mask_closed_hours(agg, open_from, open_to)
 
-df = normalize_vemcount_response(js, ID_TO_NAME, kpi_keys=["count_in","conversion_rate","turnover","sales_per_visitor"])
-if df is None or df.empty:
-    st.info("Geen data beschikbaar voor deze selectie.")
-    st.stop()
+# ---------- Selectie winkels (max_shops) ----------
+shops_sorted = (
+    agg.groupby(["shop_id","shop_name"], as_index=False)
+       .agg(total_turn=("turnover","sum"))
+       .sort_values("shop_name")
+)
+sel_shop_ids = shops_sorted["shop_id"].head(max_shops).tolist()
+agg = agg[agg["shop_id"].isin(sel_shop_ids)]
 
-# Zorg dat timestamp aanwezig is en hour te bepalen is
-ts = pd.to_datetime(df.get("timestamp"), errors="coerce")
-df = df.assign(hour=ts.dt.hour)
+# ---------- Heatmap bouwen ----------
+# Zorg dat alle gekozen uren als kolommen aanwezig zijn
+hours_range = list(range(open_from, open_to))  # inclusieve start, exclusieve end
+hm = (
+    agg.pivot(index="shop_name", columns="hour", values="sales_per_sqm")
+       .reindex(columns=hours_range)           # toon alleen openingstijden
+       .sort_index()
+)
 
-# ── Uurgemiddelden per winkel ──────────────────────────────────────────────────
-# Voor conversie/SPV nemen we een gewogen gemiddelde op basis van count_in
-def weighted_mean(x, value_col, weight_col):
-    v = x[value_col].astype(float)
-    w = x[weight_col].fillna(0).astype(float)
-    denom = w.sum()
-    return float((v * w).sum() / denom) if denom > 0 else float(v.mean())
-
-if kpi in ("conversion_rate", "sales_per_visitor"):
-    agg = (
-        df.groupby(["shop_id","shop_name","hour"])
-          .apply(lambda x: weighted_mean(x, kpi, "count_in"))
-          .reset_index(name=kpi)
-    )
+if hm.isna().all(None) or hm.empty:
+    st.info("Geen uurdata binnen de ingestelde openingstijden.")
 else:
-    # count_in en turnover: gemiddeld per uur (over de dagen) – kan ook som zijn,
-    # maar gemiddeld is handiger voor ‘typisch uur’
-    agg = (
-        df.groupby(["shop_id","shop_name","hour"], as_index=False)
-          .agg({kpi: "mean"})
-    )
-
-# ── Pivot: uren (0..23) als kolommen ───────────────────────────────────────────
-pivot = (
-    agg.pivot_table(index="shop_name", columns="hour", values=kpi, aggfunc="mean")
-       .reindex(columns=sorted(agg["hour"].dropna().unique()))
-)
-
-# Pretty format voor tabel
-def fmt_value(x):
-    if pd.isna(x): return ""
-    if kpi == "conversion_rate":
-        return f"{x:.2f}%"
-    if kpi == "sales_per_visitor":
-        return f"€{x:,.2f}".replace(",", ".")
-    if kpi == "turnover":
-        return f"€{x:,.0f}".replace(",", ".")
-    return f"{int(round(x)):,}".replace(",", ".")
-
-fmt_table = pivot.copy()
-fmt_table = fmt_table.applymap(fmt_value)
-
-st.subheader(f"📊 Uurgemiddelden — {kpi_label} (periode: {period.replace('_',' ')})")
-st.dataframe(fmt_table, use_container_width=True)
-
-# Optioneel: een heatmap (Plotly) voor snel visueel overzicht
-try:
-    import plotly.express as px
     fig = px.imshow(
-        pivot.fillna(np.nan),
-        labels=dict(x="Uur van de dag", y="Winkel", color=kpi_label),
-        x=pivot.columns, y=pivot.index,
-        aspect="auto", color_continuous_scale="Purples"
+        hm,
+        color_continuous_scale=PFM_COLORSCALE,
+        labels=dict(color="€ / m²"),
+        aspect="auto",
+        origin="upper",
     )
-    fig.update_layout(height=520, margin=dict(l=0,r=0,t=30,b=0))
-    st.plotly_chart(fig, use_container_width=True, key="p3_heatmap")
-except Exception:
-    pass
+    fig.update_layout(
+        height=560,
+        margin=dict(l=0, r=0, t=10, b=10),
+        coloraxis_colorbar=dict(title="€ / m²"),
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
-# ── Debug ──────────────────────────────────────────────────────────────────────
-with st.expander("🔧 Debug — API / sample", expanded=False):
-    st.write("Params (first 14):", params[:14], "…")
-    st.write("Rows:", len(df), "Shops:", df["shop_id"].nunique())
-    st.dataframe(df.head(10))
+# ---------- Kleine toelichting onder de heatmap ----------
+st.markdown(
+    f"""
+<div class="tip">
+ℹ️ Heatmap toont <b>gemiddelde sales per m² per uur</b> in “{period.replace('_',' ')}”
+voor regio <b>{regio}</b> ({len(sel_shop_ids)} winkels, max {max_shops}).
+Uren buiten de ingestelde openingstijden ({open_from}:00–{open_to}:00) worden verborgen.
+</div>
+""",
+    unsafe_allow_html=True,
+)
