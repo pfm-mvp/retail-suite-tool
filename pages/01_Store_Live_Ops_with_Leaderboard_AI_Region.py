@@ -241,7 +241,6 @@ def wtd_agg(d: pd.DataFrame) -> pd.DataFrame:
     return g
 
 # ── Omzetpositie vorige week (compacte card, 1x) ───────────────────────────────
-# Gebruik df_last (al opgehaald als: df_last, p_last, s_last, dbg_last)
 _last = df_last.copy()
 if not _last.empty:
     grp = (
@@ -251,7 +250,6 @@ if not _last.empty:
     grp["shop_name"] = grp["shop_id"].map(ID_TO_NAME)
     grp = grp.sort_values("turnover", ascending=False).reset_index(drop=True)
 
-    # Top en jouw winkel
     top_turn = float(grp.iloc[0]["turnover"]) if len(grp) else 0.0
     top_name = grp.iloc[0]["shop_name"] if len(grp) else "—"
 
@@ -264,43 +262,30 @@ if not _last.empty:
 
     def eur0(x): return f"€{x:,.0f}".replace(",", ".")
     def pct0(x):
-        try:
-            return f"{x:.0f}%"
-        except:
-            return "—"
+        try: return f"{x:.0f}%"
+        except: return "—"
 
-    # Kleine, strakke card
     st.markdown(
         f"""
-        <div style="
-            border:1px solid #EEE; border-radius:14px; padding:16px 18px;
-            background:#FBFBFD; margin:6px 0 18px 0;
-        ">
-          <div style="font-weight:700; font-size:16px; margin-bottom:8px;">
-            📊 Jouw omzetpositie <span style="color:#6B7280">(vorige week)</span>
-          </div>
+<div style="border:1px solid #EEE; border-radius:14px; padding:16px 18px; background:#FBFBFD; margin:6px 0 18px 0;">
+  <div style="font-weight:700; font-size:16px; margin-bottom:8px;">
+    📊 Jouw omzetpositie <span style="color:#6B7280">(vorige week)</span>
+  </div>
 
-          <div style="display:flex; align-items:baseline; gap:10px; margin-bottom:10px;">
-            <div style="font-size:48px; font-weight:900; line-height:1;">#{my_rank if my_rank else '—'}</div>
-            <div style="font-size:20px; color:#6B7280;">van {n_shops}</div>
-          </div>
+  <div style="display:flex; align-items:baseline; gap:10px; margin-bottom:10px;">
+    <div style="font-size:48px; font-weight:900; line-height:1;">#{my_rank if my_rank else '—'}</div>
+    <div style="font-size:20px; color:#6B7280;">van {n_shops}</div>
+  </div>
 
-          <div style="display:flex; gap:10px; flex-wrap:wrap;">
-            <span style="
-              display:inline-block; padding:8px 12px; border-radius:999px;
-              background:rgba(34,197,94,.10); color:#22C55E; font-weight:700; font-size:14px;
-            ">
-              {pct0(pct_vs_top)} van #1 {top_name}
-            </span>
-
-            <span style="
-              display:inline-block; padding:8px 12px; border-radius:999px;
-              background:#F3F4F6; color:#0C111D; font-weight:700; font-size:14px;
-            ">
-              {eur0(my_turn)} (jouw weekomzet)
-            </span>
-          </div>
-        </div>
+  <div style="display:flex; gap:10px; flex-wrap:wrap;">
+    <span style="display:inline-block; padding:8px 12px; border-radius:999px; background:rgba(34,197,94,.10); color:#22C55E; font-weight:700; font-size:14px;">
+      {pct0(pct_vs_top)} van #1 {top_name}
+    </span>
+    <span style="display:inline-block; padding:8px 12px; border-radius:999px; background:#F3F4F6; color:#0C111D; font-weight:700; font-size:14px;">
+      {eur0(my_turn)} (jouw weekomzet)
+    </span>
+  </div>
+</div>
         """,
         unsafe_allow_html=True
     )
