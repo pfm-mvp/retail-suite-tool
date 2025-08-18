@@ -108,8 +108,6 @@ base = wide.groupby(["shop_id","shop_name"], as_index=False).agg({
 # Conversie in fractie (0–1) en ATV afleiden
 # (SPV = conversie_f * ATV  →  ATV = SPV / conversie_f)
 conv_f_base = (base["conversion_rate"] / 100.0).clip(lower=0.0, upper=1.0)
-# voorkom delen door 0
-base["ATV"] = np.where(conv_f_base > 0, base["sales_per_visitor"] / conv_f_base, 0.0)
 
 # ── Scenario ───────────────────────────────────────────────────────────────────
 # Compute ATV from SPV and conversion: SPV = conv * ATV  =>  ATV = SPV/conv
