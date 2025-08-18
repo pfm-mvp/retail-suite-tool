@@ -9,28 +9,56 @@ import streamlit as st
 # ---------- Imports / mapping ----------
 sys.path.append(os.path.abspath(os.path.dirname(__file__) + '/../'))
 
-# Primary: robust helpers (works with old/new mapping formats)
-from helpers_shop import ID_TO_NAME as _ID_TO_NAME, NAME_TO_ID as _NAME_TO_ID
-# Fallback: raw mapping if helpers are empty for any reason
-try:
-    from shop_mapping import SHOP_NAME_MAP as _RAW_MAP
-except Exception:
-    _RAW_MAP = {}
+# ✅ Use the helper (do NOT rebuild dicts yourself)
+from helpers_shop import ID_TO_NAME, NAME_TO_ID   # {id->name}, {name->id}
+from helpers_normalize import normalize_vemcount_response
 
-# Derive store options
-store_options = sorted(ID_TO_NAME.values())
+st.set_page_config(page_title="Store Live Ops — Gisteren vs Eergisteren + Leaderboard",
+                   page_icon="🛍️", layout="wide")
+st.title("🛍️ Store Live Ops — Gisteren vs Eergisteren + Leaderboard")
 
-# If still empty, stop early with a clear message (prevents KeyError)
-if not store_options:
-    st.error("Geen winkels gevonden. Controleer 'shop_mapping.py' / 'helpers_shop.py'.")
+API_URL = st.secrets["API_URL"]
+
+# ---------- Colors ----------
+PFM_RED = "#F04438"
+PFM_GREEN = "#22C55E"
+PFM_PURPLE = "#6C4EE3"
+PFM_GRAY = "#6B7280"
+PFM_GRAY_BG = "rgba(107,114,128,.10)"
+
+# ---------- Small CSS for cards ----------
+st.markdown(f"""
+<style>
+.kpi-card {{ border: 1px solid #EEE; border-radius: 14px; padding: 18px 18px 14px 18px; }}
+.kpi-title {{ color:#0C111D; font-weight:600; font-size:16px; margin-bottom:8px; }}
+.kpi-value {{ font-size:40px; font-weight:800; line-height:1.1; margin-bottom:6px; }}
+.kpi-delta {{ font-size:14px; font-weight:700; padding:4px 10px; border-radius:999px; display:inline-block; }}
+.kpi-delta.up {{ color:{PFM_GREEN}; background: rgba(34,197,94,.10); }}
+.kpi-delta.down {{ color:{PFM_RED}; background: rgba(240,68,56,.10); }}
+.kpi-delta.flat {{ color:{PFM_GRAY}; background: {PFM_GRAY_BG}; }}
+.lb-card {{ border: 1px dashed #DDD; border-radius: 12px; padding: 12px 14px; margin-bottom: 8px; background: #FAFAFC; }}
+.lb-title {{ font-size:14px; color:#0C111D; font-weight:600; }}
+.lb-val {{ font-size:18px; font-weight:800; }}
+</style>
+""", unsafe_allow_html=True)
+
+# ---------- Safe shop selector ----------
+# If helper loaded correctly, these dicts are non-empty.
+if not NAME_TO_ID:
+    st.error("Geen winkels geladen uit helpers_shop.py (NAME_TO_ID is leeg). Check helpers_shop/SHOP_NAME_MAP.")
     st.stop()
 
-# Safe select (no KeyError when nothing is selected)
-store_name = st.selectbox("Kies winkel", store_options, index=0, placeholder="Selecteer een winkel")
-store_id = NAME_TO_ID.get(store_name)
+store_options = sorted(ID_TO_NAME.values())           # list of shop names
+default_ix     = 0 if store_options else None
+store_name     = st.selectbox("Kies winkel", store_options, index=default_ix)
+if not store_name:
+    st.warning("Selecteer een winkel.")
+    st.stop()
 
+# Map back to id
+store_id = NAME_TO_ID.get(store_name)
 if store_id is None:
-    st.error("Onbekende winkelselectie. Ververs de pagina of controleer de mapping.")
+    st.error(f"Kan id niet vinden voor winkel: {store_name}")
     st.stop()
 
 st.set_page_config(page_title="Store Live Ops — Gisteren vs Eergisteren + Leaderboard", page_icon="🛍️", layout="wide")
