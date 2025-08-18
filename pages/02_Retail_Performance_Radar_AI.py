@@ -238,67 +238,87 @@ st.markdown("---")
 
 # ---------- Radarvergelijking ----------
 st.subheader("📈 Radarvergelijking (Conversie / SPV / Sales per m²)")
-metric_cols = ["conversion_rate","sales_per_visitor","sales_per_sqm"]
 
-# Normalisatie robuust en per metric
-norm = cur[["shop_id","shop_name"] + metric_cols].copy()
-for m in metric_cols:
-    v = pd.to_numeric(norm[m], errors="coerce").replace([np.inf, -np.inf], np.nan)
-    vmin, vmax = v.min(skipna=True), v.max(skipna=True)
-    if pd.isna(vmin) or pd.isna(vmax) or vmax == vmin:
-        norm[m + "_norm"] = 0.0
-    else:
-        norm[m + "_norm"] = (v - vmin) / (vmax - vmin)
+# 1) Basis met ruwe metriek-kolommen
+metric_cols = ["conversion_rate", "sales_per_visitor", "sales_per_sqm"]
+norm_base = cur[["shop_id", "shop_name"] + metric_cols].copy()
 
-# Default selectie gevoed door regio (schakelbaar)
-use_region_for_radar = st.toggle("Gebruik regioselectie voor radar", value=True, key="radar_use_region")
-if use_region_for_radar and regio != "All":
-    region_ids = get_ids_by_region(regio) or []
-    default_names = [ID_TO_NAME.get(i) for i in region_ids if i in ID_TO_NAME]
-    # Max 6
-    default_names = default_names[:6] if default_names else list(ID_TO_NAME.values())[:6]
-else:
-    default_names = list(ID_TO_NAME.values())[:6]
+# 2) Default selectie = winkels van actuele regio (max 6). Kun je nog steeds wijzigen.
+region_names = [ID_TO_NAME[i] for i in ALL_IDS if i in ID_TO_NAME]
+default_names = region_names[:6] if region_names else list(ID_TO_NAME.values())[:6]
 
 sel_names = st.multiselect(
     "Vergelijk winkels (max 6)",
-    list(ID_TO_NAME.values()),
+    options=region_names if region_names else list(ID_TO_NAME.values()),
     default=default_names,
     max_selections=6,
-    key="radar_multiselect"
+    key=f"radar_multiselect_{regio}_{period}",   # key afhankelijk van filters → nette refresh
 )
-sel = norm[norm["shop_name"].isin(sel_names)]
 
-if not sel.empty:
-    categories = ["Conversie","SPV","Sales/m²"]
-    fig = go.Figure()
+# 3) Normaliseer **binnen de selectie** (niet over alle winkels) zodat de vormen leesbaar zijn
+sel_rows = norm_base[norm_base["shop_name"].isin(sel_names)].copy()
 
-    for i, (_, row) in enumerate(sel.iterrows()):
-        values = [
-            float(row.get("conversion_rate_norm", 0.0) or 0.0),
-            float(row.get("sales_per_visitor_norm", 0.0) or 0.0),
-            float(row.get("sales_per_sqm_norm", 0.0) or 0.0),
-        ]
-        color = PFM_PALETTE[i % len(PFM_PALETTE)]
-        fig.add_trace(go.Scatterpolar(
-            r=values + values[:1],
-            theta=categories + categories[:1],
-            fill='toself',
-            name=row["shop_name"],
-            line=dict(color=color, width=2),
-            fillcolor=hex_to_rgba(color, 0.22)  # nette ~20% transparantie
-        ))
+def _minmax_norm(df: pd.DataFrame, col: str) -> pd.Series:
+    v = pd.to_numeric(df[col], errors="coerce")
+    vmin, vmax = v.min(skipna=True), v.max(skipna=True)
+    if pd.isna(vmin) or pd.isna(vmax) or vmax == vmin:
+        return pd.Series([0.0] * len(df), index=df.index)
+    return (v - vmin) / (vmax - vmin)
 
-    fig.update_layout(
-        polar=dict(radialaxis=dict(visible=True, range=[0,1])),
-        legend=dict(orientation="v"),
-        margin=dict(l=10, r=10, t=10, b=10),
-        showlegend=True,
-        height=520
-    )
-    st.plotly_chart(fig, use_container_width=True)
+if not sel_rows.empty:
+    for m in metric_cols:
+        sel_rows[m + "_norm"] = _minmax_norm(sel_rows, m).fillna(0.0)
 else:
     st.info("Kies één of meer winkels om de radar te tonen.")
+    sel_rows = pd.DataFrame(columns=["shop_name"] + [m + "_norm" for m in metric_cols])
+
+# 4) Plotly radar met PFM-kleuren + transparant vlak
+PFM_RADAR_PALETTE = ["#21114E", "#5B167E", "#922B80", "#CC3F71", "#F56B5C", "#FEAC76"]
+
+def _hex_to_rgba(hex_color: str, alpha: float = 0.22) -> str:
+    hex_color = hex_color.lstrip("#")
+    r = int(hex_color[0:2], 16)
+    g = int(hex_color[2:4], 16)
+    b = int(hex_color[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha})"
+
+categories = ["Conversie", "SPV", "Sales/m²"]
+fig = go.Figure()
+
+for idx, (_, row) in enumerate(sel_rows.iterrows()):
+    color = PFM_RADAR_PALETTE[idx % len(PFM_RADAR_PALETTE)]
+    rgba  = _hex_to_rgba(color, 0.22)
+    values = [
+        float(row.get("conversion_rate_norm", 0.0)),
+        float(row.get("sales_per_visitor_norm", 0.0)),
+        float(row.get("sales_per_sqm_norm", 0.0)),
+    ]
+    # Sluit de vorm door het 1e punt opnieuw toe te voegen
+    fig.add_trace(go.Scatterpolar(
+        r=values + values[:1],
+        theta=categories + categories[:1],
+        name=row["shop_name"],
+        mode="lines+markers",
+        line=dict(color=color, width=2),
+        marker=dict(size=4),
+        fill="toself",
+        fillcolor=rgba,
+        hovertemplate="<b>%{text}</b><br>%{theta}: %{r:.2f}<extra></extra>",
+        text=[row["shop_name"]] * (len(values) + 1),
+        opacity=0.9,
+    ))
+
+fig.update_layout(
+    polar=dict(
+        radialaxis=dict(visible=True, range=[0, 1], gridcolor="rgba(0,0,0,0.15)"),
+        angularaxis=dict(gridcolor="rgba(0,0,0,0.08)")
+    ),
+    legend=dict(orientation="v"),
+    height=520,
+    margin=dict(l=20, r=20, t=20, b=20),
+    showlegend=True,
+)
+st.plotly_chart(fig, use_container_width=True)
 
 # ---------- Tops & Flops ----------
 st.subheader("🏆 Tops & Flops")
