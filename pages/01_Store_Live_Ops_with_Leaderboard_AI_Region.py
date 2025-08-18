@@ -7,24 +7,21 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-# ────────────────────────────── Page config (exact 1x) ─────────────────────────
+# ───────────────────────── Page config (exact 1x) ─────────────────────────
 st.set_page_config(page_title="Store Live Ops — Gisteren vs Eergisteren + Leaderboard",
                    page_icon="🛍️", layout="wide")
 st.title("🛍️ Store Live Ops — Gisteren vs Eergisteren + Leaderboard")
 
-# ────────────────────────────── Imports / mapping ───────────────────────────────
+# ───────────────────────── Imports / mapping ──────────────────────────────
 sys.path.append(os.path.abspath(os.path.dirname(__file__) + '/../'))
-from helpers_shop import ID_TO_NAME, NAME_TO_ID   # robuuste maps (id->name / name->id)
+from helpers_shop import ID_TO_NAME, NAME_TO_ID            # {id->name}, {name->id}
 from helpers_normalize import normalize_vemcount_response
 
 API_URL = st.secrets["API_URL"]
 
-# ────────────────────────────── Kleuren & CSS ───────────────────────────────────
-PFM_RED = "#F04438"
-PFM_GREEN = "#22C55E"
-PFM_PURPLE = "#6C4EE3"
-PFM_GRAY = "#6B7280"
-PFM_GRAY_BG = "rgba(107,114,128,.10)"
+# ───────────────────────── Kleuren & CSS ──────────────────────────────────
+PFM_RED = "#F04438"; PFM_GREEN = "#22C55E"; PFM_PURPLE = "#6C4EE3"
+PFM_GRAY = "#6B7280"; PFM_GRAY_BG = "rgba(107,114,128,.10)"
 
 st.markdown(f"""
 <style>
@@ -41,112 +38,123 @@ st.markdown(f"""
 </style>
 """, unsafe_allow_html=True)
 
-# ────────────────────────────── Store picker (1x) ───────────────────────────────
+# ───────────────────────── Store picker ───────────────────────────────────
 if not NAME_TO_ID:
     st.error("Geen winkels geladen (NAME_TO_ID is leeg). Controleer helpers_shop.py of shop_mapping.py.")
     st.stop()
 
-store_options = sorted(ID_TO_NAME.values())   # namen
+store_options = sorted(ID_TO_NAME.values())
 store_name    = st.selectbox("Kies winkel", store_options, index=0, key="store_pick")
 store_id      = NAME_TO_ID.get(store_name)
 if store_id is None:
     st.error("Kon de geselecteerde winkel niet mappen naar een ID.")
     st.stop()
 
-# ────────────────────────────── Tijd & KPI’s ────────────────────────────────────
+# ───────────────────────── Tijd & KPI’s ───────────────────────────────────
 METRICS = ["count_in","conversion_rate","turnover","sales_per_visitor"]
 TZ = pytz.timezone("Europe/Amsterdam")
 TODAY = datetime.now(TZ).date()
+
+def add_effective_date(df: pd.DataFrame) -> pd.DataFrame:
+    """Zorgt dat date_eff altijd datetime64 is; vult vanuit 'date' of 'timestamp'."""
+    d = df.copy()
+    if "date" not in d.columns:
+        d["date"] = pd.NaT
+    ts = pd.to_datetime(d.get("timestamp"), errors="coerce", utc=False)
+    d["date_eff"] = pd.to_datetime(d["date"], errors="coerce", utc=False)
+    d["date_eff"] = d["date_eff"].fillna(ts)
+    # Normalize tz-naive
+    d["date_eff"] = pd.to_datetime(d["date_eff"]).dt.tz_localize(None)
+    return d
+
+def normalize_json(js, id_to_name, metrics):
+    df = normalize_vemcount_response(js, id_to_name, kpi_keys=metrics)
+    df = add_effective_date(df)
+    # Backfill shop_name in case normalizer didn’t add it
+    if "shop_name" not in df.columns and "shop_id" in df.columns:
+        df["shop_name"] = df["shop_id"].map(ID_TO_NAME)
+    return df
+
+def _date_bounds(series: pd.Series):
+    if series is None or series.empty:
+        return None, None
+    s = pd.to_datetime(series, errors="coerce")
+    mn, mx = s.min(skipna=True), s.max(skipna=True)
+    mn_s = None if pd.isna(mn) else str(pd.to_datetime(mn).date())
+    mx_s = None if pd.isna(mx) else str(pd.to_datetime(mx).date())
+    return mn_s, mx_s
 
 def post_report(params):
     r = requests.post(API_URL, params=params, timeout=45)
     r.raise_for_status()
     return r
 
-def add_effective_date(df: pd.DataFrame) -> pd.DataFrame:
-    d = df.copy()
-
-    # make sure 'date' exists
-    if "date" not in d.columns:
-        d["date"] = pd.NaT
-
-    ts = pd.to_datetime(d.get("timestamp"), errors="coerce")
-    d["date_eff"] = pd.to_datetime(d["date"], errors="coerce").fillna(ts)
-
-    # <-- IMPORTANT: keep it *datetime64* here, not plain date objects
-    # We’ll only render to .date() at the very end of the app when needed.
-    return d
-
-# ---------- util: veilige normalisatie + logging ----------
-def norm_and_dateframe(js, metrics):
-    df = normalize_vemcount_response(js, ID_TO_NAME, kpi_keys=metrics)  # verwacht {id->naam}
-    df = add_effective_date(df)
-    return df
-
-# ---------- fetch: multi-call met fallback per winkel + uitgebreide debug ----------
-def _date_bounds(series: pd.Series):
-    s = pd.to_datetime(series, errors="coerce")
-    mn, mx = s.min(skipna=True), s.max(skipna=True)
-    mn_s = None if pd.isna(mn) else str(mn.date())
-    mx_s = None if pd.isna(mx) else str(mx.date())
-    return mn_s, mx_s
-
-def fetch_df(shop_ids, period, step, metrics, label=None):
+def fetch_df(shop_ids, period, step, metrics, label=""):
+    """1 call met meerdere data=…; geeft df + debug terug."""
     params = [("data", sid) for sid in shop_ids]
     params += [("data_output", m) for m in metrics]
     params += [("source","shops"), ("period", period), ("step", step)]
-
-    resp = requests.post(API_URL, params=params, timeout=45)
-    resp.raise_for_status()
+    resp = post_report(params)
     js = resp.json()
+    df = normalize_json(js, ID_TO_NAME, metrics)
 
-    df = normalize_vemcount_response(js, ID_TO_NAME, kpi_keys=metrics)
-    df = add_effective_date(df)
-
-    # ensure datetime dtype for date_eff even if normalize changed it
+    # zorg dat date_eff datetime64 is
     if "date_eff" in df.columns:
-        df["date_eff"] = pd.to_datetime(df["date_eff"], errors="coerce")
+        df["date_eff"] = pd.to_datetime(df["date_eff"], errors="coerce").dt.tz_localize(None)
 
-    # ---- debug payload (safe) ----
-    n_rows = int(len(df))
-    n_shops = int(df["shop_id"].nunique()) if "shop_id" in df.columns else 0
     mn_s, mx_s = _date_bounds(df["date_eff"]) if "date_eff" in df.columns else (None, None)
     dbg = {
         "label": label,
-        "params_sample": params[:8],   # first few items so you can see multiple ("data", …)
         "status": resp.status_code,
-        "n_rows": n_rows,
-        "n_unique_shops": n_shops,
+        "params_sample": params[:10],
+        "n_rows": int(len(df)),
+        "n_unique_shops": int(df["shop_id"].nunique()) if "shop_id" in df.columns else 0,
         "date_eff_min": mn_s,
         "date_eff_max": mx_s,
-        "shop_ids_first5": sorted(shop_ids)[:5],
     }
-
     return df, params, resp.status_code, dbg
 
-# ─────────────────────── Cards (gisteren vs eergisteren) ───────────────────────
+def fetch_df_fallback_each(shop_ids, period, step, metrics, label="fallback_each"):
+    """Fallback: call per winkel en concat, voor API’s die geen multi-id ondersteunen."""
+    parts = []
+    calls = []
+    for sid in shop_ids:
+        dfi, pi, si, dbgi = fetch_df([sid], period, step, metrics, label=f"{label}:{sid}")
+        parts.append(dfi)
+        calls.append({"sid": sid, **dbgi})
+    df = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+    mn_s, mx_s = _date_bounds(df["date_eff"]) if "date_eff" in df.columns else (None, None)
+    dbg = {"label": label, "mode": "per_shop_concat", "n_rows": int(len(df)),
+           "n_unique_shops": int(df["shop_id"].nunique()) if "shop_id" in df.columns else 0,
+           "date_eff_min": mn_s, "date_eff_max": mx_s, "calls": calls[:5]}
+    return df, None, None, dbg
+
+# ───────────────── Cards (gisteren vs eergisteren) ────────────────────────
 df_cards, p_cards, status_cards, dbg_cards = fetch_df([store_id], "this_week", "day", METRICS, label="cards:this_week")
-# “t/m gisteren”-filter
 pre_rows_cards = len(df_cards)
-df_cards = df_cards[df_cards.get("date_eff") < TODAY]
+if "date_eff" in df_cards.columns:
+    df_cards = df_cards[df_cards["date_eff"].dt.date < TODAY]
 post_rows_cards = len(df_cards)
 
-dates = sorted(df_cards["date_eff"].unique()) if "date_eff" in df_cards.columns else []
+dates = sorted(df_cards["date_eff"].dt.date.unique()) if "date_eff" in df_cards.columns and not df_cards.empty else []
 if len(dates) < 2:
     df_cards, p_cards, status_cards, dbg_cards2 = fetch_df([store_id], "last_week", "day", METRICS, label="cards:last_week")
     pre_rows_cards2 = len(df_cards)
-    df_cards = df_cards[df_cards.get("date_eff") < TODAY]
+    if "date_eff" in df_cards.columns:
+        df_cards = df_cards[df_cards["date_eff"].dt.date < TODAY]
     post_rows_cards2 = len(df_cards)
-    dates = sorted(df_cards["date_eff"].unique()) if "date_eff" in df_cards.columns else []
-    dbg_cards = {"try2": dbg_cards2, "pre_rows": pre_rows_cards2, "post_rows": post_rows_cards2}
+    dates = sorted(df_cards["date_eff"].dt.date.unique()) if "date_eff" in df_cards.columns and not df_cards.empty else []
+    dbg_cards = {"first": dbg_cards, "second": dbg_cards2,
+                 "pre_rows_first": pre_rows_cards, "post_rows_first": post_rows_cards,
+                 "pre_rows_second": pre_rows_cards2, "post_rows_second": post_rows_cards2}
 
 if len(dates) < 2:
     st.error("Niet genoeg dagdata om kaarten te tonen.")
     st.stop()
 
 ydate, bdate = dates[-1], dates[-2]
-gy = df_cards[(df_cards["date_eff"]==ydate) & (df_cards["shop_id"]==store_id)][METRICS].sum(numeric_only=True)
-gb = df_cards[(df_cards["date_eff"]==bdate) & (df_cards["shop_id"]==store_id)][METRICS].sum(numeric_only=True)
+gy = df_cards[(df_cards["date_eff"].dt.date==ydate) & (df_cards["shop_id"]==store_id)][METRICS].sum(numeric_only=True)
+gb = df_cards[(df_cards["date_eff"].dt.date==bdate) & (df_cards["shop_id"]==store_id)][METRICS].sum(numeric_only=True)
 
 def delta_badge(value: float, kind: str):
     if value > 0: cls, arrow = "up","↑"
@@ -160,30 +168,24 @@ def delta_badge(value: float, kind: str):
     return f'<span class="kpi-delta {cls}">{arrow} <b>{disp}</b> t.o.v. dag ervoor</span>'
 
 c1,c2,c3,c4 = st.columns(4)
-
 with c1:
-    val = int(gy.get("count_in", 0))
-    diff = gy.get("count_in", 0) - gb.get("count_in", 0)
+    val = int(gy.get("count_in", 0)); diff = gy.get("count_in", 0) - gb.get("count_in", 0)
     st.markdown(f"""
 <div class="kpi-card"><div class="kpi-title">Bezoekers <small>(gisteren)</small></div>
 <div class="kpi-value">{val:,}</div>{delta_badge(float(diff),"int")}</div>
 """.replace(",", "."), unsafe_allow_html=True)
-
 with c2:
-    conv_y = float(gy.get("conversion_rate", 0.0))
-    conv_b = float(gb.get("conversion_rate", 0.0))
+    conv_y = float(gy.get("conversion_rate", 0.0)); conv_b = float(gb.get("conversion_rate", 0.0))
     st.markdown(f"""
 <div class="kpi-card"><div class="kpi-title">Conversie <small>(gisteren)</small></div>
 <div class="kpi-value">{conv_y:.2f}%</div>{delta_badge((conv_y-conv_b),"pct2")}</div>
 """, unsafe_allow_html=True)
-
 with c3:
     turn_y = float(gy.get("turnover", 0.0)); turn_b = float(gb.get("turnover", 0.0))
     st.markdown(f"""
 <div class="kpi-card"><div class="kpi-title">Omzet <small>(gisteren)</small></div>
 <div class="kpi-value">€{turn_y:,.0f}</div>{delta_badge((turn_y-turn_b),"eur0")}</div>
 """.replace(",", "."), unsafe_allow_html=True)
-
 with c4:
     spv_y = float(gy.get("sales_per_visitor", 0.0)); spv_b = float(gb.get("sales_per_visitor", 0.0))
     if spv_y==0 and val>0: spv_y = turn_y/val
@@ -196,39 +198,42 @@ with c4:
 
 st.markdown("---")
 
-# ───────────────────── Leaderboard (WTD t/m gisteren) ──────────────────────────
+# ───────────────── Leaderboard (WTD t/m gisteren) ─────────────────────────
 all_ids = list(ID_TO_NAME.keys())
 
-def fetch_wtd(period, label="wtd"):
-    df, p, s = fetch_df(all_ids, period, "day", METRICS)
-    df = df[df["date_eff"] < TODAY]
-    return df, p, s, {"label": label, "n_rows": len(df), "date_min": str(df["date_eff"].min()) if not df.empty else None,
-                      "date_max": str(df["date_eff"].max()) if not df.empty else None}
+def fetch_wtd_multi(period, label="wtd_multi"):
+    df, p, s, dbg = fetch_df(all_ids, period, "day", METRICS, label=label)
+    rows_before = len(df)
+    if "date_eff" in df.columns:
+        df = df[df["date_eff"].dt.date < TODAY]
+    rows_after = len(df)
+    dbg["rows_before_filter"] = rows_before
+    dbg["rows_after_filter"]  = rows_after
+    return df, p, s, dbg
 
-df_this, p_this, s_this, dbg_this = fetch_wtd("this_week", "this_week")
-df_last, p_last, s_last, dbg_last = fetch_wtd("last_week", "last_week")
+df_this, p_this, s_this, dbg_this = fetch_wtd_multi("this_week", "wtd:this_week")
+df_last, p_last, s_last, dbg_last = fetch_wtd_multi("last_week", "wtd:last_week")
+
+# Fallback: als multi-call leeg is, call per winkel en concat
+if df_this.empty:
+    df_this, _, _, dbg_this_fb = fetch_df_fallback_each(all_ids, "this_week", "day", METRICS, label="wtd_fb:this_week")
+    dbg_this = {"multi": dbg_this, "fallback": dbg_this_fb}
+if df_last.empty:
+    df_last, _, _, dbg_last_fb = fetch_df_fallback_each(all_ids, "last_week", "day", METRICS, label="wtd_fb:last_week")
+    dbg_last = {"multi": dbg_last, "fallback": dbg_last_fb}
 
 st.subheader("🏁 Leaderboard — huidige week (t/m gisteren)")
-rank_choice = st.radio("Ranking op basis van", ["Conversie", "SPV"], horizontal=True, index=0)
-
-# ... (rest blijft gelijk)
-
-# ────────────────────────────── Debug (optioneel) ───────────────────────────────
-with st.expander("🔧 Debug — API calls"):
-    st.write("Cards call params:", p_cards, "| status:", status_cards)
-    st.json(dbg_cards)   # extra info over cards call
-    st.write("Leaderboard this_week params:", p_this, "| status:", s_this)
-    st.json(dbg_this)
-    st.write("Leaderboard last_week params:", p_last, "| status:", s_last)
-    st.json(dbg_last)
+rank_choice = st.radio("Ranking op basis van", ["Conversie", "SPV"], horizontal=True, index=0, key="rank_choice")
 
 def wtd_agg(d: pd.DataFrame) -> pd.DataFrame:
     if d is None or d.empty: return pd.DataFrame()
     g = d.groupby("shop_id", as_index=False).agg({"count_in":"sum","turnover":"sum"})
+    # SPV robuust (omzet / bezoekers)
     g["sales_per_visitor"] = g.apply(lambda r: (r["turnover"]/r["count_in"]) if r["count_in"] else 0.0, axis=1)
+    # conversie gewogen op traffic (val terug op mean als geen traffic)
     conv = d.groupby("shop_id").apply(
-        lambda x: (x["conversion_rate"]*x["count_in"]).sum()/x["count_in"].sum() if x["count_in"].sum()
-        else float(x["conversion_rate"].mean())
+        lambda x: (x["conversion_rate"]*x["count_in"]).sum()/x["count_in"].sum()
+                  if x["count_in"].sum() else float(x["conversion_rate"].mean())
     ).reset_index()
     conv.columns = ["shop_id","conversion_rate"]
     g = g.merge(conv, on="shop_id", how="left")
@@ -240,10 +245,8 @@ agg_last = wtd_agg(df_last)
 
 if agg_this.empty:
     with st.expander("🔧 WTD Debug (openen bij lege tabel)"):
-        st.write("this_week — HTTP / payload / json / vorm:", dbg_this)
-        st.write("last_week  — HTTP / payload / json / vorm:", dbg_last)
-        st.write("Rows before/after < TODAY filter — this_week:", rows_before_this, rows_after_this,
-                 " last_week:", rows_before_last, rows_after_last)
+        st.write("this_week (multi/fallback):", dbg_this)
+        st.write("last_week  (multi/fallback):", dbg_last)
         st.write("df_this head:", df_this.head() if not df_this.empty else "(leeg)")
         st.write("df_last head:", df_last.head() if not df_last.empty else "(leeg)")
     st.info("Geen WTD data beschikbaar.")
@@ -270,6 +273,7 @@ me = agg[agg["shop_id"]==store_id].iloc[0]
 ch = int(me["rank_change"]) if pd.notna(me["rank_change"]) else 0
 arrow = "🔺" if ch>0 else ("🔻" if ch<0 else "→")
 col = PFM_PURPLE if ch>0 else (PFM_RED if ch<0 else PFM_GRAY)
+
 st.markdown(f"""
 <div class="lb-card">
   <div class="lb-title">Jouw positie op <b>{'Conversie' if rank_metric=='conversion_rate' else 'SPV'}</b></div>
@@ -307,7 +311,6 @@ def highlight_rows(row):
     return [""]*len(row)
 
 styler = fmt.style.apply(highlight_rows, axis=1)
-
 def color_pos_col(col):
     styles=[]
     for i,_ in enumerate(col):
@@ -316,70 +319,11 @@ def color_pos_col(col):
         elif ch < 0: styles.append(f"color: {PFM_RED}; font-weight: 700")
         else: styles.append(f"color: {PFM_GRAY}; font-weight: 700")
     return styles
-
 styler = styler.apply(color_pos_col, subset=["positie (nu vs lw)"])
 st.dataframe(styler, use_container_width=True)
 
-# ────────────────────────────── AI Coach ────────────────────────────────────────
-st.markdown("## 🤖 AI Coach")
-
-def pct(x):
-    try: return float(x)/100.0
-    except: return 0.0
-def eur(x, decimals=0): return f"€{x:,.{decimals}f}".replace(",", ".")
-def safe_div(a, b): return (a/b) if (b and not np.isnan(b) and b!=0) else 0.0
-
-vis_y   = float(gy.get("count_in", 0))
-turn_y  = float(gy.get("turnover", 0.0))
-conv_y  = float(gy.get("conversion_rate", 0.0))
-spv_y   = float(gy.get("sales_per_visitor", 0.0))
-if spv_y == 0 and vis_y > 0: spv_y = turn_y/vis_y
-
-vis_b   = float(gb.get("count_in", 0))
-turn_b  = float(gb.get("turnover", 0.0))
-conv_b  = float(gb.get("conversion_rate", 0.0))
-spv_b   = float(gb.get("sales_per_visitor", 0.0))
-if spv_b == 0 and vis_b > 0: spv_b = turn_b/vis_b
-
-conv_y_f = pct(conv_y)
-conv_b_f = pct(conv_b)
-atv_y    = safe_div(spv_y, conv_y_f)
-
-peer = agg_this.copy()
-peer_conv_med = float(peer["conversion_rate"].median())
-peer_spv_med  = float(peer["sales_per_visitor"].median())
-
-target_conv = max(peer_conv_med, conv_b)          # in %
-target_spv  = max(peer_spv_med,  spv_b)
-
-conv_target_f = pct(target_conv)
-delta_conv_f  = max(0.0, conv_target_f - conv_y_f)
-uplift_conv   = vis_y * delta_conv_f * atv_y
-
-delta_spv     = max(0.0, target_spv - spv_y)
-uplift_spv    = vis_y * delta_spv
-
-rules = []
-if vis_b > 0 and (vis_y - vis_b)/vis_b >= 0.15 and (conv_y - conv_b) <= -3.0:
-    rules.append("**Traffic +15% vs dag ervoor maar conversie daalt −3pp** → verschuif 1 FTE naar vloer/paskamers, focus begroeten & hulp aanbieden.")
-if conv_y < peer_conv_med:
-    rules.append(f"**Conversie onder peermediaan ({peer_conv_med:.2f}%)** → korte floor-coaching: active greet, 3 vragen-regel, stuur op demo/proefpassen.")
-if spv_y < peer_spv_med:
-    rules.append(f"**SPV onder peermediaan ({eur(peer_spv_med,2)})** → push ‘2e artikel −20%’ of bundels; kassascripts voor add-ons.")
-
-ch_here = int(me["rank_change"]) if not pd.isna(me["rank_change"]) else 0
-if ch_here > 0:
-    rules.append("**Gestegen in ranking** → hou ritme vast; cap drukte-uren met vaste vloer-rollen (greeter, paskamerhost, queue-busting).")
-elif ch_here < 0:
-    rules.append("**Gezakt in ranking** → check wachttijd aan kassa & passtijden; daily huddle met 1 micro-doel voor vandaag.")
-
-# (optionele weer-hook hier weggelaten om focus te houden)
-
-# ────────────────────────────── Debug (optioneel) ───────────────────────────────
+# ───────────────────────── Debug (onderaan) ───────────────────────────────
 with st.expander("🔧 Debug — API calls"):
-    st.write("Cards call — payload (first 10):", p_cards[:10], "| http:", status_cards)
-    st.write("Cards debug:", dbg_cards)
-    st.write("WTD this_week payload (first 10):", p_this[:10], "| http:", s_this)
-    st.write("WTD last_week  payload (first 10):", p_last[:10], "| http:", s_last)
-    st.write("WTD this_week debug:", dbg_this)
-    st.write("WTD last_week  debug:", dbg_last)
+    st.write("Cards call — http:", dbg_cards if isinstance(dbg_cards, dict) else {})
+    st.write("WTD this_week —", dbg_this)
+    st.write("WTD last_week —", dbg_last)
