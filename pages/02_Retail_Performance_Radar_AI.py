@@ -12,6 +12,22 @@ sys.path.append(os.path.abspath(os.path.dirname(__file__) + '/../'))
 from helpers_shop import ID_TO_NAME, NAME_TO_ID, REGIONS, get_ids_by_region
 from helpers_normalize import normalize_vemcount_response
 
+# Brand palette for radar (dark → light)
+PFM_RADAR_COLORS = ["#21114E", "#5B167E", "#922B80", "#CC3F71", "#F56B5C", "#FEAC76"]
+
+def hex_to_rgba(hex_color: str, alpha: float) -> str:
+    """Convert #RRGGBB to rgba(r,g,b,a). Alpha in [0,1]."""
+    h = hex_color.lstrip("#")
+    if len(h) != 6:
+        # fallback: solid gray if unexpected format
+        return f"rgba(107,114,128,{alpha})"
+    r = int(h[0:2], 16)
+    g = int(h[2:4], 16)
+    b = int(h[4:6], 16)
+    # clamp alpha
+    a = max(0.0, min(1.0, float(alpha)))
+    return f"rgba({r},{g},{b},{a})"
+
 # ---------- Page ----------
 st.set_page_config(page_title="Region Performance Radar", page_icon="🧭", layout="wide")
 st.title("🧭 Region Performance Radar")
@@ -189,27 +205,48 @@ with c4:
 
 st.markdown("---")
 
-# ---------- Radarvergelijking (Regio → auto-select) ----------
 st.subheader("📈 Radarvergelijking (Conversie / SPV / Sales per m²)")
-
 metric_cols = ["conversion_rate","sales_per_visitor","sales_per_sqm"]
-norm = cur[["shop_id","shop_name"] + metric_cols].copy()
 
-# robuste min-max normalisatie
+# Normalise metrics 0..1
+norm = cur[["shop_id","shop_name"] + metric_cols].copy()
 for m in metric_cols:
     v = pd.to_numeric(norm[m], errors="coerce")
     vmin, vmax = v.min(skipna=True), v.max(skipna=True)
-    if pd.isna(vmin) or pd.isna(vmax) or vmax <= vmin:
+    if pd.isna(vmin) or pd.isna(vmax) or vmax == vmin:
         norm[m + "_norm"] = 0.0
     else:
         norm[m + "_norm"] = (v - vmin) / (vmax - vmin)
 
-# Als er >6 winkels in de regio zijn → kies top-6 op omzet (kan je aanpassen)
-if len(norm) > 6:
-    top_ids = cur.sort_values("turnover", ascending=False)["shop_id"].head(6).tolist()
-    norm_sel = norm[norm["shop_id"].isin(top_ids)].copy()
+# --- Default selection follows regio (up to 6 shops) ---
+if regio == "All":
+    region_names = [ID_TO_NAME[sid] for sid in ALL_IDS if sid in ID_TO_NAME]
 else:
-    norm_sel = norm.copy()
+    region_names = [ID_TO_NAME[sid] for sid in get_ids_by_region(regio) if sid in ID_TO_NAME]
+region_names = region_names[:6] if region_names else list(ID_TO_NAME.values())[:6]
+
+# Current value in session; clip to region if needed
+prev_sel = st.session_state.get("radar_multiselect", None)
+if prev_sel:
+    # keep intersection with region; if ends up empty, fall back to region defaults
+    clipped = [n for n in prev_sel if n in region_names]
+    if clipped:
+        default_names = clipped
+    else:
+        default_names = region_names
+else:
+    default_names = region_names
+
+sel_names = st.multiselect(
+    "Vergelijk winkels (max 6)",
+    options=list(ID_TO_NAME.values()),
+    default=default_names,
+    max_selections=6,
+    key="radar_multiselect",
+    help="Keuze wordt automatisch gevuld met winkels uit de gekozen regio."
+)
+
+sel = norm[norm["shop_name"].isin(sel_names)]
 
 if norm_sel.empty:
     st.info("Geen winkels in deze regio voor de radar.")
