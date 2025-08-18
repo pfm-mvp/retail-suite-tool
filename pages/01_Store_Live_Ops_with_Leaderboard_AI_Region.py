@@ -192,7 +192,7 @@ with c4:
     val_b = int(gb.get("count_in", 0))
     if spv_b==0 and val_b>0: spv_b = turn_b/val_b
     st.markdown(f"""
-<div class="kpi-card"><div class="kpi-title">Sales per visitor <small>(gisteren)</small></div>
+<div class="kpi-card"><div class="kpi-title">SPV <small>(gisteren)</small></div>
 <div class="kpi-value">€{spv_y:,.2f}</div>{delta_badge((spv_y-spv_b),"eur2")}</div>
 """.replace(",", "."), unsafe_allow_html=True)
 
@@ -239,6 +239,58 @@ def wtd_agg(d: pd.DataFrame) -> pd.DataFrame:
     g = g.merge(conv, on="shop_id", how="left")
     g["shop_name"] = g["shop_id"].map(ID_TO_NAME)
     return g
+
+# ───────────────────── Omzetpositie vorige week (nieuwe grote kaart) ─────────────────────
+# Gebruik reeds opgehaald df_last (period = last_week)
+wk_turn = pd.DataFrame()
+if not df_last.empty:
+    wk_turn = (df_last.groupby("shop_id", as_index=False)["turnover"].sum())
+    wk_turn["shop_name"] = wk_turn["shop_id"].map(ID_TO_NAME)
+    wk_turn = wk_turn.sort_values("turnover", ascending=False).reset_index(drop=True)
+
+if not wk_turn.empty and (wk_turn["turnover"].fillna(0).sum() > 0):
+    n_shops      = int(wk_turn["shop_id"].nunique())
+    leader_row   = wk_turn.iloc[0]
+    leader_name  = str(leader_row["shop_name"])
+    leader_turn  = float(leader_row["turnover"])
+
+    me_row       = wk_turn[wk_turn["shop_id"] == store_id]
+    my_rank      = int(me_row.index[0]) + 1 if not me_row.empty else None
+    my_turn      = float(me_row["turnover"].values[0]) if not me_row.empty else 0.0
+    pct_vs_1     = (my_turn / leader_turn * 100.0) if leader_turn > 0 else 0.0
+
+    def eur0(x): return f"€{x:,.0f}".replace(",", ".")
+    pct_badge    = f"{pct_vs_1:.0f}% van #{1} {leader_name}"
+    total_label  = f"{eur0(wk_turn['turnover'].sum())} totale weekomzet"
+
+    # zachte kaartstijl
+    st.markdown("""
+    <style>
+      .bigcard {border:1px solid #EEE; border-radius:16px; padding:18px 20px; background:#FAFAFC;}
+      .bigcard h3 {margin:0 0 14px 0;}
+      .pos {font-size:56px; font-weight:900; line-height:1;}
+      .ofn {font-size:22px; font-weight:700; color:#6B7280; margin-left:10px;}
+      .chip {display:inline-block; padding:8px 12px; border-radius:999px; font-weight:800; margin-right:8px;
+             background: rgba(34,197,94,.10); color:#22C55E; }
+      .chip.gray { background:rgba(107,114,128,.10); color:#6B7280; }
+    </style>
+    """, unsafe_allow_html=True)
+
+    c_full = st.container()
+    with c_full:
+        st.markdown(f"""
+        <div class="bigcard">
+          <h3>📊 Jouw omzetpositie <small>(vorige week)</small></h3>
+          <div>
+            <span class="pos">#{my_rank if my_rank else '–'}</span>
+            <span class="ofn">van {n_shops}</span>
+          </div>
+          <div style="margin-top:14px;">
+            <span class="chip">{pct_badge}</span>
+            <span class="chip gray">{total_label}</span>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
 
 agg_this = wtd_agg(df_this)
 agg_last = wtd_agg(df_last)
