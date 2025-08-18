@@ -65,11 +65,16 @@ def post_report(params):
 
 def add_effective_date(df: pd.DataFrame) -> pd.DataFrame:
     d = df.copy()
+
+    # make sure 'date' exists
     if "date" not in d.columns:
-        d["date"] = pd.Series([None]*len(d))
+        d["date"] = pd.NaT
+
     ts = pd.to_datetime(d.get("timestamp"), errors="coerce")
-    date_series = pd.to_datetime(d["date"], errors="coerce")
-    d["date_eff"] = date_series.fillna(ts).dt.date
+    d["date_eff"] = pd.to_datetime(d["date"], errors="coerce").fillna(ts)
+
+    # <-- IMPORTANT: keep it *datetime64* here, not plain date objects
+    # We’ll only render to .date() at the very end of the app when needed.
     return d
 
 # ---------- util: veilige normalisatie + logging ----------
@@ -79,59 +84,45 @@ def norm_and_dateframe(js, metrics):
     return df
 
 # ---------- fetch: multi-call met fallback per winkel + uitgebreide debug ----------
-def fetch_df(shop_ids, period, step, metrics, label=""):
+def _date_bounds(series: pd.Series):
+    s = pd.to_datetime(series, errors="coerce")
+    mn, mx = s.min(skipna=True), s.max(skipna=True)
+    mn_s = None if pd.isna(mn) else str(mn.date())
+    mx_s = None if pd.isna(mx) else str(mx.date())
+    return mn_s, mx_s
+
+def fetch_df(shop_ids, period, step, metrics, label=None):
     params = [("data", sid) for sid in shop_ids]
     params += [("data_output", m) for m in metrics]
     params += [("source","shops"), ("period", period), ("step", step)]
-    resp = post_report(params)
-    status = resp.status_code
-    try:
-        js = resp.json()
-    except Exception:
-        js = {"_non_json": True, "_text": resp.text[:800]}
 
-    df = norm_and_dateframe(js, metrics)
-    multi_rows = len(df)
+    resp = requests.post(API_URL, params=params, timeout=45)
+    resp.raise_for_status()
+    js = resp.json()
 
-    debug_info = {
+    df = normalize_vemcount_response(js, ID_TO_NAME, kpi_keys=metrics)
+    df = add_effective_date(df)
+
+    # ensure datetime dtype for date_eff even if normalize changed it
+    if "date_eff" in df.columns:
+        df["date_eff"] = pd.to_datetime(df["date_eff"], errors="coerce")
+
+    # ---- debug payload (safe) ----
+    n_rows = int(len(df))
+    n_shops = int(df["shop_id"].nunique()) if "shop_id" in df.columns else 0
+    mn_s, mx_s = _date_bounds(df["date_eff"]) if "date_eff" in df.columns else (None, None)
+    dbg = {
         "label": label,
-        "http_status": status,
-        "payload_pairs": params[:10],  # eerste 10 voor leesbaarheid
-        "json_keys": (list(js.keys())[:10] if isinstance(js, dict) else type(js).__name__),
-        "rows_multi": multi_rows,
-        "cols_multi": list(df.columns) if not df.empty else [],
-        "date_eff_min": (str(df["date_eff"].min()) if "date_eff" in df.columns and not df.empty else None),
-        "date_eff_max": (str(df["date_eff"].max()) if "date_eff" in df.columns and not df.empty else None),
+        "params_sample": params[:8],   # first few items so you can see multiple ("data", …)
+        "status": resp.status_code,
+        "n_rows": n_rows,
+        "n_unique_shops": n_shops,
+        "date_eff_min": mn_s,
+        "date_eff_max": mx_s,
+        "shop_ids_first5": sorted(shop_ids)[:5],
     }
 
-    # Fallback: als multi-call leeg is maar er zijn shops, probeer per shop (max 12 voor snelheid)
-    fallback_frames = []
-    fallback_logs = []
-    if multi_rows == 0 and len(shop_ids) > 1:
-        for sid in shop_ids[:12]:
-            p1 = [("data", sid)] + [("data_output", m) for m in metrics] + [("source","shops"), ("period", period), ("step", step)]
-            r1 = post_report(p1)
-            try:
-                js1 = r1.json()
-            except Exception:
-                js1 = {"_non_json": True, "_text": r1.text[:400]}
-            d1 = norm_and_dateframe(js1, metrics)
-            if not d1.empty:
-                fallback_frames.append(d1)
-            fallback_logs.append({"sid": sid, "status": r1.status_code, "rows": len(d1)})
-
-    if fallback_frames:
-        df_fb = pd.concat(fallback_frames, ignore_index=True)
-        debug_info["fallback_used"] = True
-        debug_info["fallback_samples"] = fallback_logs[:6]
-        debug_info["rows_fallback"] = len(df_fb)
-        # zet df naar fallbackresultaat
-        df = df_fb
-    else:
-        debug_info["fallback_used"] = False
-        debug_info["fallback_samples"] = fallback_logs[:6]
-
-    return df, params, status, debug_info
+    return df, params, resp.status_code, dbg
 
 # ─────────────────────── Cards (gisteren vs eergisteren) ───────────────────────
 df_cards, p_cards, status_cards, dbg_cards = fetch_df([store_id], "this_week", "day", METRICS, label="cards:this_week")
