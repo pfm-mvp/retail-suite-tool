@@ -8,9 +8,7 @@ import streamlit as st
 
 # ---------- Imports / mapping ----------
 sys.path.append(os.path.abspath(os.path.dirname(__file__) + '/../'))
-
-# ✅ Use the helper (do NOT rebuild dicts yourself)
-from helpers_shop import ID_TO_NAME, NAME_TO_ID
+from helpers_shop import ID_TO_NAME, NAME_TO_ID, SHOP_NAME_MAP  # <-- gebruik helpers
 from helpers_normalize import normalize_vemcount_response
 
 st.caption(f"Loaded shops: {len(ID_TO_NAME)}")
@@ -45,24 +43,18 @@ st.markdown(f"""
 </style>
 """, unsafe_allow_html=True)
 
-# ---------- Safe shop selector ----------
-# If helper loaded correctly, these dicts are non-empty.
+# ---- Winkelkeuze (veilig) ----
 if not NAME_TO_ID:
-    st.error("Geen winkels geladen uit helpers_shop.py (NAME_TO_ID is leeg). Check helpers_shop/SHOP_NAME_MAP.")
+    st.error("Geen winkels geladen uit helpers_shop.py (NAME_TO_ID is leeg). "
+             "Controleer shop_mapping.py of helpers_shop.py normalisatie.")
     st.stop()
 
-store_options = sorted(ID_TO_NAME.values())
-if not store_options:
-    st.error("Geen winkels geladen uit helpers_shop.py (NAME_TO_ID is leeg). Check helpers_shop/SHOP_NAME_MAP.")
-    st.stop()
+store_options = sorted(ID_TO_NAME.values())  # namen voor de selectbox
+store_name    = st.selectbox("Kies winkel", store_options, index=0)
+store_id      = NAME_TO_ID.get(store_name)
 
-store_name = st.selectbox("Kies winkel", store_options, index=0)
-store_id   = NAME_TO_ID[store_name]
-
-# Map back to id
-store_id = NAME_TO_ID.get(store_name)
 if store_id is None:
-    st.error(f"Kan id niet vinden voor winkel: {store_name}")
+    st.error("Kon de geselecteerde winkel niet mappen naar een ID.")
     st.stop()
 
 st.set_page_config(page_title="Store Live Ops — Gisteren vs Eergisteren + Leaderboard", page_icon="🛍️", layout="wide")
