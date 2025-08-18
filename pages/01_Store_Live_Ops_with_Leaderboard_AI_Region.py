@@ -5,6 +5,8 @@ import requests
 import numpy as np
 import pandas as pd
 import streamlit as st
+st.caption(f"Loaded shops: {len(ID_TO_NAME)}")
+# st.write(list(ID_TO_NAME.items())[:5])  # desnoods even kijken
 
 # ---------- Imports / mapping ----------
 sys.path.append(os.path.abspath(os.path.dirname(__file__) + '/../'))
