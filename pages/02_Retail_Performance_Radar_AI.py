@@ -10,7 +10,8 @@ import plotly.graph_objects as go
 
 # ---------- Imports / mapping ----------
 sys.path.append(os.path.abspath(os.path.dirname(__file__) + '/../'))
-from helpers_shop import ID_TO_NAME, NAME_TO_ID, REGIONS, get_ids_by_region, get_name_by_id, get_region_by_id
+from helpers_shop import ID_TO_NAME, REGIONS, get_ids_by_region
+SHOP_NAME_MAP = ID_TO_NAME   # ← normalize_vemcount_response verwacht {id: naam}
 from helpers_normalize import normalize_vemcount_response
 
 st.set_page_config(page_title="Region Performance Radar", page_icon="🧭", layout="wide")
