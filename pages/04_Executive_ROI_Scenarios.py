@@ -48,16 +48,39 @@ with c4:
     capex = st.number_input("CAPEX per store (€)", min_value=0, value=1500, step=100)
 payback_target = st.slider("Payback-target (mnd)", 6, 24, 12, 1)
 
+# ── Data ophalen (robust) ──────────────────────────────────────────────────────
+KPI_KEYS = ["count_in", "conversion_rate", "turnover", "sales_per_visitor"]
+
 params = []
-for sid in ids: params.append(("data", sid))
-for k in ["count_in","conversion_rate","turnover","sales_per_visitor"]:
+for sid in list(ID_TO_NAME.keys()):
+    params.append(("data", sid))
+for k in KPI_KEYS:
     params.append(("data_output", k))
-params += [("source","shops"), ("period", period)]
+params += [("source", "shops"), ("period", period), ("step", "day")]  # ← add step
 
 js = api_get_report(params)
-if friendly_error(js, period): st.stop()
+if friendly_error(js, period):
+    st.stop()
 
-df = normalize_vemcount_response(js, ID_TO_NAME)
+# normalize expects an id->name map
+df = normalize_vemcount_response(js, ID_TO_NAME, kpi_keys=KPI_KEYS)
+
+# make sure `date` exists (to_wide / groupbys rely on it in some environments)
+if df is None or df.empty:
+    st.warning("Geen data ontvangen voor deze periode/parameters.")
+    with st.expander("🔧 Debug"):
+        st.write("Params:", params)
+        st.write("Normalize → empty DataFrame")
+    st.stop()
+
+if "date" not in df.columns:
+    # try to derive from timestamp
+    df["date"] = pd.to_datetime(df.get("timestamp"), errors="coerce").dt.date
+
+# Safety: drop rows without shop_id (rare but safer)
+df = df[pd.notna(df.get("shop_id"))]
+
+# Wide view for per-day per-shop rows
 wide = to_wide(df)  # one row per date+shop
 
 # Baselines per store (sum over period)
