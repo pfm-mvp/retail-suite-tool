@@ -1,5 +1,5 @@
 # pages/01_Store_Live_Ops_with_Leaderboard_AI_Region.py
-import os, sys, math
+import os, sys, math, json
 from datetime import datetime
 import pytz
 import requests
@@ -72,24 +72,82 @@ def add_effective_date(df: pd.DataFrame) -> pd.DataFrame:
     d["date_eff"] = date_series.fillna(ts).dt.date
     return d
 
-def fetch_df(shop_ids, period, step, metrics):
+# ---------- util: veilige normalisatie + logging ----------
+def norm_and_dateframe(js, metrics):
+    df = normalize_vemcount_response(js, ID_TO_NAME, kpi_keys=metrics)  # verwacht {id->naam}
+    df = add_effective_date(df)
+    return df
+
+# ---------- fetch: multi-call met fallback per winkel + uitgebreide debug ----------
+def fetch_df(shop_ids, period, step, metrics, label=""):
     params = [("data", sid) for sid in shop_ids]
     params += [("data_output", m) for m in metrics]
     params += [("source","shops"), ("period", period), ("step", step)]
     resp = post_report(params)
-    js = resp.json()
-    df = normalize_vemcount_response(js, ID_TO_NAME, kpi_keys=metrics)  # verwacht {id->naam}
-    dfe = add_effective_date(df)
-    return dfe, params, resp.status_code
+    status = resp.status_code
+    try:
+        js = resp.json()
+    except Exception:
+        js = {"_non_json": True, "_text": resp.text[:800]}
+
+    df = norm_and_dateframe(js, metrics)
+    multi_rows = len(df)
+
+    debug_info = {
+        "label": label,
+        "http_status": status,
+        "payload_pairs": params[:10],  # eerste 10 voor leesbaarheid
+        "json_keys": (list(js.keys())[:10] if isinstance(js, dict) else type(js).__name__),
+        "rows_multi": multi_rows,
+        "cols_multi": list(df.columns) if not df.empty else [],
+        "date_eff_min": (str(df["date_eff"].min()) if "date_eff" in df.columns and not df.empty else None),
+        "date_eff_max": (str(df["date_eff"].max()) if "date_eff" in df.columns and not df.empty else None),
+    }
+
+    # Fallback: als multi-call leeg is maar er zijn shops, probeer per shop (max 12 voor snelheid)
+    fallback_frames = []
+    fallback_logs = []
+    if multi_rows == 0 and len(shop_ids) > 1:
+        for sid in shop_ids[:12]:
+            p1 = [("data", sid)] + [("data_output", m) for m in metrics] + [("source","shops"), ("period", period), ("step", step)]
+            r1 = post_report(p1)
+            try:
+                js1 = r1.json()
+            except Exception:
+                js1 = {"_non_json": True, "_text": r1.text[:400]}
+            d1 = norm_and_dateframe(js1, metrics)
+            if not d1.empty:
+                fallback_frames.append(d1)
+            fallback_logs.append({"sid": sid, "status": r1.status_code, "rows": len(d1)})
+
+    if fallback_frames:
+        df_fb = pd.concat(fallback_frames, ignore_index=True)
+        debug_info["fallback_used"] = True
+        debug_info["fallback_samples"] = fallback_logs[:6]
+        debug_info["rows_fallback"] = len(df_fb)
+        # zet df naar fallbackresultaat
+        df = df_fb
+    else:
+        debug_info["fallback_used"] = False
+        debug_info["fallback_samples"] = fallback_logs[:6]
+
+    return df, params, status, debug_info
 
 # ─────────────────────── Cards (gisteren vs eergisteren) ───────────────────────
-df_cards, p_cards, status_cards = fetch_df([store_id], "this_week", "day", METRICS)
-df_cards = df_cards[df_cards["date_eff"] < TODAY]  # tot en met gisteren
-dates = sorted(df_cards["date_eff"].unique())
+df_cards, p_cards, status_cards, dbg_cards = fetch_df([store_id], "this_week", "day", METRICS, label="cards:this_week")
+# “t/m gisteren”-filter
+pre_rows_cards = len(df_cards)
+df_cards = df_cards[df_cards.get("date_eff") < TODAY]
+post_rows_cards = len(df_cards)
+
+dates = sorted(df_cards["date_eff"].unique()) if "date_eff" in df_cards.columns else []
 if len(dates) < 2:
-    df_cards, p_cards, status_cards = fetch_df([store_id], "last_week", "day", METRICS)
-    df_cards = df_cards[df_cards["date_eff"] < TODAY]
-    dates = sorted(df_cards["date_eff"].unique())
+    df_cards, p_cards, status_cards, dbg_cards2 = fetch_df([store_id], "last_week", "day", METRICS, label="cards:last_week")
+    pre_rows_cards2 = len(df_cards)
+    df_cards = df_cards[df_cards.get("date_eff") < TODAY]
+    post_rows_cards2 = len(df_cards)
+    dates = sorted(df_cards["date_eff"].unique()) if "date_eff" in df_cards.columns else []
+    dbg_cards = {"try2": dbg_cards2, "pre_rows": pre_rows_cards2, "post_rows": post_rows_cards2}
 
 if len(dates) < 2:
     st.error("Niet genoeg dagdata om kaarten te tonen.")
@@ -151,12 +209,13 @@ st.markdown("---")
 all_ids = list(ID_TO_NAME.keys())
 
 def fetch_wtd(period):
-    df, p, s = fetch_df(all_ids, period, "day", METRICS)
-    df = df[df["date_eff"] < TODAY]
-    return df, p, s
+    df, p, s, dbg = fetch_df(all_ids, period, "day", METRICS, label=f"wtd:{period}")
+    total_before = len(df)
+    df = df[df.get("date_eff") < TODAY]
+    return df, p, s, dbg, total_before, len(df)
 
-df_this, p_this, s_this = fetch_wtd("this_week")
-df_last, p_last, s_last = fetch_wtd("last_week")
+df_this, p_this, s_this, dbg_this, rows_before_this, rows_after_this = fetch_wtd("this_week")
+df_last, p_last, s_last, dbg_last, rows_before_last, rows_after_last = fetch_wtd("last_week")
 
 st.subheader("🏁 Leaderboard — huidige week (t/m gisteren)")
 rank_choice = st.radio("Ranking op basis van", ["Conversie", "SPV"], horizontal=True, index=0)
@@ -178,6 +237,13 @@ agg_this = wtd_agg(df_this)
 agg_last = wtd_agg(df_last)
 
 if agg_this.empty:
+    with st.expander("🔧 WTD Debug (openen bij lege tabel)"):
+        st.write("this_week — HTTP / payload / json / vorm:", dbg_this)
+        st.write("last_week  — HTTP / payload / json / vorm:", dbg_last)
+        st.write("Rows before/after < TODAY filter — this_week:", rows_before_this, rows_after_this,
+                 " last_week:", rows_before_last, rows_after_last)
+        st.write("df_this head:", df_this.head() if not df_this.empty else "(leeg)")
+        st.write("df_last head:", df_last.head() if not df_last.empty else "(leeg)")
     st.info("Geen WTD data beschikbaar.")
     st.stop()
 
@@ -258,13 +324,8 @@ st.markdown("## 🤖 AI Coach")
 def pct(x):
     try: return float(x)/100.0
     except: return 0.0
-
-def eur(x, decimals=0):
-    fmt = f"€{x:,.{decimals}f}"
-    return fmt.replace(",", ".")
-
-def safe_div(a, b):
-    return (a/b) if (b and not np.isnan(b) and b!=0) else 0.0
+def eur(x, decimals=0): return f"€{x:,.{decimals}f}".replace(",", ".")
+def safe_div(a, b): return (a/b) if (b and not np.isnan(b) and b!=0) else 0.0
 
 vis_y   = float(gy.get("count_in", 0))
 turn_y  = float(gy.get("turnover", 0.0))
@@ -310,82 +371,13 @@ if ch_here > 0:
 elif ch_here < 0:
     rules.append("**Gezakt in ranking** → check wachttijd aan kassa & passtijden; daily huddle met 1 micro-doel voor vandaag.")
 
-CITY_COORDS = {
-    "Amersfoort": (52.1561, 5.3878),
-    "Amsterdam": (52.3676, 4.9041),
-    "Den Bosch": (51.6978, 5.3037),
-    "Haarlem": (52.3874, 4.6462),
-    "Leiden": (52.1601, 4.4970),
-    "Maastricht": (50.8514, 5.6900),
-    "Nijmegen": (51.8126, 5.8372),
-    "Rotterdam": (51.9244, 4.4777),
-    "Venlo": (51.3704, 6.1724),
-}
-def get_weather_note(city):
-    try:
-        lat, lon = CITY_COORDS.get(city, (None, None))
-        if lat is None: return None
-        url = (
-          "https://api.open-meteo.com/v1/forecast"
-          f"?latitude={lat}&longitude={lon}&hourly=precipitation_probability,temperature_2m"
-          "&forecast_days=1&timezone=Europe%2FAmsterdam"
-        )
-        r = requests.get(url, timeout=6); r.raise_for_status()
-        js = r.json()
-        probs = js.get("hourly", {}).get("precipitation_probability", []) or []
-        temp  = js.get("hourly", {}).get("temperature_2m", []) or []
-        rain_prob = max(probs) if probs else 0
-        tmax = max(temp) if temp else None
-        tips = []
-        if rain_prob >= 50:
-            tips.append("**Regen verwacht** → meer passanten naar indoor; plan queue-busting voor 12-15u.")
-        if tmax and tmax >= 24:
-            tips.append("**Warmer weer** → verwacht middagdip; plan demo’s en light promo’s 11-13u.")
-        return " ".join(tips) if tips else None
-    except Exception:
-        return None
-
-weather_tip = get_weather_note(store_name)
-if weather_tip:
-    rules.append(weather_tip)
-
-cA, cB = st.columns(2)
-def eur_fmt(x, decimals=0): return f"€{x:,.{decimals}f}".replace(",", ".")
-
-with cA:
-    st.markdown(f"""
-    <div class="kpi-card">
-      <div class="kpi-title">🎯 Live conversie-actie</div>
-      <div class="kpi-value">{eur_fmt(uplift_conv,0)}</div>
-      <div class="kpi-delta up">potentiële uplift (→ peermediaan/eergisteren)</div>
-      <ul>
-        <li>Verschuif <b>1 FTE</b> naar begroeten/paskamers in drukte-uren.</li>
-        <li>Korte <b>floor-coaching</b>: greet → vraag → voorstel.</li>
-        <li>Monitor conversie per uur; stoplight targets (rood &lt; peermed).</li>
-      </ul>
-    </div>
-    """, unsafe_allow_html=True)
-
-with cB:
-    st.markdown(f"""
-    <div class="kpi-card">
-      <div class="kpi-title">🛒 Upsell / ATV-actie</div>
-      <div class="kpi-value">{eur_fmt(uplift_spv,0)}</div>
-      <div class="kpi-delta up">potentiële uplift (→ peermediaan/eergisteren)</div>
-      <ul>
-        <li>Activeer <b>bundle-tile</b> (“2e artikel −20%”) in stille uren.</li>
-        <li>Kassa-script: <b>1 add-on vraag</b> per klant (riem, sokken).</li>
-        <li>Top-3 <b>attach-producten</b> naast kassazone.</li>
-      </ul>
-    </div>
-    """, unsafe_allow_html=True)
-
-if rules:
-    st.markdown('<div class="lb-card"><div class="lb-title">📋 Coach-samenvatting</div></div>', unsafe_allow_html=True)
-    for r in rules:
-        st.markdown(f"- {r}")
+# (optionele weer-hook hier weggelaten om focus te houden)
 
 # ────────────────────────────── Debug (optioneel) ───────────────────────────────
 with st.expander("🔧 Debug — API calls"):
-    st.write("Cards call params:", p_cards, "| status:", status_cards)
-    st.write("Leaderboard this_week params:", p_this, "| last_week params:", p_last)
+    st.write("Cards call — payload (first 10):", p_cards[:10], "| http:", status_cards)
+    st.write("Cards debug:", dbg_cards)
+    st.write("WTD this_week payload (first 10):", p_this[:10], "| http:", s_this)
+    st.write("WTD last_week  payload (first 10):", p_last[:10], "| http:", s_last)
+    st.write("WTD this_week debug:", dbg_this)
+    st.write("WTD last_week  debug:", dbg_last)
