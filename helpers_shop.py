@@ -1,45 +1,76 @@
-# helpers_shop.py
-# Backwards-compatible helper voor winkelmetadata + regio’s
+# helpers_shop.py  — uniforme helpers voor winkels & regio's
+from __future__ import annotations
 
 try:
-    from shop_mapping import SHOP_NAME_MAP as RAW_MAP   # kan oud of nieuw formaat zijn
+    # Verwacht: shop_mapping.py in de project-root
+    from shop_mapping import SHOP_NAME_MAP as RAW_MAP
 except Exception:
     RAW_MAP = {}
 
-def _normalize(raw: dict) -> dict:
+def _normalize_id(val):
+    try:
+        return int(val)
+    except Exception:
+        return val
+
+def _normalized_id_to_name(raw: dict) -> dict[int, str]:
     """
-    Normaliseer naar: { shop_id: {"name": str, "region": str} }
-    - Oud formaat: {id: "Naam"}  -> {"name": "Naam", "region": "All"}
-    - Nieuw formaat: laat "name" en "region" intact, default "region" = "All"
+    Ondersteunt:
+      {id: "Naam"}  of  {id: {"name": "Naam", "region": "...", ...}}
     """
-    norm = {}
-    for sid, meta in (raw or {}).items():
+    if not isinstance(raw, dict):
+        return {}
+
+    result: dict[int, str] = {}
+    for sid, meta in raw.items():
+        sid_norm = _normalize_id(sid)
         if isinstance(meta, dict):
-            name = meta.get("name")
-            region = meta.get("region") or "All"
+            name = (
+                meta.get("name")
+                or meta.get("shop_name")
+                or meta.get("title")
+                or f"Shop {sid_norm}"
+            )
         else:
-            name = str(meta) if meta is not None else None
-            region = "All"
-        if name:
-            norm[sid] = {"name": name, "region": region}
-    return norm
+            # string / iets anders
+            name = str(meta) if meta is not None else f"Shop {sid_norm}"
+        result[sid_norm] = name
+    return result
 
-SHOP_META = _normalize(RAW_MAP)             # genormaliseerde bron
-# Handige exports:
-ID_TO_NAME   = {sid: m["name"]   for sid, m in SHOP_META.items()}
-NAME_TO_ID   = {m["name"]: sid   for sid, m in SHOP_META.items()}
-ID_TO_REGION = {sid: m["region"] for sid, m in SHOP_META.items()}
+def _id_to_region(raw: dict) -> dict[int, str]:
+    """Region uit nieuw formaat; anders 'All'."""
+    regions: dict[int, str] = {}
+    for sid, meta in raw.items():
+        sid_norm = _normalize_id(sid)
+        reg = "All"
+        if isinstance(meta, dict):
+            reg = (
+                meta.get("region")
+                or meta.get("regio")
+                or "All"
+            )
+        regions[sid_norm] = reg
+    return regions
 
-# Regio-lijst (inclusief "All" als fallback)
-REGIONS = sorted(set(ID_TO_REGION.values())) or ["All"]
+# --------- Publieke objecten ----------
+ID_TO_NAME   = _normalized_id_to_name(RAW_MAP)        # {id -> naam}
+NAME_TO_ID   = {name: sid for sid, name in ID_TO_NAME.items()}  # {naam -> id}
+ID_TO_REGION = _id_to_region(RAW_MAP)                  # {id -> regio}
+REGIONS      = ["All"] + sorted(
+    {r for r in ID_TO_REGION.values() if r and r != "All"}
+)
 
-def get_ids_by_region(region: str):
-    if region == "All":
+# Backwards compat: sommige pagina’s importeerden SHOP_NAME_MAP als {id->naam}
+SHOP_NAME_MAP = ID_TO_NAME
+
+def get_ids_by_region(region: str | None):
+    """Alle shop_ids in regio; bij 'All'/None: alle winkels."""
+    if not region or region == "All":
         return list(ID_TO_NAME.keys())
     return [sid for sid, r in ID_TO_REGION.items() if r == region]
 
-def get_region_by_id(shop_id: int):
-    return ID_TO_REGION.get(shop_id, "All")
-
-def get_name_by_id(shop_id: int):
+def get_name_by_id(shop_id: int) -> str | None:
     return ID_TO_NAME.get(shop_id)
+
+def get_region_by_id(shop_id: int) -> str | None:
+    return ID_TO_REGION.get(shop_id)
