@@ -43,9 +43,6 @@ st.markdown(f"""
 </style>
 """, unsafe_allow_html=True)
 
-NAME_TO_ID = {v:k for k,v in SHOP_NAME_MAP.items()}
-ID_TO_NAME = {k:v for k,v in SHOP_NAME_MAP.items()}
-
 store_name = st.selectbox("Kies winkel", list(NAME_TO_ID.keys()), index=0)
 store_id   = NAME_TO_ID[store_name]
 
