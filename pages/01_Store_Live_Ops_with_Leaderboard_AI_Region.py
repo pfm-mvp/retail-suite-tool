@@ -14,6 +14,8 @@ from helpers_normalize import normalize_vemcount_response
 st.set_page_config(page_title="Store Live Ops — Gisteren vs Eergisteren + Leaderboard",
                    page_icon="🛍️", layout="wide")
 st.title("🛍️ Store Live Ops — Gisteren vs Eergisteren + Leaderboard")
+st.caption(f"Loaded shops: {len(ID_TO_NAME)}")
+st.write(list(ID_TO_NAME.items())[:3])  # eerste 3 ter controle
 
 API_URL = st.secrets["API_URL"]
 
