@@ -9,7 +9,10 @@ import streamlit as st
 # ---------- Imports / mapping ----------
 sys.path.append(os.path.abspath(os.path.dirname(__file__) + '/../'))
 # bovenin bij de imports:
-from helpers_shop import SHOP_NAME_MAP, ID_TO_NAME, NAME_TO_ID
+# oud
+# from shop_mapping import SHOP_NAME_MAP
+# nieuw
+from helpers_shop import ID_TO_NAME, NAME_TO_ID
 from helpers_normalize import normalize_vemcount_response
 
 st.set_page_config(page_title="Store Live Ops — Gisteren vs Eergisteren + Leaderboard", page_icon="🛍️", layout="wide")
@@ -71,7 +74,7 @@ def fetch_df(shop_ids, period, step, metrics):
     params += [("source","shops"), ("period", period), ("step", step)]
     resp = post_report(params)
     js = resp.json()
-    df = normalize_vemcount_response(js, SHOP_NAME_MAP, kpi_keys=metrics)
+    df = normalize_vemcount_response(js, ID_TO_NAME, kpi_keys=metrics)
     dfe = add_effective_date(df)
     return dfe, params, resp.status_code
 
@@ -141,7 +144,7 @@ with c4:
 st.markdown("---")
 
 # ---------- Leaderboard (WTD t/m gisteren) ----------
-all_ids = list(SHOP_NAME_MAP.keys())
+all_ids = list(ID_TO_NAME.keys())
 
 def fetch_wtd(period):
     df, p, s = fetch_df(all_ids, period, "day", METRICS)
@@ -163,7 +166,7 @@ def wtd_agg(d: pd.DataFrame) -> pd.DataFrame:
     ).reset_index()
     conv.columns = ["shop_id","conversion_rate"]
     g = g.merge(conv, on="shop_id", how="left")
-    g["shop_name"] = g["shop_id"].map(SHOP_NAME_MAP)
+    g["shop_name"] = g["shop_id"].map(ID_TO_NAME)
     return g
 
 agg_this = wtd_agg(df_this)
