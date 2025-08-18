@@ -17,10 +17,6 @@ try:
 except Exception:
     _RAW_MAP = {}
 
-# Build canonical maps (prefer helpers, fallback to raw)
-ID_TO_NAME = dict(_ID_TO_NAME) if _ID_TO_NAME else dict(_RAW_MAP)            # {id -> name}
-NAME_TO_ID = dict(_NAME_TO_ID) if _NAME_TO_ID else {v: k for k, v in _RAW_MAP.items()}  # {name -> id}
-
 # Derive store options
 store_options = sorted(ID_TO_NAME.values())
 
