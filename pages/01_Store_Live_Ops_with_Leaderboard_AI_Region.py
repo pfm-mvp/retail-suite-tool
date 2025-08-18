@@ -10,7 +10,7 @@ import streamlit as st
 sys.path.append(os.path.abspath(os.path.dirname(__file__) + '/../'))
 
 # ✅ Use the helper (do NOT rebuild dicts yourself)
-from helpers_shop import ID_TO_NAME, NAME_TO_ID   # {id->name}, {name->id}
+from helpers_shop import ID_TO_NAME, NAME_TO_ID
 from helpers_normalize import normalize_vemcount_response
 
 st.caption(f"Loaded shops: {len(ID_TO_NAME)}")
