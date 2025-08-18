@@ -83,6 +83,10 @@ df = df[pd.notna(df.get("shop_id"))]
 # Wide view for per-day per-shop rows
 wide = to_wide(df)  # one row per date+shop
 
+with st.expander("🔧 Debug — fetch result"):
+    st.write("Rows:", len(df), "Shops:", df.get("shop_id", pd.Series()).nunique())
+    st.dataframe(df.head(10))
+
 # Baselines per store (sum over period)
 base = wide.groupby(["shop_id","shop_name"], as_index=False).agg({
     "count_in":"sum",
