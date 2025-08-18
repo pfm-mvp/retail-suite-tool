@@ -42,7 +42,12 @@ st.markdown(f"""
 # ---------- Inputs ----------
 PERIODS = ["this_week","last_week","this_month","last_month","this_quarter","last_quarter","this_year","last_year"]
 period = st.selectbox("Periode", PERIODS, index=1, key="p02_period")
-regio  = st.selectbox("Regio", REGIONS, index=0, key="p02_region")
+regio = st.selectbox("Regio", ["All"] + REGIONS, index=0)
+shop_ids = get_ids_by_region(regio)
+df_cur, p_cur, s_cur = fetch_df(shop_ids, period, "day", METRICS)
+...
+if has_true_previous:
+    df_prev, p_prev, s_prev = fetch_df(shop_ids, period_prev, "day", METRICS)
 
 # Bepaal shop_ids op basis van regio
 shop_ids = get_ids_by_region(regio)
