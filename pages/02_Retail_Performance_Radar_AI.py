@@ -1,8 +1,7 @@
 # pages/02_Retail_Performance_Radar_AI.py
 import os, sys
 from datetime import datetime
-import pytz
-import requests
+import pytz, requests
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -19,10 +18,9 @@ st.title("🧭 Region Performance Radar")
 
 API_URL = st.secrets["API_URL"]
 
-# ---------- PFM-styling ----------
+# ---------- Styles ----------
 PFM_RED    = "#F04438"
 PFM_GREEN  = "#22C55E"
-PFM_PURPLE = "#6C4EE3"
 PFM_GRAY   = "#6B7280"
 
 st.markdown(f"""
@@ -34,25 +32,22 @@ st.markdown(f"""
 .badge.up {{ color:{PFM_GREEN}; background: rgba(34,197,94,.10); }}
 .badge.down {{ color:{PFM_RED}; background: rgba(240,68,56,.10); }}
 .badge.flat {{ color:{PFM_GRAY}; background: rgba(107,114,128,.10); }}
-.box {{ border:1px dashed #ddd; border-radius:12px; padding:14px; background:#FAFAFC; }}
-.box h4 {{ margin:0 0 8px 0; }}
 </style>
 """, unsafe_allow_html=True)
 
 # ---------- Inputs ----------
 PERIODS = ["this_week","last_week","this_month","last_month","this_quarter","last_quarter","this_year","last_year"]
-colP, colR = st.columns([1,1])
-with colP:
+cP, cR = st.columns([1,1])
+with cP:
     period = st.selectbox("Periode", PERIODS, index=1, key="radar_period")
-with colR:
-    regio = st.selectbox("Regio", ["All"] + REGIONS, index=0, key="radar_region")
+with cR:
+    region = st.selectbox("Regio", ["All"] + REGIONS, index=0, key="radar_region")
 
-# bepaal de shop_ids vanuit regio
-if regio == "All":
+# Shop IDs obv regio
+if region == "All":
     ALL_IDS = list(ID_TO_NAME.keys())
 else:
-    shop_ids_from_region = get_ids_by_region(regio)
-    ALL_IDS = shop_ids_from_region if shop_ids_from_region else list(ID_TO_NAME.keys())
+    ALL_IDS = get_ids_by_region(region) or list(ID_TO_NAME.keys())
 
 if not ALL_IDS:
     st.warning("Geen winkels gevonden (mapping leeg).")
@@ -73,8 +68,7 @@ def add_effective_date(df: pd.DataFrame) -> pd.DataFrame:
     if "date" not in d.columns:
         d["date"] = pd.NaT
     ts = pd.to_datetime(d.get("timestamp"), errors="coerce")
-    d["date_eff"] = pd.to_datetime(d["date"], errors="coerce").fillna(ts)
-    d["date_eff"] = d["date_eff"].dt.date
+    d["date_eff"] = pd.to_datetime(d["date"], errors="coerce").fillna(ts).dt.date
     return d
 
 def fetch_df(shop_ids, period, step, metrics):
@@ -83,17 +77,15 @@ def fetch_df(shop_ids, period, step, metrics):
     params += [("source","shops"), ("period", period), ("step", step)]
     r = post_report(params)
     js = r.json()
-    # ⚠️ mapping moet id->name zijn
-    df = normalize_vemcount_response(js, ID_TO_NAME, kpi_keys=metrics)
+    df = normalize_vemcount_response(js, ID_TO_NAME, kpi_keys=metrics)  # mapping {id->name}
     dfe = add_effective_date(df)
     return dfe, params, r.status_code
 
 def weighted_avg(series, weights):
     try:
-        w = weights.fillna(0.0)
-        s = series.fillna(0.0)
-        d = w.sum()
-        return (s*w).sum()/d if d else np.nan
+        w = weights.fillna(0.0); s = series.fillna(0.0)
+        denom = w.sum()
+        return (s*w).sum()/denom if denom else np.nan
     except Exception:
         return np.nan
 
@@ -104,17 +96,11 @@ def fmt_pct2(x): return f"{x:.2f}%"
 # ---------- Data ophalen ----------
 df_cur, p_cur, s_cur = fetch_df(ALL_IDS, period, "day", METRICS)
 
-# Alleen voor this_* is er een zinnige vorige periode (last_*)
-prev_map = {
-    "this_week": "last_week",
-    "this_month": "last_month",
-    "this_quarter": "last_quarter",
-    "this_year": "last_year",
-}
-has_true_previous = period in prev_map
-period_prev = prev_map.get(period, None)
+prev_map = {"this_week":"last_week","this_month":"last_month","this_quarter":"last_quarter","this_year":"last_year"}
+has_prev = period in prev_map
+period_prev = prev_map.get(period)
 
-if has_true_previous:
+if has_prev:
     df_prev, p_prev, s_prev = fetch_df(ALL_IDS, period_prev, "day", METRICS)
 else:
     df_prev, p_prev, s_prev = (pd.DataFrame(), [], None)
@@ -136,10 +122,7 @@ def agg_store(d: pd.DataFrame) -> pd.DataFrame:
            .apply(lambda s: float(s.dropna().iloc[-1]) if s.dropna().size else np.nan)
            ).reset_index()
     g = g.merge(sqm, on="shop_id", how="left")
-    g["sales_per_sqm"] = g.apply(
-        lambda r: (r["turnover"]/r["sq_meter"]) if (pd.notna(r["sq_meter"]) and r["sq_meter"]>0) else np.nan,
-        axis=1
-    )
+    g["sales_per_sqm"] = np.where(g["sq_meter"]>0, g["turnover"]/g["sq_meter"], np.nan)
     g["shop_name"] = g["shop_id"].map(ID_TO_NAME)
     return g
 
@@ -157,108 +140,108 @@ total_sqm  = cur["sq_meter"].fillna(0).sum()
 
 avg_conv   = weighted_avg(cur["conversion_rate"],   cur["count_in"])
 avg_spv    = weighted_avg(cur["sales_per_visitor"], cur["count_in"])
-avg_spsqm  = (total_turn / total_sqm) if total_sqm > 0 else np.nan
+avg_spsqm  = (total_turn/total_sqm) if total_sqm>0 else np.nan
 
-if has_true_previous and not prev.empty:
+if has_prev and not prev.empty:
     prev_total_turn = prev["turnover"].sum()
     prev_total_sqm  = prev["sq_meter"].fillna(0).sum()
     prev_avg_conv   = weighted_avg(prev["conversion_rate"],   prev["count_in"])
     prev_avg_spv    = weighted_avg(prev["sales_per_visitor"], prev["count_in"])
-    prev_avg_spsqm  = (prev_total_turn / prev_total_sqm) if prev_total_sqm > 0 else np.nan
+    prev_avg_spsqm  = (prev_total_turn/prev_total_sqm) if prev_total_sqm>0 else np.nan
 else:
     prev_total_turn = prev_avg_conv = prev_avg_spv = prev_avg_spsqm = np.nan
 
 def delta(this, last):
-    if pd.isna(this) or pd.isna(last):
-        return (np.nan, "flat", False)
+    if pd.isna(this) or pd.isna(last): return (np.nan, "flat", False)
     diff = float(this) - float(last)
     cls = "up" if diff>0 else ("down" if diff<0 else "flat")
     return (diff, cls, True)
 
 def badge(label_value, cls, is_real_delta, money=False, pp=False):
-    if not is_real_delta:
-        return f'<span class="badge flat">n.v.t.</span>'
+    if not is_real_delta: return '<span class="badge flat">n.v.t.</span>'
     if money:
-        val = f"{'+' if label_value>0 else ''}{'€'}{abs(label_value):,.0f}".replace(",",".")
+        val = f"{'+' if label_value>0 else ''}€{abs(label_value):,.0f}".replace(",", ".")
     elif pp:
         val = f"{'+' if label_value>0 else ''}{abs(label_value):.2f}pp"
     else:
         val = f"{'+' if label_value>0 else ''}{abs(label_value):.2f}"
     return f'<span class="badge {cls}">{val} vs vorige periode</span>'
 
-if has_true_previous:
-    d_turn,  cls_turn,  ok1 = delta(total_turn, prev_total_turn)
-    d_conv,  cls_conv,  ok2 = delta(avg_conv,   prev_avg_conv)
-    d_spv,   cls_spv,   ok3 = delta(avg_spv,    prev_avg_spv)
-    d_spsqm, cls_spsqm, ok4 = delta(avg_spsqm,  prev_avg_spsqm)
-else:
-    d_turn = d_conv = d_spv = d_spsqm = np.nan
-    cls_turn = cls_conv = cls_spv = cls_spsqm = "flat"
-    ok1 = ok2 = ok3 = ok4 = False
+d_turn, cls_turn, ok1 = delta(total_turn, prev_total_turn) if has_prev else (np.nan,"flat",False)
+d_conv, cls_conv, ok2 = delta(avg_conv,   prev_avg_conv)   if has_prev else (np.nan,"flat",False)
+d_spv,  cls_spv,  ok3 = delta(avg_spv,    prev_avg_spv)    if has_prev else (np.nan,"flat",False)
+d_spsqm,cls_spsqm,ok4 = delta(avg_spsqm,  prev_avg_spsqm)  if has_prev else (np.nan,"flat",False)
 
 # ---------- KPI Cards ----------
 c1,c2,c3,c4 = st.columns(4)
 with c1:
-    st.markdown(f"""<div class="kpi">
-    <div class="t">💶 Totale omzet</div>
-    <div class="v">{fmt_eur0(total_turn)}</div>
-    {badge(d_turn, cls_turn, ok1, money=True)}
-    </div>""", unsafe_allow_html=True)
+    st.markdown(f"""<div class="kpi"><div class="t">💶 Totale omzet</div>
+    <div class="v">{fmt_eur0(total_turn)}</div>{badge(d_turn, cls_turn, ok1, money=True)}</div>""", unsafe_allow_html=True)
 with c2:
-    st.markdown(f"""<div class="kpi">
-    <div class="t">🛒 Gem. conversie</div>
-    <div class="v">{fmt_pct2(avg_conv)}</div>
-    {badge(d_conv, cls_conv, ok2, pp=True)}
-    </div>""", unsafe_allow_html=True)
+    st.markdown(f"""<div class="kpi"><div class="t">🛒 Gem. conversie</div>
+    <div class="v">{fmt_pct2(avg_conv)}</div>{badge(d_conv, cls_conv, ok2, pp=True)}</div>""", unsafe_allow_html=True)
 with c3:
-    st.markdown(f"""<div class="kpi">
-    <div class="t">💸 Gem. SPV</div>
-    <div class="v">{fmt_eur2(avg_spv)}</div>
-    {badge(d_spv, cls_spv, ok3, money=True)}
-    </div>""", unsafe_allow_html=True)
+    st.markdown(f"""<div class="kpi"><div class="t">💸 Gem. SPV</div>
+    <div class="v">{fmt_eur2(avg_spv)}</div>{badge(d_spv, cls_spv, ok3, money=True)}</div>""", unsafe_allow_html=True)
 with c4:
-    st.markdown(f"""<div class="kpi">
-    <div class="t">🏁 Gem. sales/m²</div>
-    <div class="v">{fmt_eur2(avg_spsqm)}</div>
-    {badge(d_spsqm, cls_spsqm, ok4, money=True)}
-    </div>""", unsafe_allow_html=True)
+    st.markdown(f"""<div class="kpi"><div class="t">🏁 Gem. sales/m²</div>
+    <div class="v">{fmt_eur2(avg_spsqm)}</div>{badge(d_spsqm, cls_spsqm, ok4, money=True)}</div>""", unsafe_allow_html=True)
 
 st.markdown("---")
 
-# ---------- Radarvergelijking ----------
+# ---------- Radarvergelijking (Regio → auto-select) ----------
 st.subheader("📈 Radarvergelijking (Conversie / SPV / Sales per m²)")
-metric_cols = ["conversion_rate","sales_per_visitor","sales_per_sqm"]
 
+metric_cols = ["conversion_rate","sales_per_visitor","sales_per_sqm"]
 norm = cur[["shop_id","shop_name"] + metric_cols].copy()
+
+# robuste min-max normalisatie
 for m in metric_cols:
     v = pd.to_numeric(norm[m], errors="coerce")
     vmin, vmax = v.min(skipna=True), v.max(skipna=True)
-    if pd.isna(vmin) or pd.isna(vmax) or vmax == vmin:
+    if pd.isna(vmin) or pd.isna(vmax) or vmax <= vmin:
         norm[m + "_norm"] = 0.0
     else:
         norm[m + "_norm"] = (v - vmin) / (vmax - vmin)
 
-default_names = list(ID_TO_NAME.values())[:4]
-sel_names = st.multiselect("Vergelijk winkels (max 6)",
-                           list(ID_TO_NAME.values()),
-                           default=default_names, max_selections=6, key="radar_multiselect")
-sel = norm[norm["shop_name"].isin(sel_names)]
+# Als er >6 winkels in de regio zijn → kies top-6 op omzet (kan je aanpassen)
+if len(norm) > 6:
+    top_ids = cur.sort_values("turnover", ascending=False)["shop_id"].head(6).tolist()
+    norm_sel = norm[norm["shop_id"].isin(top_ids)].copy()
+else:
+    norm_sel = norm.copy()
 
-if not sel.empty:
+if norm_sel.empty:
+    st.info("Geen winkels in deze regio voor de radar.")
+else:
     categories = ["Conversie","SPV","Sales/m²"]
+
+    # PFM brand colors
+    PFM_RADAR_COLORS = ["#21114E", "#5B167E", "#922B80", "#CC3F71", "#F56B5C", "#FEAC76"]
+
     fig = go.Figure()
-    for _, row in sel.iterrows():
-        values = [row["conversion_rate_norm"], row["sales_per_visitor_norm"], row["sales_per_sqm_norm"]]
+    for i, (_, row) in enumerate(norm_sel.iterrows()):
+        values = [
+            float(row.get("conversion_rate_norm", 0.0)),
+            float(row.get("sales_per_visitor_norm", 0.0)),
+            float(row.get("sales_per_sqm_norm", 0.0)),
+        ]
+        color = PFM_RADAR_COLORS[i % len(PFM_RADAR_COLORS)]
         fig.add_trace(go.Scatterpolar(
             r=values + values[:1],
             theta=categories + categories[:1],
             fill='toself',
-            name=row["shop_name"]
+            name=row["shop_name"],
+            line=dict(color=color),
+            fillcolor=color + "33"  # ~20% alpha
         ))
-    fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0,1])), showlegend=True, height=520)
+    fig.update_layout(
+        polar=dict(radialaxis=dict(visible=True, range=[0,1])),
+        showlegend=True,
+        height=520,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
     st.plotly_chart(fig, use_container_width=True)
-else:
-    st.info("Kies één of meer winkels om de radar te tonen.")
 
 # ---------- Tops & Flops ----------
 st.subheader("🏆 Tops & Flops")
@@ -288,54 +271,41 @@ with cB:
 
 # ---------- Leaderboard t.o.v. regio-gemiddelde ----------
 st.subheader("🏁 Leaderboard — sales/m² t.o.v. regio-gemiddelde")
-
-comp = cur[["shop_name", "sales_per_sqm", "turnover", "sq_meter"]].copy()
+comp = cur[["shop_name","sales_per_sqm"]].copy()
 comp["region_avg_spsqm"] = avg_spsqm
 comp["delta_eur_sqm"] = comp["sales_per_sqm"] - comp["region_avg_spsqm"]
 comp["delta_pct"] = np.where(
     comp["region_avg_spsqm"] > 0,
-    (comp["delta_eur_sqm"] / comp["region_avg_spsqm"]) * 100.0,
+    (comp["delta_eur_sqm"]/comp["region_avg_spsqm"]) * 100.0,
     np.nan
 )
-
 sort_best_first = st.toggle("Beste afwijking eerst", value=True, key="radar_toggle_best")
 comp = comp.sort_values("delta_eur_sqm", ascending=not sort_best_first)
 
-show = comp[["shop_name","sales_per_sqm","region_avg_spsqm","delta_eur_sqm","delta_pct"]].rename(columns={
-    "shop_name": "winkel",
-    "sales_per_sqm": "sales/m²",
-    "region_avg_spsqm": "gem. sales/m² (regio)",
-    "delta_eur_sqm": "Δ vs gem. (€/m²)",
-    "delta_pct": "Δ vs gem. (%)",
-})
+show = comp.rename(columns={
+    "shop_name":"winkel", "sales_per_sqm":"sales/m²",
+    "region_avg_spsqm":"gem. sales/m² (regio)",
+    "delta_eur_sqm":"Δ vs gem. (€/m²)", "delta_pct":"Δ vs gem. (%)",
+})[["winkel","sales/m²","gem. sales/m² (regio)","Δ vs gem. (€/m²)","Δ vs gem. (%)"]]
 
 def color_delta(series):
-    styles = []
+    styles=[]
     for v in series:
-        if pd.isna(v) or v == 0:
-            styles.append("color: #6B7280;")
-        elif v > 0:
-            styles.append("color: #22C55E;")
-        else:
-            styles.append("color: #F04438;")
+        if pd.isna(v) or v==0: styles.append("color:#6B7280;")
+        elif v>0: styles.append("color:#22C55E;")
+        else: styles.append("color:#F04438;")
     return styles
 
 styler = (
     show.style
-        .format({
-            "sales/m²": "€{:.2f}",
-            "gem. sales/m² (regio)": "€{:.2f}",
-            "Δ vs gem. (€/m²)": "€{:+.2f}",
-            "Δ vs gem. (%)": "{:+.1f}%"
-        })
+        .format({"sales/m²":"€{:.2f}","gem. sales/m² (regio)":"€{:.2f}","Δ vs gem. (€/m²)":"€{:+.2f}","Δ vs gem. (%)":"{:+.1f}%"})
         .apply(color_delta, subset=["Δ vs gem. (€/m²)"])
         .apply(color_delta, subset=["Δ vs gem. (%)"])
 )
-
 st.dataframe(styler, use_container_width=True)
 
 # ---------- Debug ----------
 with st.expander("🔧 Debug — API calls en samples"):
     st.write("Cur params:", p_cur, "status", s_cur)
-    st.write("Prev params:", p_prev, "status", s_prev if has_true_previous else None)
+    st.write("Prev params:", p_prev, "status", s_prev if has_prev else None)
     st.write("Cur head:", df_cur.head())
