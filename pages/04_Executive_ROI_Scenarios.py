@@ -6,7 +6,7 @@ import pandas as pd
 import numpy as np
 from zoneinfo import ZoneInfo
 
-# Ensure root importable
+# Ensure root importable (helpers in project root)
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -15,6 +15,7 @@ from helpers_shop import ID_TO_NAME
 from utils_pfmx import api_get_report, friendly_error, inject_css
 from helpers_normalize import normalize_vemcount_response, to_wide
 
+# ───────────────────────────────────────────────────────────────────────────────
 st.set_page_config(layout="wide")
 inject_css()
 TZ = ZoneInfo("Europe/Amsterdam")
@@ -33,7 +34,7 @@ def fmt_pct(x, digits=1):
 
 st.title("💼 Executive ROI Scenarios")
 
-# ── Inputs ────────────────────────────────────────────────────────────────────
+# ── Inputs ─────────────────────────────────────────────────────────────────────
 ids = list(ID_TO_NAME.keys())
 period = st.selectbox(
     "Periode",
@@ -43,17 +44,19 @@ period = st.selectbox(
 
 c1,c2,c3,c4 = st.columns(4)
 with c1:
-    # Conversie-uplift in procentpunten (pp)
-    conv_add = st.slider("Conversie uplift (+pp)", 0.0, 20.0, 5.0, 0.5)
+    # Conversie uplifts in percentagepunten (bijv. 6.0 = +6 pp)
+    conv_add_pp = st.slider("Conversie uplift (+pp)", 0.0, 20.0, 6.0, 0.5)
 with c2:
-    spv_uplift = st.slider("SPV-uplift (%)", 0, 50, 10, 1) / 100.0
+    # ATV-uplift in %, multiplicatief op ATV
+    atv_uplift_pct = st.slider("ATV-uplift (%)", 0, 50, 10, 1) / 100.0
 with c3:
     gross_margin = st.slider("Brutomarge (%)", 20, 80, 55, 1) / 100.0
 with c4:
     capex = st.number_input("CAPEX per store (€)", min_value=0, value=1500, step=100)
+
 payback_target = st.slider("Payback-target (mnd)", 6, 24, 12, 1)
 
-# ── Data ophalen ───────────────────────────────────────────────────────────────
+# ── Data ophalen (robust) ──────────────────────────────────────────────────────
 KPI_KEYS = ["count_in", "conversion_rate", "turnover", "sales_per_visitor"]
 
 params = []
@@ -61,14 +64,14 @@ for sid in ids:
     params.append(("data", sid))
 for k in KPI_KEYS:
     params.append(("data_output", k))
-# IMPORTANT: day step so we can compute months robustly
-params += [("source","shops"), ("period", period), ("step","day")]
+# dagresolutie helpt bij vaste aggregaties
+params += [("source", "shops"), ("period", period), ("step", "day")]
 
 js = api_get_report(params)
 if friendly_error(js, period):
     st.stop()
 
-# normalize expects id->name
+# normalize expects id->name map
 df = normalize_vemcount_response(js, ID_TO_NAME, kpi_keys=KPI_KEYS)
 
 if df is None or df.empty:
@@ -78,128 +81,111 @@ if df is None or df.empty:
         st.write("Normalize → empty DataFrame")
     st.stop()
 
-# Ensure shop_id present
-if "shop_id" not in df.columns:
-    st.error("Response mist 'shop_id' kolom na normalisatie.")
-    with st.expander("🔧 Debug"):
-        st.write(df.head())
-    st.stop()
+# Zorg dat 'date' aanwezig is i.v.m. to_wide
+if "date" not in df.columns:
+    df["date"] = pd.to_datetime(df.get("timestamp"), errors="coerce").dt.date
 
-# Build a reliable date column
-# - keep a datetime64[ns] 'date_eff' for grouping / length of period
-# - keep a nice string 'date' for display (if needed)
-ts = pd.to_datetime(df.get("timestamp"), errors="coerce")
-df["date_eff"] = ts.dt.floor("D")
-df["date"] = df["date_eff"].dt.date.astype("string")
+# Safety: drop rows zonder shop_id
+if "shop_id" in df.columns:
+    df = df[pd.notna(df["shop_id"])]
 
-# Drop rows that have no shop or date
-df = df[df["shop_id"].notna() & df["date_eff"].notna()]
-if df.empty:
-    st.warning("Er zijn wel winkels, maar geen rijen met datums in deze periode.")
-    with st.expander("🔧 Debug"):
-        st.write("Params:", params)
-    st.stop()
-
-with st.expander("🔧 Debug — fetch result"):
-    st.write("Rows:", len(df), "Shops:", df["shop_id"].nunique())
-    st.dataframe(df.head(10))
-
-# ── Wide view & baselines per winkel ──────────────────────────────────────────
-# to_wide returns one row per date+shop; it expects a normalised schema.
+# Eén rij per datum × winkel
 wide = to_wide(df)
 
-if wide is None or wide.empty:
-    st.warning("to_wide() gaf geen rijen terug — kan gebeuren als alle KPI's nul/NaN zijn.")
-    with st.expander("🔧 Debug"):
-        st.write("Params:", params)
-        st.dataframe(df.head(10))
-    st.stop()
+# ── Debug (optioneel) ──────────────────────────────────────────────────────────
+with st.expander("🔧 Debug — fetch result"):
+    st.write("Rows:", len(df), "Shops:", df.get("shop_id", pd.Series(dtype=float)).nunique())
+    st.dataframe(df.head(10))
 
-# Aggregate over period per shop
-def _safe_mean(s):
-    s = pd.to_numeric(s, errors="coerce")
-    return float(s.mean()) if s.notna().any() else 0.0
+# ── Baselines per winkel ───────────────────────────────────────────────────────
+base = wide.groupby(["shop_id","shop_name"], as_index=False).agg({
+    "count_in": "sum",
+    "turnover": "sum",
+    "conversion_rate": "mean",       # let op: in % (bijv. 36.5)
+    "sales_per_visitor": "mean"      # SPV in €
+})
 
-base = (
-    wide.groupby(["shop_id","shop_name"], as_index=False)
-        .agg({
-            "count_in":"sum",           # verkeer
-            "turnover":"sum",           # omzet
-            "conversion_rate": _safe_mean,     # gemiddelde conv (gewichtloos OK)
-            "sales_per_visitor": _safe_mean,   # gemiddelde SPV
-        })
-)
+# Conversie in fractie (0–1) en ATV afleiden
+# (SPV = conversie_f * ATV  →  ATV = SPV / conversie_f)
+conv_f_base = (base["conversion_rate"] / 100.0).clip(lower=0.0, upper=1.0)
+# voorkom delen door 0
+base["ATV"] = np.where(conv_f_base > 0, base["sales_per_visitor"] / conv_f_base, 0.0)
 
-if base.empty:
-    st.warning("Geen geaggregeerde rijen per winkel (base is leeg).")
-    with st.expander("🔧 Debug"):
-        st.dataframe(wide.head(10))
-    st.stop()
+# ── Scenario ───────────────────────────────────────────────────────────────────
+# nieuwe conversie (pp → % → fractie)
+conv_f_new = ((base["conversion_rate"] + conv_add_pp) / 100.0).clip(lower=0.0, upper=1.0)
+# nieuwe ATV na uplift
+ATV_new = base["ATV"] * (1.0 + atv_uplift_pct)
+# nieuwe SPV = nieuwe conversie × nieuwe ATV
+spv_new = conv_f_new * ATV_new
+# basis SPV (zou ~ base["sales_per_visitor"] moeten zijn)
+spv_base = conv_f_base * base["ATV"]
 
-# ATV afleiden: SPV = conv * ATV  =>  ATV = SPV / conv
-# Let op: conversie is in %, dus eerst naar fractie.
-conv_frac = pd.to_numeric(base["conversion_rate"], errors="coerce") / 100.0
-spv_val   = pd.to_numeric(base["sales_per_visitor"], errors="coerce")
-base["ATV"] = np.where(conv_frac > 0, spv_val / conv_frac, 0.0)
-
-# ── Scenario berekenen ────────────────────────────────────────────────────────
-# Conversie-uplift in pp → we gebruiken het alleen om de tekst te tonen,
-# de omzet-berekening zelf gebruikt SPV-uplift (zoals eerder).
-new_spv = spv_val * (1 + spv_uplift)
-
-# Extra omzet en brutowinst
-count_in_val = pd.to_numeric(base["count_in"], errors="coerce").fillna(0.0)
-extra_rev = count_in_val * (new_spv - spv_val)
+# extra omzet & brutowinst
+extra_rev = base["count_in"] * (spv_new - spv_base)
 extra_gp  = extra_rev * gross_margin
 
-# Payback/ROI
+# ── Payback/ROI ────────────────────────────────────────────────────────────────
 stores = len(base)
 total_capex = capex * stores
-
-# Aantal dagen uit date_eff
-days = df["date_eff"].nunique()
-months = max(1.0, days / 30.44)  # safeguard tegen 0
+days = df["date"].nunique() if "date" in df.columns else 30
+months = max(1.0, days/30.44)
 monthly_gp = extra_gp.sum()/months if months > 0 else extra_gp.sum()
 payback_months = (total_capex / monthly_gp) if monthly_gp > 0 else np.inf
-roi_pct = ((extra_gp.sum() - total_capex) / total_capex * 100) if total_capex > 0 else 0.0
+roi_pct = (extra_gp.sum() - total_capex) / total_capex * 100 if total_capex > 0 else 0
 
-# ── KPIs tonen ────────────────────────────────────────────────────────────────
+# ── KPI-tegel weergave ─────────────────────────────────────────────────────────
 c1,c2,c3,c4 = st.columns(4)
 c1.metric("📈 Extra omzet (scenario)", fmt_eur(extra_rev.sum()))
 c2.metric("💵 Extra brutowinst", fmt_eur(extra_gp.sum()))
-c3.metric(
-    "⏳ Payback",
-    "∞ mnd" if np.isinf(payback_months) else f"{payback_months:.1f} mnd",
-    delta=f"Target {payback_target} mnd"
-)
+c3.metric("⏳ Payback", "∞ mnd" if np.isinf(payback_months) else f"{payback_months:.1f} mnd",
+          delta=f"Target {payback_target} mnd")
 c4.metric("📊 ROI", fmt_pct(roi_pct,1))
 
-# ── Stores tabel ──────────────────────────────────────────────────────────────
+# ── Tabel top 10 ───────────────────────────────────────────────────────────────
 st.subheader("Stores (top 10 extra brutowinst)")
 base = base.copy()
 base["extra_revenue"] = extra_rev
 base["extra_gross_profit"] = extra_gp
 top = base.sort_values("extra_gross_profit", ascending=False).head(10)
-top["extra_gross_profit_fmt"] = top["extra_gross_profit"].map(fmt_eur)
 
-st.dataframe(
-    top[["shop_name","count_in","sales_per_visitor","conversion_rate","ATV","extra_gross_profit_fmt"]],
-    use_container_width=True
-)
+# weergave-kolommen
+show = top[[
+    "shop_name", "count_in", "sales_per_visitor", "conversion_rate", "ATV", "extra_gross_profit"
+]].rename(columns={
+    "shop_name": "Winkel",
+    "count_in": "Bezoekers",
+    "sales_per_visitor": "SPV",
+    "conversion_rate": "Conversie",
+    "ATV": "ATV",
+    "extra_gross_profit": "Extra brutowinst"
+})
 
-# ── Tips ──────────────────────────────────────────────────────────────────────
+show["Bezoekers"]       = show["Bezoekers"].map(fmt_int)
+show["SPV"]             = show["SPV"].map(lambda x: f"€{x:,.2f}".replace(",", "."))
+show["Conversie"]       = show["Conversie"].map(lambda x: f"{x:.2f}%")
+show["ATV"]             = show["ATV"].map(lambda x: f"€{x:,.2f}".replace(",", "."))
+show["Extra brutowinst"]= show["Extra brutowinst"].map(fmt_eur)
+
+st.dataframe(show, use_container_width=True)
+
+# ── Tips ───────────────────────────────────────────────────────────────────────
 st.subheader("🤖 Board Tips")
 st.markdown(
-    f"- **+{conv_add:.1f} pp conversie** en **+{spv_uplift*100:.0f}% SPV** "
+    f"- **+{conv_add_pp:.1f} pp conversie** en **+{atv_uplift_pct*100:.0f}% ATV** "
     f"leveren **{fmt_eur(extra_gp.sum())}** extra brutowinst op in {months:.1f} mnd; "
     f"payback ≈ **{('∞' if np.isinf(payback_months) else f'{payback_months:.1f}')} mnd**."
 )
-st.markdown(
-    "- Richt CAPEX op winkels met **hoog verkeer maar lage SPV/conversie** "
-    "(zie Region Performance)."
-)
+st.markdown("- Richt CAPEX op winkels met **hoog verkeer maar lage SPV/conversie** (zie Region Performance).")
 
-# ── Debug ─────────────────────────────────────────────────────────────────────
+# ── Debug ──────────────────────────────────────────────────────────────────────
 with st.expander("🔧 Debug"):
-    st.write("Params:", params)
-    st.dataframe(base.head(10))
+    st.code(params)
+    dbg = base[["shop_name","count_in","sales_per_visitor","conversion_rate","ATV"]].copy()
+    dbg["conv_f_base"] = conv_f_base
+    dbg["conv_f_new"]  = conv_f_new
+    dbg["spv_base"]    = spv_base
+    dbg["spv_new"]     = spv_new
+    dbg["extra_rev"]   = extra_rev
+    dbg["extra_gp"]    = extra_gp
+    st.dataframe(dbg.head(10))
