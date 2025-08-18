@@ -8,12 +8,34 @@ import streamlit as st
 
 # ---------- Imports / mapping ----------
 sys.path.append(os.path.abspath(os.path.dirname(__file__) + '/../'))
-# bovenin bij de imports:
-# oud
-# from shop_mapping import SHOP_NAME_MAP
-# nieuw
-from helpers_shop import ID_TO_NAME, NAME_TO_ID
-from helpers_normalize import normalize_vemcount_response
+
+# Primary: robust helpers (works with old/new mapping formats)
+from helpers_shop import ID_TO_NAME as _ID_TO_NAME, NAME_TO_ID as _NAME_TO_ID
+# Fallback: raw mapping if helpers are empty for any reason
+try:
+    from shop_mapping import SHOP_NAME_MAP as _RAW_MAP
+except Exception:
+    _RAW_MAP = {}
+
+# Build canonical maps (prefer helpers, fallback to raw)
+ID_TO_NAME = dict(_ID_TO_NAME) if _ID_TO_NAME else dict(_RAW_MAP)            # {id -> name}
+NAME_TO_ID = dict(_NAME_TO_ID) if _NAME_TO_ID else {v: k for k, v in _RAW_MAP.items()}  # {name -> id}
+
+# Derive store options
+store_options = sorted(ID_TO_NAME.values())
+
+# If still empty, stop early with a clear message (prevents KeyError)
+if not store_options:
+    st.error("Geen winkels gevonden. Controleer 'shop_mapping.py' / 'helpers_shop.py'.")
+    st.stop()
+
+# Safe select (no KeyError when nothing is selected)
+store_name = st.selectbox("Kies winkel", store_options, index=0, placeholder="Selecteer een winkel")
+store_id = NAME_TO_ID.get(store_name)
+
+if store_id is None:
+    st.error("Onbekende winkelselectie. Ververs de pagina of controleer de mapping.")
+    st.stop()
 
 st.set_page_config(page_title="Store Live Ops — Gisteren vs Eergisteren + Leaderboard", page_icon="🛍️", layout="wide")
 st.title("🛍️ Store Live Ops — Gisteren vs Eergisteren + Leaderboard")
@@ -71,7 +93,7 @@ def fetch_df(shop_ids, period, step, metrics):
     params += [("source","shops"), ("period", period), ("step", step)]
     resp = post_report(params)
     js = resp.json()
-    df = normalize_vemcount_response(js, ID_TO_NAME, kpi_keys=metrics)
+    df = normalize_vemcount_response(js, ID_TO_NAME, kpi_keys=metrics)  # expects {id->name}
     dfe = add_effective_date(df)
     return dfe, params, resp.status_code
 
