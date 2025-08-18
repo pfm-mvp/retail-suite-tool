@@ -7,12 +7,28 @@ import pandas as pd
 import streamlit as st
 
 # ---------- Imports / mapping ----------
+# ---------- Imports / mapping ----------
 sys.path.append(os.path.abspath(os.path.dirname(__file__) + '/../'))
-from helpers_shop import ID_TO_NAME, NAME_TO_ID, SHOP_NAME_MAP  # <-- gebruik helpers
+from helpers_shop import ID_TO_NAME, NAME_TO_ID   # ← use robust maps
 from helpers_normalize import normalize_vemcount_response
 
-st.caption(f"Loaded shops: {len(ID_TO_NAME)}")
-# st.write(list(ID_TO_NAME.items())[:5])  # desnoods even kijken
+st.set_page_config(page_title="Store Live Ops — Gisteren vs Eergisteren + Leaderboard", page_icon="🛍️", layout="wide")
+st.title("🛍️ Store Live Ops — Gisteren vs Eergisteren + Leaderboard")
+
+API_URL = st.secrets["API_URL"]
+
+# Quick sanity (optional – helps debugging)
+if not NAME_TO_ID:
+    st.error("Geen winkels geladen uit helpers_shop.py (NAME_TO_ID is leeg). Controleer shop_mapping.py of helpers_shop.py normalisatie.")
+    st.stop()
+
+# ---- Store picker (show names, map back to ids)
+store_options = sorted(ID_TO_NAME.values())
+store_name = st.selectbox("Kies winkel", store_options, index=0)
+store_id = NAME_TO_ID.get(store_name)
+if store_id is None:
+    st.error("Onbekende winkelkeuze – kan id niet vinden.")
+    st.stop()
 
 st.set_page_config(page_title="Store Live Ops — Gisteren vs Eergisteren + Leaderboard",
                    page_icon="🛍️", layout="wide")
