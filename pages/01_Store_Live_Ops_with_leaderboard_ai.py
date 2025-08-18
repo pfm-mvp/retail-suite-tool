@@ -1,4 +1,3 @@
-
 import os, sys, math
 from datetime import datetime
 import pytz
@@ -9,7 +8,11 @@ import streamlit as st
 
 # ---------- Imports / mapping ----------
 sys.path.append(os.path.abspath(os.path.dirname(__file__) + '/../'))
-from shop_mapping import SHOP_NAME_MAP
+# bovenin bij de imports:
+try:
+    from shop_mapping import SHOP_NAME_MAP          # oude stijl {id: "Naam"}
+except Exception:
+    from helpers_shop import ID_TO_NAME as SHOP_NAME_MAP  # fallback
 from helpers_normalize import normalize_vemcount_response
 
 st.set_page_config(page_title="Store Live Ops — Gisteren vs Eergisteren + Leaderboard", page_icon="🛍️", layout="wide")
