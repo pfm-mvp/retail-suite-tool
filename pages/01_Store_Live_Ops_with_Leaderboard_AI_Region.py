@@ -6,18 +6,24 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-# ---------- Imports / mapping ----------
+# bovenaan bij imports in 01_Store_Live_Ops_with_leaderboard_ai.py
+import os, sys
 sys.path.append(os.path.abspath(os.path.dirname(__file__) + '/../'))
-from helpers_shop import ID_TO_NAME, NAME_TO_ID     # gebruik helpers_shop als bron
+from helpers_shop import ID_TO_NAME, NAME_TO_ID   # ← gebruik helpers, niet direct shop_mapping
 from helpers_normalize import normalize_vemcount_response
 
-st.set_page_config(page_title="Store Live Ops — Gisteren vs Eergisteren + Leaderboard",
-                   page_icon="🛍️", layout="wide")
-st.title("🛍️ Store Live Ops — Gisteren vs Eergisteren + Leaderboard")
+# sanity check & store select
 st.caption(f"Loaded shops: {len(ID_TO_NAME)}")
-st.write(list(ID_TO_NAME.items())[:3])  # eerste 3 ter controle
+if not NAME_TO_ID:
+    st.error("Geen winkels geladen (NAME_TO_ID is leeg). Controleer shop_mapping.py en helpers_shop.py.")
+    st.stop()
 
-API_URL = st.secrets["API_URL"]
+store_options = sorted(ID_TO_NAME.values())
+store_name    = st.selectbox("Kies winkel", store_options, index=0)
+store_id      = NAME_TO_ID.get(store_name)
+if store_id is None:
+    st.error("Kon de geselecteerde winkel niet mappen naar een ID.")
+    st.stop()
 
 # ---- Sanity: zijn er winkels? ----
 if not NAME_TO_ID:
