@@ -48,12 +48,13 @@ if not NAME_TO_ID:
     st.error("Geen winkels geladen uit helpers_shop.py (NAME_TO_ID is leeg). Check helpers_shop/SHOP_NAME_MAP.")
     st.stop()
 
-store_options = sorted(ID_TO_NAME.values())           # list of shop names
-default_ix     = 0 if store_options else None
-store_name     = st.selectbox("Kies winkel", store_options, index=default_ix)
-if not store_name:
-    st.warning("Selecteer een winkel.")
+store_options = sorted(ID_TO_NAME.values())
+if not store_options:
+    st.error("Geen winkels geladen uit helpers_shop.py (NAME_TO_ID is leeg). Check helpers_shop/SHOP_NAME_MAP.")
     st.stop()
+
+store_name = st.selectbox("Kies winkel", store_options, index=0)
+store_id   = NAME_TO_ID[store_name]
 
 # Map back to id
 store_id = NAME_TO_ID.get(store_name)
@@ -117,7 +118,7 @@ def fetch_df(shop_ids, period, step, metrics):
     params += [("source","shops"), ("period", period), ("step", step)]
     resp = post_report(params)
     js = resp.json()
-    df = normalize_vemcount_response(js, ID_TO_NAME, kpi_keys=metrics)  # expects {id->name}
+    df = normalize_vemcount_response(js, ID_TO_NAME, kpi_keys=metrics)  # verwacht {id->naam}
     dfe = add_effective_date(df)
     return dfe, params, resp.status_code
 
