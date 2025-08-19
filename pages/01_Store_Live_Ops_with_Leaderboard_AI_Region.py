@@ -377,152 +377,124 @@ def highlight_rows(row):
     return [""]*len(row)
 
 styler = fmt.style.apply(highlight_rows, axis=1)
-def color_pos_col(col):
+def color_pos_col(col_series):
     styles=[]
-    for i,_ in enumerate(col):
-        ch = int(agg.loc[fmt.index[i], "rank_change"]) if pd.notna(agg.loc[fmt.index[i], "rank_change"]) else 0
-        if ch > 0: styles.append(f"color: {PFM_PURPLE}; font-weight: 700")
-        elif ch < 0: styles.append(f"color: {PFM_RED}; font-weight: 700")
+    for i,_ in enumerate(col_series):
+        ch_i = int(agg.loc[fmt.index[i], "rank_change"]) if pd.notna(agg.loc[fmt.index[i], "rank_change"]) else 0
+        if ch_i > 0: styles.append(f"color: {PFM_PURPLE}; font-weight: 700")
+        elif ch_i < 0: styles.append(f"color: {PFM_RED}; font-weight: 700")
         else: styles.append(f"color: {PFM_GRAY}; font-weight: 700")
     return styles
 styler = styler.apply(color_pos_col, subset=["positie (nu vs lw)"])
 st.dataframe(styler, use_container_width=True)
 
 # === 🤖 AI Insights (verbeterde versie) ======================================
-# 1) UI: subtiele highlight-card
-st.markdown("""
-<style>
-.ai-card {
-  border: 1px solid #E9EAF0;
-  border-radius: 16px;
-  padding: 18px 18px 14px 18px;
-  background: linear-gradient(180deg, #FFFFFF 0%, #FCFCFE 100%);
-  box-shadow: 0 1px 0 #F1F2F6, 0 8px 24px rgba(12,17,29,0.06);
-}
-.ai-title {
-  display:flex; align-items:center; gap:10px;
-  font-weight:800; font-size:18px; color:#0C111D; margin-bottom:6px;
-}
-.ai-title .dot {
-  width:10px;height:10px;border-radius:50%;
-  background: radial-gradient(circle at 30% 30%, #9E77ED 0, #6C4EE3 60%, #9E77ED 100%);
-  box-shadow: 0 0 12px rgba(108,78,227,.6);
-}
-.ai-caption { color:#6B7280; font-size:13px; margin-bottom:10px; }
-.ai-body { font-size:15px; line-height:1.5; }
-.ai-body ul { margin:0 0 0 14px; padding:0; }
-</style>
-""", unsafe_allow_html=True)
-
-# 2) Peers-mediaan (robuust), excl. jezelf
-def _safe_float(v):
-    try:
-        f = float(v)
-        return None if np.isnan(f) else f
-    except Exception:
-        return None
-
-peer_conv_med = None
-peer_spv_med  = None
 try:
-    _peers = agg_this[agg_this["shop_id"] != store_id]
-    if len(_peers) >= 2:
-        peer_conv_med = float(np.nanmedian(_peers["conversion_rate"].astype(float)))
-        peer_spv_med  = float(np.nanmedian(_peers["sales_per_visitor"].astype(float)))
-except Exception:
-    pass  # geen ramp; AI prompt vangt dit af
-
-# 3) Compacte context voor het model
-def _safe_num(x, d=2):
-    try:
-        return round(float(x), d)
-    except Exception:
-        return None
-
-_vis_y  = _safe_num(gy.get("count_in", 0), 0)
-_turn_y = _safe_num(gy.get("turnover", 0), 2)
-_conv_y = _safe_num(gy.get("conversion_rate", 0), 2)
-_spv_y  = _safe_num(gy.get("sales_per_visitor", 0), 2)
-if (_spv_y in (None, 0)) and _vis_y not in (None, 0):
-    _spv_y = _safe_num(_turn_y / _vis_y, 2)
-
-_vis_b  = _safe_num(gb.get("count_in", 0), 0)
-_turn_b = _safe_num(gb.get("turnover", 0), 2)
-_conv_b = _safe_num(gb.get("conversion_rate", 0), 2)
-_spv_b  = _safe_num(gb.get("sales_per_visitor", 0), 2)
-if (_spv_b in (None, 0)) and _vis_b not in (None, 0):
-    _spv_b = _safe_num(_turn_b / _vis_b, 2)
-
-_rank_now = None
-_rank_ch   = 0
-try:
-    _me_row = agg[agg["shop_id"] == store_id].iloc[0]
-    _rank_now = int(_me_row["rank_now"])
-    if not pd.isna(_me_row.get("rank_change", np.nan)):
-        _rank_ch = int(_me_row["rank_change"])
-except Exception:
-    pass
-
-ai_context = {
-    "store_name": store_name,
-    "yesterday": {
-        "visitors": _vis_y,
-        "turnover": _turn_y,
-        "conversion_pct": _conv_y,
-        "spv_eur": _spv_y
-    },
-    "day_before": {
-        "visitors": _vis_b,
-        "turnover": _turn_b,
-        "conversion_pct": _conv_b,
-        "spv_eur": _spv_b
-    },
-    "leaderboard": {
-        "rank_now": _rank_now,
-        "rank_change_vs_last_week": _rank_ch
-    },
-    "peers_median": {
-        "conversion_pct": peer_conv_med,
-        "spv_eur": peer_spv_med
+    # 1) UI: subtiele highlight-card
+    st.markdown("""
+    <style>
+    .ai-card {
+      border: 1px solid #E9EAF0;
+      border-radius: 16px;
+      padding: 18px 18px 14px 18px;
+      background: linear-gradient(180deg, #FFFFFF 0%, #FCFCFE 100%);
+      box-shadow: 0 1px 0 #F1F2F6, 0 8px 24px rgba(12,17,29,0.06);
     }
-}
+    .ai-title {
+      display:flex; align-items:center; gap:10px;
+      font-weight:800; font-size:18px; color:#0C111D; margin-bottom:6px;
+    }
+    .ai-title .dot {
+      width:10px;height:10px;border-radius:50%;
+      background: radial-gradient(circle at 30% 30%, #9E77ED 0, #6C4EE3 60%, #9E77ED 100%);
+      box-shadow: 0 0 12px rgba(108,78,227,.6);
+    }
+    .ai-caption { color:#6B7280; font-size:13px; margin-bottom:10px; }
+    .ai-body { font-size:15px; line-height:1.5; }
+    .ai-body ul { margin:0 0 0 14px; padding:0; }
+    </style>
+    """, unsafe_allow_html=True)
 
-# 4) Prompt (NL, kort & actiegericht, veilig bij missende peers)
-sys_msg = (
-    "Je bent een retail floor coach. Geef maximaal 5 korte, concrete acties "
-    "voor vandaag. Gebruik Nederlands. Wees meetbaar, noem bedragen als €X "
-    "en percentages als 12,3%. Geef 1 meettip (wat per uur te checken). "
-    "Als peers_median ontbreekt, negeer die vergelijking. "
-    "Als een KPI lager dan peers_median is: focus daarop."
-)
+    # 2) Compacte context voor het model
+    def _safe_num(x, d=2):
+        try:
+            return round(float(x), d)
+        except Exception:
+            return None
 
-usr_msg = (
-    "Context (JSON):\n"
-    f"{ai_context}\n\n"
-    "Schrijf puntsgewijs. Gebruik emoji spaarzaam (max 1). "
-    "Vermijd algemene adviezen; maak het winkelvloer‑concreet "
-    "(begroeting, paskamers, kassascripts, bundels, voorraad bij de hand, etc.)."
-)
+    _vis_y  = _safe_num(gy.get("count_in", 0), 0)
+    _turn_y = _safe_num(gy.get("turnover", 0), 2)
+    _conv_y = _safe_num(gy.get("conversion_rate", 0), 2)
+    _spv_y  = _safe_num(gy.get("sales_per_visitor", 0), 2)
+    if (_spv_y in (None, 0)) and _vis_y not in (None, 0):
+        _spv_y = _safe_num(_turn_y / _vis_y, 2)
 
-# 5) Call OpenAI (alleen als key aanwezig)
-from importlib import import_module
-_openai_ready = False
-try:
-    openai_mod = import_module("openai")
-    from openai import OpenAI
-    _openai_ready = True
-except Exception:
-    pass
+    _vis_b  = _safe_num(gb.get("count_in", 0), 0)
+    _turn_b = _safe_num(gb.get("turnover", 0), 2)
+    _conv_b = _safe_num(gb.get("conversion_rate", 0), 2)
+    _spv_b  = _safe_num(gb.get("sales_per_visitor", 0), 2)
+    if (_spv_b in (None, 0)) and _vis_b not in (None, 0):
+        _spv_b = _safe_num(_turn_b / _vis_b, 2)
 
-with st.container():
+    _rank_now = None
+    _rank_ch   = 0
+    try:
+        _me_row = agg[agg["shop_id"] == store_id].iloc[0]
+        _rank_now = int(_me_row["rank_now"])
+        if not pd.isna(_me_row.get("rank_change", np.nan)):
+            _rank_ch = int(_me_row["rank_change"])
+    except Exception:
+        pass
+
+    ai_context = {
+        "store_name": store_name,
+        "yesterday": {
+            "visitors": _vis_y,
+            "turnover": _turn_y,
+            "conversion_pct": _conv_y,
+            "spv_eur": _spv_y
+        },
+        "day_before": {
+            "visitors": _vis_b,
+            "turnover": _turn_b,
+            "conversion_pct": _conv_b,
+            "spv_eur": _spv_b
+        },
+        "leaderboard": {
+            "rank_now": _rank_now,
+            "rank_change_vs_last_week": _rank_ch
+        },
+        "peers_median": {
+            "conversion_pct": peer_conv_med if 'peer_conv_med' in locals() else None,
+            "spv_eur": peer_spv_med if 'peer_spv_med' in locals() else None
+        }
+    }
+
+    # 3) Prompt (NL, kort & actiegericht)
+    sys_msg = (
+        "Je bent een retail floor coach. Geef maximaal 5 korte, concrete acties "
+        "voor vandaag. Gebruik Nederlands. Wees meetbaar, noem bedragen als €X "
+        "en percentages als 12,3%. Geef 1 meettip (wat per uur te checken). "
+        "Als peers_median ontbreekt, negeer die vergelijking. "
+        "Als een KPI lager dan peers_median is: focus daarop."
+    )
+
+    usr_msg = (
+        "Context (JSON):\n"
+        f"{ai_context}\n\n"
+        "Schrijf puntsgewijs. Gebruik emoji spaarzaam (max 1). "
+        "Vermijd algemene adviezen; maak het winkelvloer‑concreet "
+        "(begroeting, paskamers, kassascripts, bundels, voorraad bij de hand, etc.)."
+    )
+
+    # 4) Call OpenAI (alleen als key aanwezig)
     st.markdown('<div class="ai-card"><div class="ai-title"><span class="dot"></span>🤖 AI‑Insights</div><div class="ai-caption">Live acties op basis van jouw cijfers en de peer‑mediaan.</div><div class="ai-body" id="ai-body">', unsafe_allow_html=True)
 
-    if not _openai_ready:
-        st.info("OpenAI‑client niet gevonden. Voeg `openai>=1.40.0` toe aan requirements.")
-    elif "OPENAI_API_KEY" not in st.secrets or not st.secrets["OPENAI_API_KEY"]:
-        st.info("Geen `OPENAI_API_KEY` in secrets. Voeg die toe voor live AI‑inzichten.")
-    else:
-        try:
+    try:
+        from openai import OpenAI
+        if "OPENAI_API_KEY" not in st.secrets or not st.secrets["OPENAI_API_KEY"]:
+            st.info("Geen `OPENAI_API_KEY` in secrets. Voeg die toe voor live AI‑inzichten.")
+        else:
             client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
             resp = client.chat.completions.create(
                 model="gpt-4o-mini",
@@ -534,11 +506,11 @@ with st.container():
             )
             insight = resp.choices[0].message.content.strip()
             st.markdown(insight)
-        except Exception as e:
-            st.warning(f"AI‑insights konden niet geladen worden: {e}")
+    except Exception as e:
+        st.warning(f"AI‑insights konden niet geladen worden: {e}")
 
     st.markdown('</div></div>', unsafe_allow_html=True)
-  
+
     # Optionele debug
     with st.expander("🔧 AI‑debug"):
         st.json(ai_context)
