@@ -388,128 +388,145 @@ def color_pos_col(col):
 styler = styler.apply(color_pos_col, subset=["positie (nu vs lw)"])
 st.dataframe(styler, use_container_width=True)
 
-# === 🤖 AI Insights (ChatGPT — live) ===========================================
-# Vereist: st.secrets["OPENAI_API_KEY"] (zet die in je Streamlit secrets)
+# === 🤖 AI Insights (verbeterde versie) ======================================
+# 1) UI: subtiele highlight-card
+st.markdown("""
+<style>
+.ai-card {
+  border: 1px solid #E9EAF0;
+  border-radius: 16px;
+  padding: 18px 18px 14px 18px;
+  background: linear-gradient(180deg, #FFFFFF 0%, #FCFCFE 100%);
+  box-shadow: 0 1px 0 #F1F2F6, 0 8px 24px rgba(12,17,29,0.06);
+}
+.ai-title {
+  display:flex; align-items:center; gap:10px;
+  font-weight:800; font-size:18px; color:#0C111D; margin-bottom:6px;
+}
+.ai-title .dot {
+  width:10px;height:10px;border-radius:50%;
+  background: radial-gradient(circle at 30% 30%, #9E77ED 0, #6C4EE3 60%, #9E77ED 100%);
+  box-shadow: 0 0 12px rgba(108,78,227,.6);
+}
+.ai-caption { color:#6B7280; font-size:13px; margin-bottom:10px; }
+.ai-body { font-size:15px; line-height:1.5; }
+.ai-body ul { margin:0 0 0 14px; padding:0; }
+</style>
+""", unsafe_allow_html=True)
 
+# 2) Peers-mediaan (robuust), excl. jezelf
+def _safe_float(v):
+    try:
+        f = float(v)
+        return None if np.isnan(f) else f
+    except Exception:
+        return None
+
+peer_conv_med = None
+peer_spv_med  = None
 try:
-    from openai import OpenAI
-    _openai_ok = True
+    _peers = agg_this[agg_this["shop_id"] != store_id]
+    if len(_peers) >= 2:
+        peer_conv_med = float(np.nanmedian(_peers["conversion_rate"].astype(float)))
+        peer_spv_med  = float(np.nanmedian(_peers["sales_per_visitor"].astype(float)))
 except Exception:
-    _openai_ok = False
+    pass  # geen ramp; AI prompt vangt dit af
 
-def _num(x, d=2):
+# 3) Compacte context voor het model
+def _safe_num(x, d=2):
     try:
         return round(float(x), d)
     except Exception:
         return None
 
-def _eur(x, d=0):
-    try:
-        return ("€{:,.%df}" % d).format(float(x)).replace(",", ".")
-    except Exception:
-        return "€–"
+_vis_y  = _safe_num(gy.get("count_in", 0), 0)
+_turn_y = _safe_num(gy.get("turnover", 0), 2)
+_conv_y = _safe_num(gy.get("conversion_rate", 0), 2)
+_spv_y  = _safe_num(gy.get("sales_per_visitor", 0), 2)
+if (_spv_y in (None, 0)) and _vis_y not in (None, 0):
+    _spv_y = _safe_num(_turn_y / _vis_y, 2)
 
-def _pct(x, d=2):
-    try:
-        return f"{float(x):.{d}f}%"
-    except Exception:
-        return "–"
+_vis_b  = _safe_num(gb.get("count_in", 0), 0)
+_turn_b = _safe_num(gb.get("turnover", 0), 2)
+_conv_b = _safe_num(gb.get("conversion_rate", 0), 2)
+_spv_b  = _safe_num(gb.get("sales_per_visitor", 0), 2)
+if (_spv_b in (None, 0)) and _vis_b not in (None, 0):
+    _spv_b = _safe_num(_turn_b / _vis_b, 2)
 
-def _safe(val, alt=0.0):
-    try:
-        f = float(val)
-        if f != f:  # NaN
-            return alt
-        return f
-    except Exception:
-        return alt
-
-# Bouw compact contextpakket (gisteren vs eergisteren + leaderboard + peers)
+_rank_now = None
+_rank_ch   = 0
 try:
-    # Gisteren / eergisteren
-    _vis_y  = _safe(gy.get("count_in", 0))
-    _turn_y = _safe(gy.get("turnover", 0.0))
-    _conv_y = _safe(gy.get("conversion_rate", 0.0))
-    _spv_y  = _safe(gy.get("sales_per_visitor", 0.0))
-    if _spv_y == 0 and _vis_y > 0:
-        _spv_y = _turn_y/_vis_y
+    _me_row = agg[agg["shop_id"] == store_id].iloc[0]
+    _rank_now = int(_me_row["rank_now"])
+    if not pd.isna(_me_row.get("rank_change", np.nan)):
+        _rank_ch = int(_me_row["rank_change"])
+except Exception:
+    pass
 
-    _vis_b  = _safe(gb.get("count_in", 0))
-    _turn_b = _safe(gb.get("turnover", 0.0))
-    _conv_b = _safe(gb.get("conversion_rate", 0.0))
-    _spv_b  = _safe(gb.get("sales_per_visitor", 0.0))
-    if _spv_b == 0 and _vis_b > 0:
-        _spv_b = _turn_b/_vis_b
-
-    # Leaderboard positie
-    _me_row = None
-    try:
-        _me_row = agg[agg["shop_id"] == store_id].iloc[0]
-    except Exception:
-        try:
-            _me_row = agg_this[agg_this["shop_id"] == store_id].iloc[0]
-        except Exception:
-            _me_row = None
-
-    _rank_now   = int(_me_row["rank_now"]) if (_me_row is not None and "rank_now" in _me_row) else None
-    _rank_ch    = int(_me_row["rank_change"]) if (_me_row is not None and "rank_change" in _me_row and not pd.isna(_me_row["rank_change"])) else 0
-
-    # Peers (mediaan) — nu echt gevuld
-    _peer_conv_med = float(peer_conv_med) if peer_conv_med is not None else None
-    _peer_spv_med  = float(peer_spv_med)  if peer_spv_med  is not None else None
-
-    # Samenvatting naar het model
-    ai_context = {
-        "store_name": store_name,
-        "yesterday": {
-            "visitors": _vis_y,
-            "turnover": _turn_y,
-            "conversion_pct": _conv_y,         # in %
-            "spv_eur": _spv_y
-        },
-        "day_before": {
-            "visitors": _vis_b,
-            "turnover": _turn_b,
-            "conversion_pct": _conv_b,
-            "spv_eur": _spv_b
-        },
-        "leaderboard": {
-            "rank_now": _rank_now,
-            "rank_change_vs_last_week": _rank_ch
-        },
-        "peers_median": {
-            "conversion_pct": _peer_conv_med,
-            "spv_eur": _peer_spv_med
-        }
+ai_context = {
+    "store_name": store_name,
+    "yesterday": {
+        "visitors": _vis_y,
+        "turnover": _turn_y,
+        "conversion_pct": _conv_y,
+        "spv_eur": _spv_y
+    },
+    "day_before": {
+        "visitors": _vis_b,
+        "turnover": _turn_b,
+        "conversion_pct": _conv_b,
+        "spv_eur": _spv_b
+    },
+    "leaderboard": {
+        "rank_now": _rank_now,
+        "rank_change_vs_last_week": _rank_ch
+    },
+    "peers_median": {
+        "conversion_pct": peer_conv_med,
+        "spv_eur": peer_spv_med
     }
+}
 
-    st.markdown("### 🤖 AI‑Insights (live)")
-    st.caption("Op basis van actuele cijfers (gisteren vs eergisteren) en je positie in het leaderboard.")
+# 4) Prompt (NL, kort & actiegericht, veilig bij missende peers)
+sys_msg = (
+    "Je bent een retail floor coach. Geef maximaal 5 korte, concrete acties "
+    "voor vandaag. Gebruik Nederlands. Wees meetbaar, noem bedragen als €X "
+    "en percentages als 12,3%. Geef 1 meettip (wat per uur te checken). "
+    "Als peers_median ontbreekt, negeer die vergelijking. "
+    "Als een KPI lager dan peers_median is: focus daarop."
+)
 
-    if not _openai_ok:
-        st.info("OpenAI‑client niet geïnstalleerd. Voeg `openai>=1.40.0` toe aan requirements.txt.")
+usr_msg = (
+    "Context (JSON):\n"
+    f"{ai_context}\n\n"
+    "Schrijf puntsgewijs. Gebruik emoji spaarzaam (max 1). "
+    "Vermijd algemene adviezen; maak het winkelvloer‑concreet "
+    "(begroeting, paskamers, kassascripts, bundels, voorraad bij de hand, etc.)."
+)
+
+# 5) Call OpenAI (alleen als key aanwezig)
+from importlib import import_module
+_openai_ready = False
+try:
+    openai_mod = import_module("openai")
+    from openai import OpenAI
+    _openai_ready = True
+except Exception:
+    pass
+
+with st.container():
+    st.markdown('<div class="ai-card"><div class="ai-title"><span class="dot"></span>🤖 AI‑Insights</div><div class="ai-caption">Live acties op basis van jouw cijfers en de peer‑mediaan.</div><div class="ai-body" id="ai-body">', unsafe_allow_html=True)
+
+    if not _openai_ready:
+        st.info("OpenAI‑client niet gevonden. Voeg `openai>=1.40.0` toe aan requirements.")
     elif "OPENAI_API_KEY" not in st.secrets or not st.secrets["OPENAI_API_KEY"]:
-        st.info("Geen `OPENAI_API_KEY` gevonden in secrets. Voeg die toe om live AI‑inzichten te tonen.")
+        st.info("Geen `OPENAI_API_KEY` in secrets. Voeg die toe voor live AI‑inzichten.")
     else:
-        client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-
-        sys_msg = (
-            "Je bent een retail floor coach. Geef korte, concrete acties voor vandaag. "
-            "Gebruik Nederlands. Focus op begroeten, paskamers, kassascripts en bundels. "
-            "Maak maximaal 5 bullets. Noem bedragen als €X en percentages als 12,3%."
-        )
-        usr_msg = (
-            "Context (JSON):\n"
-            f"{ai_context}\n\n"
-            "Doel: geef maximaal 5 korte, concrete acties voor het team vandaag, "
-            "gebaseerd op deze cijfers. Als conversie onder peermediaan ligt, focus op conversie; "
-            "als SPV onder peermediaan ligt, focus op ATV/upsell. Voeg 1 meettip toe (wat te checken per uur)."
-        )
-
         try:
+            client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
             resp = client.chat.completions.create(
                 model="gpt-4o-mini",
-                temperature=0.3,
+                temperature=0.25,
                 messages=[
                     {"role": "system", "content": sys_msg},
                     {"role": "user", "content": usr_msg},
@@ -520,6 +537,8 @@ try:
         except Exception as e:
             st.warning(f"AI‑insights konden niet geladen worden: {e}")
 
+    st.markdown('</div></div>', unsafe_allow_html=True)
+  
     # Optionele debug
     with st.expander("🔧 AI‑debug"):
         st.json(ai_context)
