@@ -388,6 +388,43 @@ def color_pos_col(col_series):
 styler = styler.apply(color_pos_col, subset=["positie (nu vs lw)"])
 st.dataframe(styler, use_container_width=True)
 
+# === AI Card styling (drop‑in) ==========================================
+st.markdown("""
+<style>
+.ai-card {
+  border: 1px solid #E9EAF0;
+  border-radius: 16px;
+  padding: 18px 18px 14px 18px;
+  background: linear-gradient(180deg, #FFFFFF 0%, #FCFCFE 100%);
+  box-shadow: 0 1px 0 #F1F2F6, 0 8px 24px rgba(12,17,29,0.06);
+  margin-top: 8px;
+}
+.ai-title {
+  display:flex; align-items:center; gap:10px;
+  font-weight:800; font-size:18px; color:#0C111D; margin-bottom:4px;
+}
+.ai-title .dot {
+  width:10px;height:10px;border-radius:50%;
+  background: radial-gradient(circle at 30% 30%, #9E77ED 0, #6C4EE3 60%, #9E77ED 100%);
+  box-shadow: 0 0 12px rgba(108,78,227,.6);
+}
+.ai-caption { color:#6B7280; font-size:13px; margin-bottom:10px; }
+.ai-body { font-size:15px; line-height:1.55; }
+.ai-body ul { margin:0 0 0 16px; padding:0; }
+.ai-body li { margin: 0 0 6px 0; }
+</style>
+""", unsafe_allow_html=True)
+
+def render_ai_card(markdown_text: str, subtitle: str = "Live acties op basis van jouw cijfers en de peer‑mediaan."):
+    st.markdown(
+        '<div class="ai-card">'
+        '<div class="ai-title"><span class="dot"></span>🤖 AI‑Insights</div>'
+        f'<div class="ai-caption">{subtitle}</div>'
+        '<div class="ai-body">', unsafe_allow_html=True
+    )
+    st.markdown(markdown_text)
+    st.markdown('</div></div>', unsafe_allow_html=True)
+
 # === 🤖 AI Insights (verbeterde versie) ======================================
 try:
     # 1) UI: subtiele highlight-card
@@ -506,7 +543,7 @@ try:
                 ],
             )
             insight = resp.choices[0].message.content.strip()
-            st.markdown(insight)
+            render_ai_card(insight)
     except Exception as e:
         st.warning(f"AI‑insights konden niet geladen worden: {e}")
 
