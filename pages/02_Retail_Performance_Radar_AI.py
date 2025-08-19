@@ -327,6 +327,80 @@ Conversie, SPV en Sales/m² zijn genormaliseerd naar 0–1 binnen deze regio/per
 - Een **rond vlak of stip** betekent dat de winkel overal ongeveer gelijk scoort.  
 """)
 
+# ---------- Tops & Flops ----------
+st.subheader("🏆 Tops & Flops")
+rank_spm = cur[["shop_name","sales_per_sqm","turnover","count_in","conversion_rate","sales_per_visitor"]].copy()
+rank_spm = rank_spm.sort_values("sales_per_sqm", ascending=False)
+
+cA, cB = st.columns(2)
+with cA:
+    st.caption("Top 5 (sales/m²)")
+    top5 = rank_spm.head(5).copy()
+    top5["sales_per_sqm"]     = top5["sales_per_sqm"].map(fmt_eur2)
+    top5["turnover"]          = top5["turnover"].map(fmt_eur0)
+    top5["count_in"]          = top5["count_in"].map(lambda x: f"{int(x):,}".replace(",", "."))
+    top5["conversion_rate"]   = top5["conversion_rate"].map(lambda x: f"{float(x):.2f}%")
+    top5["sales_per_visitor"] = top5["sales_per_visitor"].map(fmt_eur2)
+    st.dataframe(top5, use_container_width=True)
+
+with cB:
+    st.caption("Bottom 5 (sales/m²)")
+    flop5 = rank_spm.tail(5).copy().sort_values("sales_per_sqm", ascending=True)
+    flop5["sales_per_sqm"]     = flop5["sales_per_sqm"].map(fmt_eur2)
+    flop5["turnover"]          = flop5["turnover"].map(fmt_eur0)
+    flop5["count_in"]          = flop5["count_in"].map(lambda x: f"{int(x):,}".replace(",", "."))
+    flop5["conversion_rate"]   = flop5["conversion_rate"].map(lambda x: f"{float(x):.2f}%")
+    flop5["sales_per_visitor"] = flop5["sales_per_visitor"].map(fmt_eur2)
+    st.dataframe(flop5, use_container_width=True)
+
+# ---------- Leaderboard t.o.v. regio-gemiddelde ----------
+st.subheader("🏁 Leaderboard — sales/m² t.o.v. regio-gemiddelde")
+
+comp = cur[["shop_name", "sales_per_sqm", "turnover", "sq_meter"]].copy()
+comp["region_avg_spsqm"] = avg_spsqm
+comp["delta_eur_sqm"] = comp["sales_per_sqm"] - comp["region_avg_spsqm"]
+comp["delta_pct"] = np.where(
+    comp["region_avg_spsqm"] > 0,
+    (comp["delta_eur_sqm"] / comp["region_avg_spsqm"]) * 100.0,
+    np.nan
+)
+
+sort_best_first = st.toggle("Beste afwijking eerst", value=True, key="radar_toggle_best")
+comp = comp.sort_values("delta_eur_sqm", ascending=not sort_best_first)
+
+show = comp[["shop_name","sales_per_sqm","region_avg_spsqm","delta_eur_sqm","delta_pct"]].rename(columns={
+    "shop_name": "winkel",
+    "sales_per_sqm": "sales/m²",
+    "region_avg_spsqm": "gem. sales/m² (regio)",
+    "delta_eur_sqm": "Δ vs gem. (€/m²)",
+    "delta_pct": "Δ vs gem. (%)",
+})
+
+def color_delta(series):
+    styles = []
+    for v in series:
+        if pd.isna(v) or v == 0:
+            styles.append("color: #6B7280;")
+        elif v > 0:
+            styles.append("color: #22C55E;")
+        else:
+            styles.append("color: #F04438;")
+    return styles
+
+styler = (
+    show.style
+        .format({
+            "sales/m²": "€{:.2f}",
+            "gem. sales/m² (regio)": "€{:.2f}",
+            "Δ vs gem. (€/m²)": "€{:+.2f}",
+            "Δ vs gem. (%)": "{:+.1f}%"
+        })
+        .apply(color_delta, subset=["Δ vs gem. (€/m²)"])
+        .apply(color_delta, subset=["Δ vs gem. (%)"])
+)
+
+st.dataframe(styler, use_container_width=True)
+
 # === 🤖 AI‑Insights — Regio Manager (pagina 02) ==========================
 # Vereist: st.secrets["OPENAI_API_KEY"]
 from importlib import import_module
@@ -446,16 +520,22 @@ except Exception as e:
 
 # 4) Prompt (NL, regiomanager, actiegericht)
 sys_msg_rm = (
-    "Je bent regiomanager retail. Analyseer kort en formuleer max 5 concrete acties "
-    "die je deze week met store managers kunt afspreken. Gebruik Nederlands, maak het meetbaar "
-    "(€ of %), en verwijs naar specifieke winkels (tops/flops) en waar mogelijk naar uren."
+    "Je bent regiomanager retail. Analyseer kort en formuleer max 5 concrete acties: "
+    "2 bevindingen (vergelijk prestaties van winkels in de regio, afwijkingen t.o.v. peers_median). "
+    "en maximaal 3 acties die je vandaag met store managers kunt afspreken. "
+    "Gebruik Nederlands, wees meetbaar (noem bedragen als €X en percentages als 12,3%). "
+    "Geef altijd 1 meettip (welke KPI dagelijks per winkel te volgen). "
+    "Als peers_median ontbreekt, negeer die vergelijking. "
+    "Leg nadruk op het delen van best practices en het aanpakken van zwakkere winkels."
 )
 
 usr_msg_rm = (
     "Context (JSON):\n"
     f"{ai_region_context}\n\n"
     "Schrijf puntsgewijs, maximaal 5 bullets, inclusief 1 meetritueel (wat per dag of uur te checken). "
-    "Geef concrete voorbeelden (bijv. extra FTE bij paskamers 12‑15u, bundelactie X, kassascript Y)."
+    "Vermijd vage adviezen: geef concrete voorbeelden (bijv. extra FTE bij paskamers 12‑15u, bundelactie X, kassascript Y)."
+    "(vergelijk vestigingen, benoem welke winkel uitvalt of juist sterk presteert). "
+    "Maak het regio-concreet. "
 )
 
 # 5) OpenAI call
@@ -491,80 +571,6 @@ else:
 # Optionele debug
 with st.expander("🔧 AI‑debug (regio)"):
     st.json(ai_region_context)
-
-# ---------- Tops & Flops ----------
-st.subheader("🏆 Tops & Flops")
-rank_spm = cur[["shop_name","sales_per_sqm","turnover","count_in","conversion_rate","sales_per_visitor"]].copy()
-rank_spm = rank_spm.sort_values("sales_per_sqm", ascending=False)
-
-cA, cB = st.columns(2)
-with cA:
-    st.caption("Top 5 (sales/m²)")
-    top5 = rank_spm.head(5).copy()
-    top5["sales_per_sqm"]     = top5["sales_per_sqm"].map(fmt_eur2)
-    top5["turnover"]          = top5["turnover"].map(fmt_eur0)
-    top5["count_in"]          = top5["count_in"].map(lambda x: f"{int(x):,}".replace(",", "."))
-    top5["conversion_rate"]   = top5["conversion_rate"].map(lambda x: f"{float(x):.2f}%")
-    top5["sales_per_visitor"] = top5["sales_per_visitor"].map(fmt_eur2)
-    st.dataframe(top5, use_container_width=True)
-
-with cB:
-    st.caption("Bottom 5 (sales/m²)")
-    flop5 = rank_spm.tail(5).copy().sort_values("sales_per_sqm", ascending=True)
-    flop5["sales_per_sqm"]     = flop5["sales_per_sqm"].map(fmt_eur2)
-    flop5["turnover"]          = flop5["turnover"].map(fmt_eur0)
-    flop5["count_in"]          = flop5["count_in"].map(lambda x: f"{int(x):,}".replace(",", "."))
-    flop5["conversion_rate"]   = flop5["conversion_rate"].map(lambda x: f"{float(x):.2f}%")
-    flop5["sales_per_visitor"] = flop5["sales_per_visitor"].map(fmt_eur2)
-    st.dataframe(flop5, use_container_width=True)
-
-# ---------- Leaderboard t.o.v. regio-gemiddelde ----------
-st.subheader("🏁 Leaderboard — sales/m² t.o.v. regio-gemiddelde")
-
-comp = cur[["shop_name", "sales_per_sqm", "turnover", "sq_meter"]].copy()
-comp["region_avg_spsqm"] = avg_spsqm
-comp["delta_eur_sqm"] = comp["sales_per_sqm"] - comp["region_avg_spsqm"]
-comp["delta_pct"] = np.where(
-    comp["region_avg_spsqm"] > 0,
-    (comp["delta_eur_sqm"] / comp["region_avg_spsqm"]) * 100.0,
-    np.nan
-)
-
-sort_best_first = st.toggle("Beste afwijking eerst", value=True, key="radar_toggle_best")
-comp = comp.sort_values("delta_eur_sqm", ascending=not sort_best_first)
-
-show = comp[["shop_name","sales_per_sqm","region_avg_spsqm","delta_eur_sqm","delta_pct"]].rename(columns={
-    "shop_name": "winkel",
-    "sales_per_sqm": "sales/m²",
-    "region_avg_spsqm": "gem. sales/m² (regio)",
-    "delta_eur_sqm": "Δ vs gem. (€/m²)",
-    "delta_pct": "Δ vs gem. (%)",
-})
-
-def color_delta(series):
-    styles = []
-    for v in series:
-        if pd.isna(v) or v == 0:
-            styles.append("color: #6B7280;")
-        elif v > 0:
-            styles.append("color: #22C55E;")
-        else:
-            styles.append("color: #F04438;")
-    return styles
-
-styler = (
-    show.style
-        .format({
-            "sales/m²": "€{:.2f}",
-            "gem. sales/m² (regio)": "€{:.2f}",
-            "Δ vs gem. (€/m²)": "€{:+.2f}",
-            "Δ vs gem. (%)": "{:+.1f}%"
-        })
-        .apply(color_delta, subset=["Δ vs gem. (€/m²)"])
-        .apply(color_delta, subset=["Δ vs gem. (%)"])
-)
-
-st.dataframe(styler, use_container_width=True)
 
 # ---------- Debug ----------
 with st.expander("🔧 Debug — API calls en samples"):
