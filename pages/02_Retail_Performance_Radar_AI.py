@@ -327,6 +327,171 @@ Conversie, SPV en Sales/m² zijn genormaliseerd naar 0–1 binnen deze regio/per
 - Een **rond vlak of stip** betekent dat de winkel overal ongeveer gelijk scoort.  
 """)
 
+# === 🤖 AI‑Insights — Regio Manager (pagina 02) ==========================
+# Vereist: st.secrets["OPENAI_API_KEY"]
+from importlib import import_module
+
+# 1) Styling hergebruiken van pagina 01 (of plakken als je 'm daar niet hebt)
+st.markdown("""
+<style>
+.ai-card {
+  border: 1px solid #E9EAF0;
+  border-radius: 16px;
+  padding: 18px 18px 14px 18px;
+  background: linear-gradient(180deg, #FFFFFF 0%, #FCFCFE 100%);
+  box-shadow: 0 1px 0 #F1F2F6, 0 8px 24px rgba(12,17,29,0.06);
+  margin-top: 8px;
+}
+.ai-title {
+  display:flex; align-items:center; gap:10px;
+  font-weight:800; font-size:18px; color:#0C111D; margin-bottom:4px;
+}
+.ai-title .dot {
+  width:10px;height:10px;border-radius:50%;
+  background: radial-gradient(circle at 30% 30%, #9E77ED 0, #6C4EE3 60%, #9E77ED 100%);
+  box-shadow: 0 0 12px rgba(108,78,227,.6);
+}
+.ai-caption { color:#6B7280; font-size:13px; margin-bottom:10px; }
+.ai-body { font-size:15px; line-height:1.55; }
+.ai-body ul { margin:0 0 0 16px; padding:0; }
+.ai-body li { margin: 0 0 6px 0; }
+</style>
+""", unsafe_allow_html=True)
+
+def render_ai_card(markdown_text: str, subtitle: str = "Regio‑analyse en concrete acties voor de filialen."):
+    st.markdown(
+        '<div class="ai-card">'
+        '<div class="ai-title"><span class="dot"></span>🤖 AI‑Insights (Regio)</div>'
+        f'<div class="ai-caption">{subtitle}</div>'
+        '<div class="ai-body">', unsafe_allow_html=True
+    )
+    st.markdown(markdown_text)
+    st.markdown('</div></div>', unsafe_allow_html=True)
+
+# 2) Veilig helpers
+def _sf(x, d=2):
+    try:
+        v = float(x)
+        if np.isnan(v): return None
+        return round(v, d)
+    except Exception:
+        return None
+
+def _eur(x, d=0):
+    try: return ("€{:,.%df}" % d).format(float(x)).replace(",", ".")
+    except: return "€–"
+
+def _pct(x, d=2):
+    try: return f"{float(x):.{d}f}%"
+    except: return "–"
+
+# 3) Bouw compacte JSON‑context voor de manager
+try:
+    region_name = regio if "regio" in locals() else (regio_choice if "regio_choice" in locals() else "All")
+    # Huidige periode (cur) is al per winkel geaggregeerd in jouw script (cur)
+    # Zorg voor robuuste berekeningen:
+    _cur = cur.copy()
+    _cur["sales_per_sqm"] = _cur.get("sales_per_sqm", np.nan)
+
+    # Regionale kpi’s (huidig)
+    reg_now = {
+        "total_turnover": _sf(_cur["turnover"].sum(), 0),
+        "avg_conversion_pct": _sf((_cur["conversion_rate"] * _cur["count_in"]).sum() / _cur["count_in"].sum() if _cur["count_in"].sum() else np.nan, 2),
+        "avg_spv_eur": _sf((_cur["sales_per_visitor"] * _cur["count_in"]).sum() / _cur["count_in"].sum() if _cur["count_in"].sum() else np.nan, 2),
+        "avg_sales_per_sqm": _sf((_cur["turnover"].sum() / _cur["sq_meter"].fillna(0).sum()) if _cur["sq_meter"].fillna(0).sum() > 0 else np.nan, 2),
+        "stores": int(_cur["shop_id"].nunique())
+    }
+
+    # Vorige periode (prev) als beschikbaar
+    if 'prev' in locals() and prev is not None and not prev.empty:
+        _prev = prev.copy()
+        _prev["sales_per_sqm"] = _prev.get("sales_per_sqm", np.nan)
+        reg_prev = {
+            "total_turnover": _sf(_prev["turnover"].sum(), 0),
+            "avg_conversion_pct": _sf((_prev["conversion_rate"] * _prev["count_in"]).sum() / _prev["count_in"].sum() if _prev["count_in"].sum() else np.nan, 2),
+            "avg_spv_eur": _sf((_prev["sales_per_visitor"] * _prev["count_in"]).sum() / _prev["count_in"].sum() if _prev["count_in"].sum() else np.nan, 2),
+            "avg_sales_per_sqm": _sf((_prev["turnover"].sum() / _prev["sq_meter"].fillna(0).sum()) if _prev["sq_meter"].fillna(0).sum() > 0 else np.nan, 2),
+        }
+    else:
+        reg_prev = None
+
+    # Tops & flops (sales/m²); val terug op SPV indien sqm ontbreekt
+    rank_key = "sales_per_sqm" if _cur["sales_per_sqm"].notna().any() else "sales_per_visitor"
+    tops = _cur.sort_values(rank_key, ascending=False).head(3)[["shop_name", rank_key]].to_dict(orient="records")
+    flops = _cur.sort_values(rank_key, ascending=True).head(3)[["shop_name", rank_key]].to_dict(orient="records")
+
+    # Uur‑norm (optioneel): best_hour per winkel o.b.v. omzet of bezoeken
+    # (alleen als je per‑uur dataframe in deze pagina beschikbaar hebt; anders overslaan)
+    best_hours = None
+    if "df_cur" in locals() and not df_cur.empty and "hour" in df_cur.columns:
+        metric_for_hour = "turnover" if (df_cur["turnover"].fillna(0).sum() > 0) else "count_in"
+        bh = (df_cur.groupby(["shop_id","shop_name","hour"], as_index=False)
+                     .agg(val=(metric_for_hour,"sum")))
+        best_hours = (bh.sort_values(["shop_id","val"], ascending=[True,False])
+                        .groupby(["shop_id","shop_name"]).head(1)[["shop_name","hour","val"]]
+                        .to_dict(orient="records"))
+
+    ai_region_context = {
+        "region": region_name,
+        "period": period,
+        "kpis_now": reg_now,
+        "kpis_prev": reg_prev,
+        "ranking_basis": rank_key,
+        "tops": tops,
+        "flops": flops,
+        "best_hours_sample": best_hours[:8] if best_hours else None  # korte lijst
+    }
+except Exception as e:
+    ai_region_context = {"error": f"context_build_failed: {e}"}
+
+# 4) Prompt (NL, regiomanager, actiegericht)
+sys_msg_rm = (
+    "Je bent regiomanager retail. Analyseer kort en formuleer max 5 concrete acties "
+    "die je deze week met store managers kunt afspreken. Gebruik Nederlands, maak het meetbaar "
+    "(€ of %), en verwijs naar specifieke winkels (tops/flops) en waar mogelijk naar uren."
+)
+
+usr_msg_rm = (
+    "Context (JSON):\n"
+    f"{ai_region_context}\n\n"
+    "Schrijf puntsgewijs, maximaal 5 bullets, inclusief 1 meetritueel (wat per dag of uur te checken). "
+    "Geef concrete voorbeelden (bijv. extra FTE bij paskamers 12‑15u, bundelactie X, kassascript Y)."
+)
+
+# 5) OpenAI call
+_openai_ready = False
+try:
+    openai_mod = import_module("openai")
+    from openai import OpenAI
+    _openai_ready = True
+except Exception:
+    pass
+
+st.markdown("### 🤖 AI‑Coach (Regio)")
+if not _openai_ready:
+    render_ai_card("_OpenAI‑client niet gevonden. Voeg `openai>=1.40.0` toe aan requirements._")
+elif "OPENAI_API_KEY" not in st.secrets or not st.secrets["OPENAI_API_KEY"]:
+    render_ai_card("_Geen `OPENAI_API_KEY` in secrets. Voeg die toe voor live AI‑inzichten._")
+else:
+    try:
+        client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            temperature=0.25,
+            messages=[
+                {"role": "system", "content": sys_msg_rm},
+                {"role": "user", "content": usr_msg_rm},
+            ],
+        )
+        insight_rm = resp.choices[0].message.content.strip()
+        render_ai_card(insight_rm, subtitle="Regio‑analyse en concrete acties voor je filialen.")
+    except Exception as e:
+        render_ai_card(f"_AI‑insights konden niet geladen worden: {e}_")
+
+# Optionele debug
+with st.expander("🔧 AI‑debug (regio)"):
+    st.json(ai_region_context)
+
 # ---------- Tops & Flops ----------
 st.subheader("🏆 Tops & Flops")
 rank_spm = cur[["shop_name","sales_per_sqm","turnover","count_in","conversion_rate","sales_per_visitor"]].copy()
