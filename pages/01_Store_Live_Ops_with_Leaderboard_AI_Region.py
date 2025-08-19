@@ -290,8 +290,7 @@ if not _last.empty:
         unsafe_allow_html=True
     )
 
-# -- leaderbaord
-
+# -- leaderboard
 agg_this = wtd_agg(df_this)
 agg_last = wtd_agg(df_last)
 
@@ -303,6 +302,21 @@ if agg_this.empty:
         st.write("df_last head:", df_last.head() if not df_last.empty else "(leeg)")
     st.info("Geen WTD data beschikbaar.")
     st.stop()
+
+# ── NIEUW: peers-medianen (exclusief eigen winkel) voor AI‑coach ─────────
+try:
+    _peers = agg_this.copy()
+    if not _peers.empty:
+        _peers = _peers[_peers["shop_id"] != store_id]
+    if _peers.empty:
+        peer_conv_med = float(agg_this["conversion_rate"].median()) if not agg_this.empty else None
+        peer_spv_med  = float(agg_this["sales_per_visitor"].median()) if not agg_this.empty else None
+    else:
+        peer_conv_med = float(_peers["conversion_rate"].median()) if "conversion_rate" in _peers.columns else None
+        peer_spv_med  = float(_peers["sales_per_visitor"].median()) if "sales_per_visitor" in _peers.columns else None
+except Exception:
+    peer_conv_med = None
+    peer_spv_med  = None
 
 metric_map = {"Conversie":"conversion_rate", "SPV":"sales_per_visitor"}
 rank_metric = metric_map[rank_choice]
@@ -412,7 +426,7 @@ def _safe(val, alt=0.0):
 
 # Bouw compact contextpakket (gisteren vs eergisteren + leaderboard + peers)
 try:
-    # Gisteren / eergisteren (vals)
+    # Gisteren / eergisteren
     _vis_y  = _safe(gy.get("count_in", 0))
     _turn_y = _safe(gy.get("turnover", 0.0))
     _conv_y = _safe(gy.get("conversion_rate", 0.0))
@@ -427,7 +441,7 @@ try:
     if _spv_b == 0 and _vis_b > 0:
         _spv_b = _turn_b/_vis_b
 
-    # Leaderboard positie (nu vs vorige week) uit 'agg' / 'agg_this'
+    # Leaderboard positie
     _me_row = None
     try:
         _me_row = agg[agg["shop_id"] == store_id].iloc[0]
@@ -440,9 +454,9 @@ try:
     _rank_now   = int(_me_row["rank_now"]) if (_me_row is not None and "rank_now" in _me_row) else None
     _rank_ch    = int(_me_row["rank_change"]) if (_me_row is not None and "rank_change" in _me_row and not pd.isna(_me_row["rank_change"])) else 0
 
-    # Peers (mediaan)
-    _peer_conv_med = float(peer_conv_med) if 'peer_conv_med' in locals() else None
-    _peer_spv_med  = float(peer_spv_med)  if 'peer_spv_med'  in locals() else None
+    # Peers (mediaan) — nu echt gevuld
+    _peer_conv_med = float(peer_conv_med) if peer_conv_med is not None else None
+    _peer_spv_med  = float(peer_spv_med)  if peer_spv_med  is not None else None
 
     # Samenvatting naar het model
     ai_context = {
@@ -479,10 +493,9 @@ try:
     else:
         client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-        # Compacte, NL‑gerichte prompt (max context, maar zuinig met tokens)
         sys_msg = (
             "Je bent een retail floor coach. Geef korte, concrete acties voor vandaag. "
-            "Gebruik Nederlands. Focus op begroeting, paskamers, kassascripts en bundels. "
+            "Gebruik Nederlands. Focus op begroeten, paskamers, kassascripts en bundels. "
             "Maak maximaal 5 bullets. Noem bedragen als €X en percentages als 12,3%."
         )
         usr_msg = (
