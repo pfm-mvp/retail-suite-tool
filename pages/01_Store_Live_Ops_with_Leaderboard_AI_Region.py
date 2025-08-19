@@ -472,18 +472,19 @@ try:
 
     # 3) Prompt (NL, kort & actiegericht)
     sys_msg = (
-        "Je bent een retail floor coach. Geef maximaal 5 korte, concrete acties "
-        "voor vandaag. Gebruik Nederlands. Wees meetbaar, noem bedragen als €X "
-        "en percentages als 12,3%. Geef 1 meettip (wat per uur te checken). "
+        "Je bent een retail floor coach. Geef maximaal 5 korte en concrete punten: "
+        "2 bevindingen (opvallende trends of afwijkingen van peers_median) en maximaal 3 acties voor vandaag. "
+        "Gebruik Nederlands, wees meetbaar (noem bedragen als €X en percentages als 12,3%). "
+        "Geef altijd 1 meettip (wat per uur te checken). "
         "Als peers_median ontbreekt, negeer die vergelijking. "
-        "Als een KPI lager dan peers_median is: focus daarop."
+        "Focus bij KPI’s lager dan peers_median op verbeteracties."
     )
 
     usr_msg = (
         "Context (JSON):\n"
         f"{ai_context}\n\n"
         "Schrijf puntsgewijs. Gebruik emoji spaarzaam (max 1). "
-        "Vermijd algemene adviezen; maak het winkelvloer‑concreet "
+        "Vermijd algemene adviezen; maak het winkelvloer-concreet "
         "(begroeting, paskamers, kassascripts, bundels, voorraad bij de hand, etc.)."
     )
 
