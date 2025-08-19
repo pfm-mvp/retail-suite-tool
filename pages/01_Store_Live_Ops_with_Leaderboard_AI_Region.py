@@ -502,7 +502,6 @@ try:
     )
 
     # 4) Call OpenAI (alleen als key aanwezig)
-    st.markdown('<div class="ai-card"><div class="ai-title"><span class="dot"></span>🤖 AI‑Insights</div><div class="ai-caption">Live acties op basis van jouw cijfers en de peer‑mediaan.</div><div class="ai-body" id="ai-body">', unsafe_allow_html=True)
 
     try:
         from openai import OpenAI
@@ -522,8 +521,6 @@ try:
             render_ai_card(insight)
     except Exception as e:
         st.warning(f"AI‑insights konden niet geladen worden: {e}")
-
-    st.markdown('</div></div>', unsafe_allow_html=True)
 
     # Optionele debug
     with st.expander("🔧 AI‑debug"):
