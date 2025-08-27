@@ -522,6 +522,7 @@ except Exception as e:
 sys_msg_rm = (
     "Je bent regiomanager retail. Analyseer kort en formuleer max 5 concrete acties: "
     "2 bevindingen (vergelijk prestaties van winkels in de regio, afwijkingen t.o.v. peers_median). "
+    "Gebruik bezoekersaantallen om de bevindingen te onderbouwen."
     "en maximaal 3 acties die je vandaag met store managers kunt afspreken. "
     "Gebruik Nederlands, wees meetbaar (noem bedragen als €X en percentages als 12,3%). "
     "Geef altijd 1 meettip (welke KPI dagelijks per winkel te volgen). "
