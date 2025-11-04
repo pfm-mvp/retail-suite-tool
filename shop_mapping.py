@@ -2,7 +2,7 @@
 # ✅ Enkelvoudige bron: id → {name, region}
 SHOP_NAME_MAP = {
     29658: {"name": "Amsterdam", "region": "Noord NL", "postcode": "3811"},
-    29679: {"name": "Apeldoorn",  "region": "Noord NL", "postcode": "7331"},
+    29614: {"name": "Apeldoorn",  "region": "Noord NL", "postcode": "7331"},
     29683: {"name": "Den Haag",  "region": "Zuid NL",  "postcode": "2511"},
     29669: {"name": "Gouda",    "region": "Noord NL", "postcode": "2801"},
     29771: {"name": "Haarlem",     "region": "Noord NL", "postcode": "2011"},
