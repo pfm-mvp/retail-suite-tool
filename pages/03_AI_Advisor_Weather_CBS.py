@@ -12,11 +12,11 @@ st.title("🧭 AI Advisor — Weer + CBS (v1)")
 sys.path.append(os.path.abspath(os.path.dirname(__file__) + '/../'))
 from helpers_normalize import normalize_vemcount_response
 from helpers_shop import ID_TO_NAME, get_ids_by_region, REGIONS
-from advisor import build_advice
 
 # import services uit de submap 'services'
 from services.weather_service import get_daily_forecast
 from services.cbs_service import get_consumer_confidence, get_cci_series, get_retail_index  # nieuwe imports
+from services.advisor import build_advice
 
 # ── Secrets (werkt met platte keys zoals in jouw screenshot)
 import streamlit as st, os
