@@ -101,11 +101,18 @@ if st.button("Genereer aanbevelingen"):
     baseline = build_weekday_baselines(df)
     # 3) weer + cbs
     forecast = get_daily_forecast(lat, lon, OPENWEATHER_KEY, days_ahead)
-    cci = get_consumer_confidence(CBS_DATASET)["value"]
+    try:
+        cci_info = get_consumer_confidence(CBS_DATASET)
+        cci = cci_info["value"]
+        cci_period = cci_info["period"]
+    except Exception as e:
+    st.warning(f"Kon CBS Consumentenvertrouwen niet ophalen (gebruik standaard 0). Details: {e}")
+        cci, cci_period = 0.0, "n/a"
+
     # 4) advies
     advice = build_advice("Your Company", baseline, forecast, cci)
 
-    st.metric("Consumentenvertrouwen (CBS)", f"{cci}")
+    st.metric("Consumentenvertrouwen (CBS)", f"{cci}", help=f"Periode: {cci_period}")
     for d in advice["days"]:
         with st.expander(f'📅 {d["date"]} — temp {d["weather"]["temp"]:.1f}°C • neerslagkans {int(d["weather"]["pop"]*100)}%'):
             for s in d["stores"]:
