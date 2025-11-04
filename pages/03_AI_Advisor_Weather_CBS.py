@@ -18,10 +18,26 @@ from advisor import build_advice
 from services.weather_service import get_daily_forecast
 from services.cbs_service import get_consumer_confidence
 
-# ── Secrets
-OPENWEATHER_KEY = st.secrets["external"]["openweather_api_key"]
-CBS_DATASET = st.secrets["external"]["cbs_dataset"]
-API_URL = (st.secrets.get("api",{}).get("API_URL") or st.secrets.get("API_URL","") or os.getenv("API_URL","")).rstrip("/")
+# ── Secrets (werkt met platte keys zoals in jouw screenshot)
+import streamlit as st, os
+
+def _get_secret(key: str, env_fallback: str = "") -> str:
+    """Zoekt secret key op in st.secrets of omgeving"""
+    val = st.secrets.get(key) or os.getenv(env_fallback or key.upper()) or ""
+    return val.strip()
+
+OPENWEATHER_KEY = _get_secret("openweather_api_key", "OPENWEATHER_API_KEY")
+CBS_DATASET     = _get_secret("cbs_dataset", "CBS_DATASET")
+API_URL         = _get_secret("API_URL")
+
+# controle
+if not OPENWEATHER_KEY or not CBS_DATASET or not API_URL:
+    st.error(f"Missing secrets: "
+             f"{'openweather_api_key ' if not OPENWEATHER_KEY else ''}"
+             f"{'cbs_dataset ' if not CBS_DATASET else ''}"
+             f"{'API_URL' if not API_URL else ''}\n\n"
+             "Check Streamlit > Settings > Secrets.")
+    st.stop()
 
 # ── Controls
 region = st.selectbox("Regio", options=["ALL"] + list(REGIONS), index=0)
