@@ -133,6 +133,105 @@ st.caption("Selecteer regio en druk op de knop om aanbevelingen te genereren.")
 shop_ids = get_ids_by_region(region)
 st.write(f"{len(shop_ids)} winkels geselecteerd in regio: **{region}**")
 
+# ==== ANALYTICS HELPERS =======================================================
+
+def monthly_agg(df: pd.DataFrame) -> pd.DataFrame:
+    d = df.copy()
+    d["date_eff"] = pd.to_datetime(d["date"], errors="coerce")
+    d["ym"] = d["date_eff"].dt.to_period("M").astype(str)
+    # som omzet/bezoekers; conv gewogen op bezoekers; SPV = omzet / bezoekers
+    g = d.groupby(["ym"]).agg(
+        visitors=("count_in","sum"),
+        turnover=("turnover","sum"),
+    ).reset_index()
+    # gewogen conversie
+    d["weighted_conv"] = d["conversion_rate"] * d["count_in"]
+    conv = d.groupby("ym").agg(conv_num=("weighted_conv","sum"), conv_den=("count_in","sum")).reset_index()
+    conv["conversion"] = (conv["conv_num"] / conv["conv_den"]).fillna(0)
+    out = g.merge(conv[["ym","conversion","conv_den"]], on="ym", how="left")
+    out["spv"] = (out["turnover"] / out["visitors"]).replace([float("inf")], 0).fillna(0)
+    return out
+
+def mom_yoy(dfm: pd.DataFrame):
+    if dfm.empty: 
+        return {}
+    dfm = dfm.sort_values("ym").reset_index(drop=True)
+    last, prev = dfm.iloc[-1], (dfm.iloc[-2] if len(dfm) > 1 else None)
+    # YoY: zoek dezelfde maand vorig jaar
+    last_ym = last["ym"]
+    try:
+        y, m = map(int, last_ym.split("-"))
+        yoy_key = f"{y-1}-{m:02d}"
+        yoy_row = dfm[dfm["ym"] == yoy_key].iloc[0] if (dfm["ym"] == yoy_key).any() else None
+    except Exception:
+        yoy_row = None
+
+    def pct(a,b):
+        if b in [0,None] or pd.isna(b): return None
+        return (a/b - 1)*100 if b!=0 else None
+
+    res = {
+        "last_ym": last_ym,
+        "visitors": last["visitors"],
+        "turnover": last["turnover"],
+        "conversion": last["conversion"],
+        "spv": last["spv"],
+        "mom": {
+            "turnover": pct(last["turnover"], prev["turnover"]) if prev is not None else None,
+            "visitors": pct(last["visitors"], prev["visitors"]) if prev is not None else None,
+            "conversion": pct(last["conversion"], prev["conversion"]) if prev is not None else None,
+            "spv": pct(last["spv"], prev["spv"]) if prev is not None else None,
+        },
+        "yoy": {
+            "turnover": pct(last["turnover"], yoy_row["turnover"]) if yoy_row is not None else None,
+            "visitors": pct(last["visitors"], yoy_row["visitors"]) if yoy_row is not None else None,
+            "conversion": pct(last["conversion"], yoy_row["conversion"]) if yoy_row is not None else None,
+            "spv": pct(last["spv"], yoy_row["spv"]) if yoy_row is not None else None,
+        }
+    }
+    return res
+
+def weather_effect(df: pd.DataFrame, hist_weather: pd.DataFrame | None) -> dict:
+    """
+    Verwacht hist_weather met kolommen ['date','temp','pop'] (neerslagkans 0..1).
+    Geeft simpele correlaties terug; als hist_weather None is → nvt.
+    """
+    if df is None or df.empty or hist_weather is None or hist_weather.empty:
+        return {"corr_temp_visitors": None, "corr_pop_visitors": None}
+    d = df.copy()
+    d["date_eff"] = pd.to_datetime(d["date"])
+    m = d.groupby(d["date_eff"].dt.date).agg(visitors=("count_in","sum")).reset_index()
+    hw = hist_weather.copy()
+    hw["date"] = pd.to_datetime(hw["date"]).dt.date
+    j = m.merge(hw, left_on="date", right_on="date", how="inner")
+    if j.empty:
+        return {"corr_temp_visitors": None, "corr_pop_visitors": None}
+    return {
+        "corr_temp_visitors": float(j["temp"].corr(j["visitors"])),
+        "corr_pop_visitors":  float(j["pop"].corr(j["visitors"]))
+    }
+
+def forecast_next_week(baseline_day: dict, forecast_days: list[dict]) -> dict:
+    """
+    Schat bezoekers & omzet voor komende dagen: baseline visitors per weekdag
+    geschaald op verwachte regen (pop) en temp-anomalie (ruw heuristiek).
+    baseline_day: mapping weekday-> {'visitors':..., 'spv':...}
+    """
+    out = []
+    for f in forecast_days:
+        wd = pd.to_datetime(f["date"]).weekday()
+        b = baseline_day.get(wd, {"visitors":0, "spv":0})
+        visitors = b["visitors"]
+        # eenvoudige weegfactoren (pas later met echte regressie)
+        visitors *= (1 - 0.20*f.get("pop",0))          # -20% bij 100% regen
+        temp = f.get("temp", 0)
+        visitors *= (1 + 0.01*(temp-15))               # +1% per °C boven 15, -1% eronder
+        spv = b["spv"]
+        turnover = visitors * spv
+        out.append({"date": f["date"], "visitors": round(visitors), "spv": spv, "turnover": round(turnover,2),
+                    "pop": f.get("pop",0), "temp": temp})
+    return {"daily": out, "sum_turnover": round(sum(x["turnover"] for x in out),2)}
+
 if st.button("Genereer aanbevelingen"):
     # 1) Historische data
     js = fetch_hist_kpis(shop_ids, period_hist)
@@ -141,21 +240,37 @@ if st.button("Genereer aanbevelingen"):
         kpi_keys=["count_in", "conversion_rate", "turnover", "sales_per_visitor"]
     )
 
-    # 2) Baselines per weekdag
+    # 2) Baselines per weekdag (voor forecast-schatting) + maandaggregatie voor trend
     baseline = build_weekday_baselines(df)
+    dfm = monthly_agg(df)
+    trend = mom_yoy(dfm)
 
-    # 3) Weer + CBS (alleen historisch CCI/retail als context, geen forecast-CCI)
+    # 3) Weer + CBS
     forecast = get_daily_forecast(lat, lon, OPENWEATHER_KEY, days_ahead)
+    # (Optioneel) hist weather nog niet gekoppeld: laat None
+    wfx = weather_effect(df, hist_weather=None)
+
     try:
         cci_info = get_consumer_confidence(CBS_DATASET)
-        cci = cci_info["value"]
-        cci_period = cci_info["period"]
+        cci = cci_info["value"]; cci_period = cci_info["period"]
     except Exception as e:
         st.warning(f"Kon CBS Consumentenvertrouwen niet ophalen (gebruik standaard 0). Details: {e}")
         cci, cci_period = 0.0, "n/a"
 
-    # 4) Advies
+    # 4) Adviesregels op dagniveau
     advice = build_advice("Your Company", baseline, forecast, cci)
+
+    # 5) Forecast op weekniveau
+    # Maak 'baseline_day' door over winkels te middelen (regionale baseline)
+    baseline_day = {}
+    for wd, storemap in baseline.items():
+        if not storemap: 
+            continue
+        visitors = pd.Series([v["visitors"] for v in storemap.values()]).mean()
+        spv = pd.Series([v["spv"] for v in storemap.values()]).mean()
+        baseline_day[wd] = {"visitors": float(visitors), "spv": float(spv)}
+
+    week_forecast = forecast_next_week(baseline_day, forecast)
 
     # ── Output
     st.metric("Consumentenvertrouwen (CBS)", f"{cci}", help=f"Periode: {cci_period}")
@@ -165,6 +280,53 @@ if st.button("Genereer aanbevelingen"):
                 st.markdown(f"**{s['store']}**")
                 st.write("— Storemanager:", " • ".join(s["store_actions"]))
                 st.write("— Regiomanager:", " • ".join(s["regional_actions"]))
+    st.subheader("📌 Samenvatting regio")
+
+    colA, colB, colC, colD = st.columns(4)
+    colA.metric(f"Omzet {trend.get('last_ym','-')}",
+                f"€{trend.get('turnover',0):,.0f}".replace(",","."),
+                (f"{trend['mom']['turnover']:.1f}% m/m" if trend['mom']['turnover'] is not None else "—"))
+    colB.metric("Bezoekers",
+                f"{trend.get('visitors',0):,.0f}".replace(",","."),
+                (f"{trend['mom']['visitors']:.1f}% m/m" if trend['mom']['visitors'] is not None else "—"))
+    colC.metric("Conversie",
+                f"{trend.get('conversion',0)*100:.2f}%",
+                (f"{trend['mom']['conversion']:.1f}% m/m" if trend['mom']['conversion'] is not None else "—"))
+    colD.metric("SPV",
+                f"€{trend.get('spv',0):.2f}",
+                (f"{trend['mom']['spv']:.1f}% m/m" if trend['mom']['spv'] is not None else "—"))
+
+    # YoY badges
+    st.caption(
+        "YoY: "
+        + (f"Omzet {trend['yoy']['turnover']:.1f}%  " if trend['yoy']['turnover'] is not None else "")
+        + (f"• Bezoekers {trend['yoy']['visitors']:.1f}%  " if trend['yoy']['visitors'] is not None else "")
+        + (f"• Conversie {trend['yoy']['conversion']:.1f}%  " if trend['yoy']['conversion'] is not None else "")
+        + (f"• SPV {trend['yoy']['spv']:.1f}%" if trend['yoy']['spv'] is not None else "")
+    )
+
+    # Macro duiding
+    cci_text = (
+        "positief (kooplustiger)" if cci >= 0 else "negatief (voorzichtiger)"
+    )
+    if abs(cci) > 100:
+        st.warning("Let op: CCI lijkt buiten de gebruikelijke bandbreedte (verwacht ~-60..+40). Controleer dataset/veldselectie.")
+    st.info(f"**CCI ({cci_period}) = {cci:.1f}** → sentiment {cci_text}. "
+            "Gebruik hogere/betere SPV-doelen bij positief sentiment; focus op bundel/waarde bij negatief.")
+
+    # Weer-invloed + verwachting
+    corr_t = wfx["corr_temp_visitors"]; corr_p = wfx["corr_pop_visitors"]
+    weer_line = []
+    if corr_t is not None: weer_line.append(f"temp↔bezoekers corr = {corr_t:.2f}")
+    if corr_p is not None: weer_line.append(f"regen↔bezoekers corr = {corr_p:.2f}")
+    weer_line = " | ".join(weer_line) if weer_line else "historische weerkoppeling nog niet geactiveerd"
+
+    st.success(
+        "🔮 **Verwachting komende 7 dagen**\n"
+        f"• Geschatte omzet: **€{week_forecast['sum_turnover']:,.0f}**\n"
+        f"• {weer_line}\n"
+        "• Tip: plan inzet rond dagen met lage regen-kans en zet queue-buster in op nattere piekuren."
+        .
 
     # Macro tiles (context)
     if cci_series:
