@@ -1,13 +1,12 @@
 # shop_mapping.py
 # ✅ Enkelvoudige bron: id → {name, region}
 SHOP_NAME_MAP = {
-    32224: {"name": "Amersfoort", "region": "Noord NL"},
-    31977: {"name": "Amsterdam",  "region": "Noord NL"},
-    31831: {"name": "Den Bosch",  "region": "Zuid NL"},
-    32872: {"name": "Haarlem",    "region": "Noord NL"},
-    32319: {"name": "Leiden",     "region": "Noord NL"},
-    32871: {"name": "Maastricht", "region": "Zuid NL"},
-    30058: {"name": "Nijmegen",   "region": "Zuid NL"},
-    32320: {"name": "Rotterdam",  "region": "Zuid NL"},
-    32204: {"name": "Venlo",      "region": "Zuid NL"},
+    29658: {"name": "Amsterdam", "region": "Noord NL", "postcode": "3811"},
+    29679: {"name": "Apeldoorn",  "region": "Noord NL", "postcode": "7331"},
+    29683: {"name": "Den Haag",  "region": "Zuid NL",  "postcode": "2511"},
+    29669: {"name": "Gouda",    "region": "Noord NL", "postcode": "2801"},
+    29771: {"name": "Haarlem",     "region": "Noord NL", "postcode": "2011"},
+    29770: {"name": "Leiden", "region": "Zuid NL",  "postcode": "2311"},
+    28704: {"name": "Rotterdam",  "region": "Zuid NL",  "postcode": "3087"},
+    29691: {"name": "Tilburg",      "region": "Zuid NL",  "postcode": "5038"},
 }
