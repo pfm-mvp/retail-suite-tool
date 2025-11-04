@@ -19,6 +19,7 @@ from helpers_shop import ID_TO_NAME, get_ids_by_region, REGIONS
 # ── Services (package 'services' moet een __init__.py hebben)
 from services.weather_service import get_daily_forecast
 from services.cbs_service import get_consumer_confidence, get_cci_series, get_retail_index
+from services.cbs_service import list_retail_branches
 from services.advisor import build_advice
 
 # ── Secrets (werkt met platte keys zoals in jouw screenshot)
@@ -48,17 +49,19 @@ days_ahead = st.slider("Dagen vooruit", 1, 7, 5)
 period_hist = st.selectbox("Historische periode", ["last_month", "this_year", "last_year"], index=0)
 
 st.subheader("Macro-context (CBS)")
-col1, col2, col3 = st.columns([1, 1, 2])
+col1, col2, col3 = st.columns([1,1,2])
 with col1:
     months_back = st.slider("Maanden terug (CBS)", 6, 36, 18)
 with col2:
     use_retail = st.checkbox("Toon detailhandel-index (85828NED)", value=True)
 with col3:
-    branch_code = st.text_input("Branchecode (CBS)", value="DH_TOTAAL")  # TODO: dropdown met veelgebruikte codes
+    dim_name, branch_items = list_retail_branches("85828NED")
+    branch_options = [b["title"] for b in branch_items] if branch_items else ["DH_TOTAAL","DH_FOOD","DH_NONFOOD"]
+    branch_label = st.selectbox("Branche (CBS)", branch_options, index=0)
 
 # Ophalen macro-reeksen (buiten de knop zodat tiles altijd beschikbaar zijn)
 cci_series = get_cci_series(months_back=months_back, dataset=CBS_DATASET)
-retail_series = get_retail_index(branch_code=branch_code, months_back=months_back) if use_retail else []
+retail_series = get_retail_index(branch_code_or_title=branch_label, months_back=months_back) if use_retail else []
 
 # ── Fetch historical KPIs from your existing API (no changes server-side)
 def fetch_hist_kpis(shop_ids, period: str):
