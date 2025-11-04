@@ -59,8 +59,22 @@ with col2:
     use_retail = st.checkbox("Toon detailhandel-index (85828NED)", value=True)
 with col3:
     dim_name, branch_items = list_retail_branches("85828NED")
-    branch_options = [b["title"] for b in branch_items] if branch_items else ["DH_TOTAAL", "DH_FOOD", "DH_NONFOOD"]
-    branch_label = st.selectbox("Branche (CBS)", branch_options, index=0)
+    # Bouw mapping: Title -> Key (fallbacks voor als API niets teruggeeft)
+    if branch_items:
+        title_to_key = {b["title"]: str(b["key"]) for b in branch_items}
+        titles = list(title_to_key.keys())
+        # probeer "Totaal detailhandel" als default; anders eerste item
+        default_idx = 0
+        for i, t in enumerate(titles):
+            if "totaal" in t.lower():
+                default_idx = i
+                break
+        branch_title = st.selectbox("Branche (CBS)", titles, index=default_idx)
+        branch_key = title_to_key[branch_title]
+    else:
+        # Fallback zonder dimensielijst
+        branch_title = st.selectbox("Branche (CBS)", ["DH_TOTAAL","DH_FOOD","DH_NONFOOD"], index=0)
+        branch_key = branch_title  # hier gebruiken we de code zelf als 'key'
 
 # Ophalen macro-reeksen (buiten de knop zodat tiles meteen renderen)
 try:
@@ -70,7 +84,16 @@ except Exception as e:
     st.info(f"CCI niet beschikbaar: {e}")
 
 try:
-    retail_series = get_retail_index(branch_code_or_title=branch_label, months_back=months_back) if use_retail else []
+    retail_series = []
+    if use_retail:
+        # 1) Probeer met de KEY uit de dropdown
+        retail_series = get_retail_index(branch_code_or_title=branch_key, months_back=months_back)
+        # 2) Als leeg, probeer met de TITLE (sommige datasets matchen daarop)
+        if not retail_series:
+            retail_series = get_retail_index(branch_code_or_title=branch_title, months_back=months_back)
+        # 3) Als nog leeg, probeer totale branche als harde fallback
+        if not retail_series:
+            retail_series = get_retail_index(branch_code_or_title="DH_TOTAAL", months_back=months_back)
 except Exception as e:
     retail_series = []
     if use_retail:
