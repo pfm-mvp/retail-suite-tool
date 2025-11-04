@@ -160,3 +160,6 @@ if st.button("Genereer aanbevelingen"):
         st.metric(f"Detailhandel ({last['branch']}) — {last['series']}", f"{last['retail_value']:.1f}")
         with st.expander("🛍️ Detailhandel reeks (CBS 85828NED)"):
             st.line_chart({"Retail": [x["retail_value"] for x in retail_series]})
+
+    if use_retail and not retail_series:
+        st.info("Geen detailhandelreeks gevonden voor deze branche-code en periode (85828NED). Probeer een andere code, bijv. 'DH_TOTAAL', 'DH_FOOD', of 'DH_NONFOOD'.")
