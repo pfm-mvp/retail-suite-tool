@@ -16,7 +16,7 @@ from advisor import build_advice
 
 # import services uit de submap 'services'
 from services.weather_service import get_daily_forecast
-from services.cbs_service import get_consumer_confidence
+from services.cbs_service import get_consumer_confidence, get_cci_series, get_retail_index  # nieuwe imports
 
 # ── Secrets (werkt met platte keys zoals in jouw screenshot)
 import streamlit as st, os
@@ -45,6 +45,18 @@ lat = st.number_input("Latitude", value=52.37)
 lon = st.number_input("Longitude", value=4.90)
 days_ahead = st.slider("Dagen vooruit", 1, 7, 5)
 period_hist = st.selectbox("Historische periode", ["last_month","this_year","last_year"], index=0)
+st.subheader("Macro-context (CBS)")
+col1, col2, col3 = st.columns([1,1,2])
+with col1:
+    months_back = st.slider("Maanden terug (CBS)", 6, 36, 18)
+with col2:
+    use_retail = st.checkbox("Toon detailhandel-index (85828NED)", value=True)
+with col3:
+    branch_code = st.text_input("Branchecode (CBS)", value="DH_TOTAAL")  # later dropdown maken
+
+# Ophalen macro-reeksen
+cci_series = get_cci_series(months_back=months_back, dataset=CBS_DATASET)
+retail_series = get_retail_index(branch_code=branch_code, months_back=months_back) if use_retail else []
 
 # ── Fetch historical KPIs from your existing API (no changes server-side)
 def fetch_hist_kpis(shop_ids, period: str):
@@ -119,3 +131,16 @@ if st.button("Genereer aanbevelingen"):
                 st.markdown(f"**{s['store']}**")
                 st.write("— Storemanager:", " • ".join(s["store_actions"]))
                 st.write("— Regiomanager:", " • ".join(s["regional_actions"]))
+
+    # Macro tiles
+    if cci_series:
+        st.metric("CCI (laatste maand)", f"{cci_series[-1]['cci']:.1f}")
+        with st.expander("📈 CCI reeks (CBS)"):
+            st.line_chart({ "CCI": [x["cci"] for x in cci_series] })
+
+    if retail_series:
+        last = retail_series[-1]
+        st.metric(f"Detailhandel ({last['branch']}) — {last['series']}", f"{last['retail_value']:.1f}")
+        with st.expander("🛍️ Detailhandel reeks (CBS 85828NED)"):
+            st.line_chart({ "Retail": [x["retail_value"] for x in retail_series] })
+
