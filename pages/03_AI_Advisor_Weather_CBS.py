@@ -69,11 +69,11 @@ with c3:
     if branch_items:
         title_to_key = {b["title"]: str(b["key"]) for b in branch_items}
         titles = list(title_to_key.keys())
-        default_idx = next((i for i,t in enumerate(titles) if "totaal" in t.lower()), 0)
+        default_idx = next((i for i, t in enumerate(titles) if "totaal" in t.lower()), 0)
         branch_title = st.selectbox("Branche (CBS)", titles, index=default_idx)
         branch_key = title_to_key[branch_title]
     else:
-        branch_title = st.selectbox("Branche (CBS)", ["DH_TOTAAL","DH_FOOD","DH_NONFOOD"], index=0)
+        branch_title = st.selectbox("Branche (CBS)", ["DH_TOTAAL", "DH_FOOD", "DH_NONFOOD"], index=0)
         branch_key = branch_title
 
 # ───────── Macro reeksen (buiten de knop) ─────────
@@ -86,9 +86,11 @@ except Exception as e:
 try:
     retail_series = []
     if use_retail:
-        retail_series = get_retail_index(branch_code_or_title=branch_key, months_back=months_back) or \
-                        get_retail_index(branch_code_or_title=branch_title, months_back=months_back) or \
-                        get_retail_index(branch_code_or_title="DH_TOTAAL", months_back=months_back)
+        retail_series = (
+            get_retail_index(branch_code_or_title=branch_key,   months_back=months_back) or
+            get_retail_index(branch_code_or_title=branch_title, months_back=months_back) or
+            get_retail_index(branch_code_or_title="DH_TOTAAL",  months_back=months_back)
+        )
 except Exception as e:
     retail_series = []
     if use_retail:
@@ -146,34 +148,47 @@ def build_weekday_baselines(df: pd.DataFrame) -> dict:
 def monthly_agg(df: pd.DataFrame) -> pd.DataFrame:
     d = add_effective_date_cols(df)
     g = d.groupby("ym", as_index=False).agg(
-        visitors=("count_in","sum"),
-        turnover=("turnover","sum"),
+        visitors=("count_in", "sum"),
+        turnover=("turnover", "sum"),
     )
     d["weighted_conv"] = d["conversion_rate"] * d["count_in"]
-    conv = d.groupby("ym", as_index=False).agg(conv_num=("weighted_conv","sum"),
-                                              conv_den=("count_in","sum"))
-    conv["conversion"] = (conv["conv_num"]/conv["conv_den"]).fillna(0)
-    out = g.merge(conv[["ym","conversion"]], on="ym", how="left")
-    out["spv"] = (out["turnover"]/out["visitors"]).replace([float("inf")], 0).fillna(0)
+    conv = d.groupby("ym", as_index=False).agg(
+        conv_num=("weighted_conv", "sum"),
+        conv_den=("count_in", "sum")
+    )
+    conv["conversion"] = (conv["conv_num"] / conv["conv_den"]).fillna(0)
+    out = g.merge(conv[["ym", "conversion"]], on="ym", how="left")
+    out["spv"] = (out["turnover"] / out["visitors"]).replace([float("inf")], 0).fillna(0)
     return out
 
 def mom_yoy(dfm: pd.DataFrame):
+    """
+    Robuuste MoM/YoY:
+    - zet ym -> datetime (1e vd maand)
+    - dropt NaT
+    - stopt netjes als er onvoldoende maanden zijn
+    """
     if dfm is None or dfm.empty:
         return {}
-    m = dfm.copy().sort_values("ym").reset_index(drop=True)
-    m["ym_dt"] = pd.to_datetime(m["ym"].astype(str) + "-01", errors="coerce")
-    if m["ym_dt"].isna().all():
+    m = dfm.copy()
+    m["ym_dt"] = pd.to_datetime(m["ym"].astype(str) + "-01", format="%Y-%m-%d", errors="coerce")
+    m = m.dropna(subset=["ym_dt"]).sort_values("ym_dt").reset_index(drop=True)
+    if m.empty:
         return {}
+
     last = m.iloc[-1]
     prev = m.iloc[-2] if len(m) > 1 else None
-    yoy_dt  = last["ym_dt"] - pd.DateOffset(years=1)
+    yoy_dt = last["ym_dt"] - pd.DateOffset(years=1)
     yoy_row = m.loc[m["ym_dt"] == yoy_dt]
     yoy_row = yoy_row.iloc[0] if not yoy_row.empty else None
 
-    def pct(a,b):
-        if b in [0,None] or pd.isna(b): return None
-        try: return (float(a)/float(b) - 1) * 100
-        except: return None
+    def pct(a, b):
+        if b in [0, None] or pd.isna(b):
+            return None
+        try:
+            return (float(a) / float(b) - 1) * 100
+        except Exception:
+            return None
 
     return {
         "last_ym":   last["ym_dt"].strftime("%Y-%m"),
@@ -182,16 +197,16 @@ def mom_yoy(dfm: pd.DataFrame):
         "conversion":float(last.get("conversion", 0)),
         "spv":       float(last.get("spv", 0)),
         "mom": {
-            "turnover":  pct(last.get("turnover", 0),  prev.get("turnover", 0))  if prev is not None else None,
-            "visitors":  pct(last.get("visitors", 0),  prev.get("visitors", 0))  if prev is not None else None,
-            "conversion":pct(last.get("conversion", 0),prev.get("conversion", 0))if prev is not None else None,
-            "spv":       pct(last.get("spv", 0),       prev.get("spv", 0))       if prev is not None else None,
+            "turnover":   pct(last.get("turnover", 0),   prev.get("turnover", 0))   if prev is not None else None,
+            "visitors":   pct(last.get("visitors", 0),   prev.get("visitors", 0))   if prev is not None else None,
+            "conversion": pct(last.get("conversion", 0), prev.get("conversion", 0)) if prev is not None else None,
+            "spv":        pct(last.get("spv", 0),        prev.get("spv", 0))        if prev is not None else None,
         },
         "yoy": {
-            "turnover":  pct(last.get("turnover", 0),  yoy_row.get("turnover", 0))  if yoy_row is not None else None,
-            "visitors":  pct(last.get("visitors", 0),  yoy_row.get("visitors", 0))  if yoy_row is not None else None,
-            "conversion":pct(last.get("conversion", 0),yoy_row.get("conversion", 0))if yoy_row is not None else None,
-            "spv":       pct(last.get("spv", 0),       yoy_row.get("spv", 0))       if yoy_row is not None else None,
+            "turnover":   pct(last.get("turnover", 0),   yoy_row.get("turnover", 0))   if yoy_row is not None else None,
+            "visitors":   pct(last.get("visitors", 0),   yoy_row.get("visitors", 0))   if yoy_row is not None else None,
+            "conversion": pct(last.get("conversion", 0), yoy_row.get("conversion", 0)) if yoy_row is not None else None,
+            "spv":        pct(last.get("spv", 0),        yoy_row.get("spv", 0))        if yoy_row is not None else None,
         },
     }
 
@@ -249,7 +264,11 @@ if st.button("Genereer aanbevelingen"):
     # 2) Baselines + regiotrend
     df = add_effective_date_cols(df)
     baseline = build_weekday_baselines(df)
+
     dfm = monthly_agg(df)
+    # Guard tegen NaT in ym (die veroorzaakte je crash)
+    dfm["_ym_dt_check"] = pd.to_datetime(dfm["ym"].astype(str) + "-01", errors="coerce")
+    dfm = dfm.dropna(subset=["_ym_dt_check"]).drop(columns=["_ym_dt_check"])
     trend = mom_yoy(dfm)
 
     # 3) Weer + CBS
@@ -267,7 +286,7 @@ if st.button("Genereer aanbevelingen"):
     # 5) Regionale baseline (gemiddelden van alle winkels per weekday)
     baseline_day = {}
     for wd, storemap in baseline.items():
-        if not storemap: 
+        if not storemap:
             continue
         visitors = pd.Series([v["visitors"] for v in storemap.values()]).mean()
         spv      = pd.Series([v["spv"]      for v in storemap.values()]).mean()
