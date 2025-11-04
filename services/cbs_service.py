@@ -2,68 +2,95 @@
 from __future__ import annotations
 import requests
 from datetime import date
-from calendar import monthrange
+from typing import List, Dict
+import calendar
+
+BASE = "https://opendata.cbs.nl/ODataApi/OData"
 
 def _period_code(d: date) -> str:
+    # CBS periodenotation: YYYYMMNN, voor maand volstaat YYYYMM
     return f"{d.year}MM{d.month:02d}"
 
-def _prev_month(d: date) -> date:
-    y, m = (d.year, d.month - 1)
-    if m == 0:
-        y, m = (d.year - 1, 12)
-    # zet op 15e van de maand om dagproblemen te vermijden
-    return date(y, m, min(15, monthrange(y, m)[1]))
+def _ym_list(months_back: int) -> List[str]:
+    y, m = date.today().year, date.today().month
+    out = []
+    for _ in range(months_back):
+        out.append(f"{y}MM{m:02d}")
+        m -= 1
+        if m == 0:
+            y -= 1; m = 12
+    return list(reversed(out))
 
-def _pick_confidence_field(item: dict) -> str | None:
-    # Zoek het juiste veld (nl/eng naam of suffixen kunnen wisselen)
-    candidates = [k for k in item.keys() if "confidence" in k.lower() or "vertrouwen" in k.lower()]
-    # prioriteer exact "ConsumerConfidence_2" als die bestaat
-    for k in candidates:
-        if k.lower() == "consumerconfidence_2":
-            return k
-    # anders: pak de eerste numerieke candidate
-    for k in candidates:
-        v = item.get(k, None)
-        if isinstance(v, (int, float)) or (isinstance(v, str) and v.replace("-", "").isdigit()):
-            return k
-    return candidates[0] if candidates else None
+def _pick_numeric_field(item: dict, preferred: List[str]) -> str:
+    # Kies veld uit candidates (verschillen tussen datasets/versies komen voor)
+    keys = {k.lower(): k for k in item.keys()}
+    for p in preferred:
+        if p.lower() in keys:
+            return keys[p.lower()]
+    # fallback: pak eerste numerieke veld
+    for k, v in item.items():
+        if isinstance(v, (int, float)): return k
+        if isinstance(v, str):
+            try:
+                float(v.replace(",", ".")); return k
+            except: pass
+    raise KeyError("Geen numeriek veld gevonden in CBS record")
 
-def get_consumer_confidence(dataset: str = "83693NED", when: date | None = None, max_backtrack: int = 3) -> dict:
+def _odata_select(dataset: str, filter_q: str, select: str = None, top: int = None) -> List[dict]:
+    url = f"{BASE}/{dataset}/TypedDataSet?{filter_q}"
+    if select: url += f"&$select={select}"
+    if top:    url += f"&$top={top}"
+    r = requests.get(url, timeout=30)
+    r.raise_for_status()
+    return r.json().get("value", [])
+
+# -----------------------------
+# 83693NED — Consumentenvertrouwen (maandelijks)
+# -----------------------------
+def get_cci_series(months_back: int = 18, dataset: str = "83693NED") -> List[Dict]:
+    # Haal reeks voor de opgegeven maanden (exclusief toekomst); filter op Periods IN (...)
+    periods = _ym_list(months_back)
+    quoted = ",".join([f"%27{p}%27" for p in periods])
+    rows = _odata_select(dataset, f"$filter=Periods in ({quoted})")
+    if not rows: return []
+
+    # Vind de juiste kolom (vaak ConsumerConfidence_2)
+    field = _pick_numeric_field(rows[0], ["ConsumerConfidence_2", "Consumentenvertrouwen_2", "Consumerconfidence"])
+    out = []
+    for it in rows:
+        raw = it[field]
+        val = float(raw) if isinstance(raw, (int, float)) else float(str(raw).replace(",", "."))
+        out.append({"period": it["Periods"], "cci": val})
+    # sorteren op period
+    out.sort(key=lambda x: x["period"])
+    return out
+
+# -----------------------------
+# 85828NED — Detailhandel; omzet/volume (index of %), per branche
+# -----------------------------
+def get_retail_index(series: str = "Omzetontwikkeling_1",  # voorbeeld: "Omzetontwikkeling_1", "Volumeontwikkeling_2", of een andere meeteenheid
+                     branch_code: str = "DH_TOTAAL",       # totaal detailhandel; anders bv. "DH_NONFOOD", "DH_FOOD" of specifieke SBI
+                     months_back: int = 18,
+                     dataset: str = "85828NED") -> List[Dict]:
     """
-    Haalt consumentenvertrouwen op voor 'when'.
-    Als de maand nog niet gepubliceerd is (lege resultset), backtrack tot max_backtrack maanden.
-    Retourneert: {"period": "YYYYMMNN", "value": float, "field": "ConsumerConfidence_2"}
+    Haalt maanddata voor detailhandel op. 'series' = kolomnaam (zie dataset), 'branch_code' = Branches_2 code.
+    Voorbeeld codes: DH_TOTAAL (totaal), DH_FOOD, DH_NONFOOD, DH_NONFOOD_Kleding (afhankelijk van dataset).
     """
-    when = when or date.today()
-    tries = 0
-    last_error = None
+    periods = _ym_list(months_back)
+    quoted = ",".join([f"%27{p}%27" for p in periods])
+    # In veel CBS-datasets heet de branche-dimensie 'Branches_2' of 'Branches'
+    # We proberen eerst Branches_2, daarna Branches
+    rows = _odata_select(dataset, f"$filter=Periods in ({quoted}) and Branches_2 eq '{branch_code}'")
+    if not rows:
+        rows = _odata_select(dataset, f"$filter=Periods in ({quoted}) and Branches eq '{branch_code}'")
+    if not rows: return []
 
-    while tries <= max_backtrack:
-        period = _period_code(when)
-        url = f"https://opendata.cbs.nl/ODataApi/OData/{dataset}/TypedDataSet?$filter=Periods%20eq%20%27{period}%27"
-        r = requests.get(url, timeout=20)
-        try:
-            r.raise_for_status()
-            data = r.json().get("value", [])
-            if not data:
-                # niets gepubliceerd voor deze maand → stap 1 maand terug
-                when = _prev_month(when)
-                tries += 1
-                continue
-
-            item = data[0]
-            field = _pick_confidence_field(item)
-            if not field:
-                raise KeyError("Kon confidence-veld niet vinden in CBS response.")
-
-            raw = item[field]
-            value = float(raw) if isinstance(raw, (int, float)) else float(str(raw).replace(",", "."))
-            return {"period": period, "value": value, "field": field}
-
-        except Exception as e:
-            last_error = e
-            when = _prev_month(when)
-            tries += 1
-
-    # als alles faalt: geef nette fout terug
-    raise RuntimeError(f"CBS consumentenvertrouwen niet gevonden na {max_backtrack} maanden backtrack. Laatste fout: {last_error}")
+    # series kolom kiezen (fallback naar numeriek veld)
+    field = _pick_numeric_field(rows[0], [series])
+    out = []
+    for it in rows:
+        raw = it[field]
+        val = float(raw) if isinstance(raw, (int, float)) else float(str(raw).replace(",", "."))
+        out.append({"period": it["Periods"], "retail_value": val, "series": field, "branch": branch_code})
+    out.sort(key=lambda x: x["period"])
+    return out
