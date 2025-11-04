@@ -24,6 +24,10 @@ def _ym_list(months_back: int) -> List[str]:
         if m == 0:
             y -= 1; m = 12
     return list(reversed(out))
+    
+def _ym_range(months_back: int) -> tuple[str, str]:
+    ys = _ym_list(months_back)
+    return ys[0], ys[-1]
 
 def _odata_select(dataset: str, path: str, params: str = "") -> List[dict]:
     # path: e.g. "TypedDataSet" or "Branches_2"
@@ -83,16 +87,22 @@ def get_consumer_confidence(dataset: str = "83693NED", when: date | None = None,
 # 83693NED — Consumentenvertrouwen (reeks)
 # -----------------------------
 def get_cci_series(months_back: int = 18, dataset: str = "83693NED") -> List[Dict]:
-    periods = _ym_list(months_back)
-    quoted = ",".join([f"%27{p}%27" for p in periods])
-    rows = _odata_select(dataset, "TypedDataSet", f"$filter=Periods in ({quoted})")
+    start, end = _ym_range(months_back)
+    try:
+        rows = _odata_select(dataset, "TypedDataSet", f"$filter=Periods ge '{start}' and Periods le '{end}'&$top=5000")
+    except requests.HTTPError:
+        return []
     if not rows:
         return []
+
     period_field = _pick_period_field(rows[0])
     value_field  = _pick_numeric_field(rows[0], ["ConsumerConfidence_2", "Consumentenvertrouwen_2", "Consumerconfidence"])
+
     out = []
     for it in rows:
-        raw = it[value_field]
+        raw = it.get(value_field)
+        if raw is None: 
+            continue
         val = float(raw) if isinstance(raw, (int, float)) else float(str(raw).replace(",", "."))
         out.append({"period": it[period_field], "cci": val})
     out.sort(key=lambda x: x["period"])
@@ -134,29 +144,32 @@ def get_retail_index(series: str = "Omzetontwikkeling_1",
                      branch_code_or_title: str = "DH_TOTAAL",
                      months_back: int = 18,
                      dataset: str = "85828NED") -> List[Dict]:
-    periods = _ym_list(months_back)
-    quoted = ",".join([f"%27{p}%27" for p in periods])
+    start, end = _ym_range(months_back)
 
-    # 1) Haal branch-dimensie op en zoek Key bij opgegeven code/titel
+    # 1) Haal branch-dimensie op → probeer server-side met Key
     dim_name, branches = list_retail_branches(dataset)
     branch_key = _find_branch_key(branches, branch_code_or_title) if branches else None
 
-    # 2) Probeer server-side filter met Key (dim_name kan "" zijn als niks gevonden)
     rows = []
     if dim_name and branch_key:
         try:
-            rows = _odata_select(dataset, "TypedDataSet",
-                                 f"$filter=Periods in ({quoted}) and {dim_name} eq '{branch_key}'")
+            # server-side filter met range + branch-key
+            rows = _odata_select(
+                dataset, "TypedDataSet",
+                f"$filter=Periods ge '{start}' and Periods le '{end}' and {dim_name} eq '{branch_key}'&$top=5000"
+            )
         except requests.HTTPError:
             rows = []
 
-    # 3) Fallback: haal alles op en filter client-side
+    # 2) Fallback: alles binnen range ophalen en client-side filteren op branch
     if not rows:
-        rows = _odata_select(dataset, "TypedDataSet", f"$filter=Periods in ({quoted})")
+        try:
+            rows = _odata_select(dataset, "TypedDataSet", f"$filter=Periods ge '{start}' and Periods le '{end}'&$top=5000")
+        except requests.HTTPError:
+            return []
         if not rows:
             return []
 
-        # detecteer period- en branchveld
         period_field = _pick_period_field(rows[0])
         branch_field = None
         for k in rows[0].keys():
@@ -167,32 +180,27 @@ def get_retail_index(series: str = "Omzetontwikkeling_1",
         if not branch_field:
             return []
 
-        # client-side filter op branch (op Key of Title als aanwezig)
-        def _match_branch(item: dict) -> bool:
+        def _match(item: dict) -> bool:
             val = str(item.get(branch_field, "")).strip().lower()
             if branch_key is not None:
                 return val == str(branch_key).lower()
-            # als geen branch_key, probeer title-match (soms verschijnt Title in dataset)
             if branches:
                 return any(val == str(b["key"]).lower() or val == str(b["title"]).lower() for b in branches)
-            # laatste redmiddel: bevat
             return branch_code_or_title.lower() in val
 
-        rows = [r for r in rows if _match_branch(r)]
+        rows = [r for r in rows if _match(r)]
         if not rows:
             return []
 
-        period_field = _pick_period_field(rows[0])
         value_field  = _pick_numeric_field(rows[0], [series])
     else:
-        # server-side pad: kies velden
         period_field = _pick_period_field(rows[0])
         value_field  = _pick_numeric_field(rows[0], [series])
 
     out = []
     for it in rows:
-        raw = it.get(value_field, None)
-        if raw is None: 
+        raw = it.get(value_field)
+        if raw is None:
             continue
         val = float(raw) if isinstance(raw, (int, float)) else float(str(raw).replace(",", "."))
         out.append({
@@ -203,3 +211,4 @@ def get_retail_index(series: str = "Omzetontwikkeling_1",
         })
     out.sort(key=lambda x: x["period"])
     return out
+
