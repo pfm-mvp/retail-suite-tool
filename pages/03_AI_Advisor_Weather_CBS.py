@@ -114,6 +114,20 @@ def build_weekday_baselines(df: pd.DataFrame) -> dict:
         out[wd] = stores
     return out
 
+# Ophalen macro-reeksen
+try:
+    cci_series = get_cci_series(months_back=months_back, dataset=CBS_DATASET)
+except Exception as e:
+    cci_series = []
+    st.info(f"CCI niet beschikbaar: {e}")
+
+try:
+    retail_series = get_retail_index(branch_code_or_title=branch_label, months_back=months_back) if use_retail else []
+except Exception as e:
+    retail_series = []
+    if use_retail:
+        st.info(f"Detailhandelreeks (85828NED) niet beschikbaar: {e}")
+
 # ── Action
 st.caption("Selecteer regio en druk op de knop om aanbevelingen te genereren.")
 shop_ids = get_ids_by_region(region)
