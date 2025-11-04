@@ -3,6 +3,14 @@ import os
 import sys
 import pandas as pd
 import streamlit as st
+# mapping zoals je andere tools
+try:
+    from shop_mapping import SHOP_NAME_MAP  # {shop_id: "Store Name", ...}
+except Exception:
+    SHOP_NAME_MAP = None
+
+# dezelfde API-wrapper als in 03_Retail_Portfolio_Benchmark_AI.py
+from utils_pfmx import api_get_report, friendly_error
 
 # ── Page setup
 st.set_page_config(page_title="AI Advisor — Weer + CBS", page_icon="🧭", layout="wide")
@@ -100,18 +108,26 @@ except Exception as e:
         st.info(f"Detailhandelreeks (85828NED) niet beschikbaar: {e}")
 
 # ── Fetch historical KPIs (je bestaande FastAPI/Vemcount-laag)
-def fetch_hist_kpis(shop_ids, period: str):
-    params = [("source", "shops")]
-    for sid in shop_ids:
-        params.append(("data", int(sid)))
-    for k in ["count_in", "conversion_rate", "turnover", "sales_per_visitor"]:
-        params.append(("data_output", k))
-    params.append(("period", period))
-    params.append(("period_step", "day"))
-    import requests
-    r = requests.get(API_URL, params=params, timeout=45)
-    r.raise_for_status()
-    return r.json()
+def fetch_hist_kpis_df(shop_ids, period: str) -> pd.DataFrame:
+    """
+    Zelfde param-structuur als je benchmark-tool:
+    - herhaalde ("data", id)
+    - ("data_output", metric)
+    - ("source","shops"), ("period", period), ("step","day")
+    """
+    metrics = ["count_in", "conversion_rate", "turnover", "sales_per_visitor"]
+    params = [("data", int(sid)) for sid in shop_ids]
+    params += [("data_output", k) for k in metrics]
+    params += [("source", "shops"), ("period", period), ("step", "day")]
+
+    js = api_get_report(params)  # wrapper regelt API_URL + auth/logging
+    if friendly_error(js, period):
+        return pd.DataFrame()
+
+    # gebruik waar mogelijk “echte” namen uit SHOP_NAME_MAP
+    name_map = SHOP_NAME_MAP or ID_TO_NAME
+    df = normalize_vemcount_response(js, name_map, kpi_keys=metrics)
+    return df
 
 # ── Baselines per weekdag (per winkel) voor forecast
 def build_weekday_baselines(df: pd.DataFrame) -> dict:
@@ -232,17 +248,34 @@ def estimate_weather_uplift(baseline_day: dict, forecast_days: list[dict]) -> di
     return {"daily": daily, "base_total": base_total, "adj_total": adj_total, "delta_total": delta_total, "delta_pct": delta_pct}
 
 # ── Action
+# ── Action
 st.caption("Selecteer regio en druk op de knop om aanbevelingen te genereren.")
-shop_ids = get_ids_by_region(region)
-st.write(f"{len(shop_ids)} winkels geselecteerd in regio: **{region}**")
+
+# Kies shops: regio → ids; bij ALL of lege regio → alle winkels uit mapping
+if region == "ALL":
+    shop_ids = sorted([int(k) for k in (SHOP_NAME_MAP or ID_TO_NAME).keys()])
+else:
+    shop_ids = get_ids_by_region(region)
+    if not shop_ids:
+        shop_ids = sorted([int(k) for k in (SHOP_NAME_MAP or ID_TO_NAME).keys()])
+
+st.write(f"**{len(shop_ids)}** winkels geselecteerd in regio: **{region}**")
+st.text(f"ShopIDs → {shop_ids[:25]}{' ...' if len(shop_ids)>25 else ''}")  # snelle zichtcheck
 
 if st.button("Genereer aanbevelingen"):
-    # 1) Historische data
-    js = fetch_hist_kpis(shop_ids, period_hist)
-    df = normalize_vemcount_response(
-        js, ID_TO_NAME,
-        kpi_keys=["count_in", "conversion_rate", "turnover", "sales_per_visitor"]
-    )
+    # 1) Historische data (zelfde route als benchmark-tool)
+    df = fetch_hist_kpis_df(shop_ids, period_hist)
+
+    with st.expander("🛠️ Debug — eerste rijen (hist KPI’s)"):
+        st.write(df.head(15))
+
+    if df is None or df.empty:
+        st.warning(
+            "Geen historische KPI-data gevonden voor deze selectie/periode.\n"
+            "• Probeer een ruimere periode (bijv. 'this_year' of 'last_year').\n"
+            "• Check of de gekozen winkels data hebben in Vemcount."
+        )
+        st.stop()
 
     # 2) Baselines + regiotrend
     baseline = build_weekday_baselines(df)
