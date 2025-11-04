@@ -162,39 +162,57 @@ def monthly_agg(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 def mom_yoy(dfm: pd.DataFrame):
-    if dfm.empty:
+    """
+    Robuuste MoM/YoY op regiomaand-aggregaten.
+    Werkt ook als ym geen string is of er maar 1 maand aanwezig is.
+    """
+    if dfm is None or dfm.empty:
         return {}
-    dfm = dfm.sort_values("ym").reset_index(drop=True)
-    last = dfm.iloc[-1]
-    prev = dfm.iloc[-2] if len(dfm) > 1 else None
 
-    # YoY: zelfde maand vorig jaar
-    y, m = map(int, last["ym"].split("-"))
-    yoy_key = f"{y-1}-{m:02d}"
-    yoy_row = dfm[dfm["ym"] == yoy_key].iloc[0] if (dfm["ym"] == yoy_key).any() else None
+    m = dfm.copy().sort_values("ym").reset_index(drop=True)
+
+    # Forceer ym -> datetime (1e dag vd maand). Als dit faalt, stop netjes.
+    try:
+        m["ym_dt"] = pd.to_datetime(m["ym"].astype(str) + "-01", errors="coerce")
+    except Exception:
+        m["ym_dt"] = pd.NaT
+
+    if m["ym_dt"].isna().all():
+        return {}
+
+    last = m.iloc[-1]
+    prev = m.iloc[-2] if len(m) > 1 else None
+
+    # Zoek dezelfde maand vorig jaar
+    yoy_dt = last["ym_dt"] - pd.DateOffset(years=1)
+    yoy_match = m.loc[m["ym_dt"] == yoy_dt]
+    yoy_row = yoy_match.iloc[0] if not yoy_match.empty else None
 
     def pct(a, b):
         if b in [0, None] or pd.isna(b):
             return None
-        return (a / b - 1) * 100 if b != 0 else None
+        try:
+            return (float(a) / float(b) - 1) * 100
+        except Exception:
+            return None
 
     return {
-        "last_ym": last["ym"],
-        "visitors": float(last["visitors"]),
-        "turnover": float(last["turnover"]),
-        "conversion": float(last["conversion"]),
-        "spv": float(last["spv"]),
+        "last_ym": last["ym_dt"].strftime("%Y-%m"),
+        "visitors": float(last.get("visitors", 0)),
+        "turnover": float(last.get("turnover", 0)),
+        "conversion": float(last.get("conversion", 0)),
+        "spv": float(last.get("spv", 0)),
         "mom": {
-            "turnover": pct(last["turnover"], prev["turnover"]) if prev is not None else None,
-            "visitors": pct(last["visitors"], prev["visitors"]) if prev is not None else None,
-            "conversion": pct(last["conversion"], prev["conversion"]) if prev is not None else None,
-            "spv": pct(last["spv"], prev["spv"]) if prev is not None else None,
+            "turnover": pct(last.get("turnover", 0), prev.get("turnover", 0)) if prev is not None else None,
+            "visitors": pct(last.get("visitors", 0), prev.get("visitors", 0)) if prev is not None else None,
+            "conversion": pct(last.get("conversion", 0), prev.get("conversion", 0)) if prev is not None else None,
+            "spv": pct(last.get("spv", 0), prev.get("spv", 0)) if prev is not None else None,
         },
         "yoy": {
-            "turnover": pct(last["turnover"], yoy_row["turnover"]) if yoy_row is not None else None,
-            "visitors": pct(last["visitors"], yoy_row["visitors"]) if yoy_row is not None else None,
-            "conversion": pct(last["conversion"], yoy_row["conversion"]) if yoy_row is not None else None,
-            "spv": pct(last["spv"], yoy_row["spv"]) if yoy_row is not None else None,
+            "turnover": pct(last.get("turnover", 0), yoy_row.get("turnover", 0)) if yoy_row is not None else None,
+            "visitors": pct(last.get("visitors", 0), yoy_row.get("visitors", 0)) if yoy_row is not None else None,
+            "conversion": pct(last.get("conversion", 0), yoy_row.get("conversion", 0)) if yoy_row is not None else None,
+            "spv": pct(last.get("spv", 0), yoy_row.get("spv", 0)) if yoy_row is not None else None,
         },
     }
 
