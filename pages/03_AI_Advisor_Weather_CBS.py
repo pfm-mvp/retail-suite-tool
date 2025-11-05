@@ -370,15 +370,30 @@ if st.button("Genereer aanbevelingen"):
         right.line_chart(dfm.set_index("ym")[["visitors"]].rename(columns={"visitors": "Bezoekers"}))
 
     # ── Macro tiles (context)
-    if cci_series:
-        st.metric("CCI (laatste maand)", f"{cci_series[-1]['cci']:.1f}")
-        with st.expander("📈 CCI reeks (CBS)"):
-            st.line_chart({"CCI": [x["cci"] for x in cci_series]})
+# ── Macro tiles (context)
+if cci_series:
+    st.metric("CCI (laatste maand)", f"{cci_series[-1]['cci']:.1f}")
+    with st.expander("📈 CCI reeks (CBS)"):
+        st.line_chart({"CCI": [x["cci"] for x in cci_series]})
 
+# Detailhandel (85828NED)
+if use_retail:
     if retail_series:
         last_r = retail_series[-1]
         st.metric(f"Detailhandel ({last_r['branch']}) — {last_r['series']}", f"{last_r['retail_value']:.1f}")
         with st.expander("🛍️ Detailhandel reeks (CBS 85828NED)"):
             st.line_chart({"Retail": [x["retail_value"] for x in retail_series]})
-    elif use_retail:
-        st.info("Geen detailhandelreeks gevonden voor deze branche/periode (85828NED). Probeer 'DH_TOTAAL', 'DH_FOOD' of 'DH_NONFOOD'.")
+    else:
+        # Geen data → toon geen storende melding, maar een kleine hint + debuglijst van beschikbare branches
+        with st.expander("🛍️ Detailhandel (geen data voor deze selectie) — klik voor opties"):
+            st.markdown(
+                "- Probeer een andere branche uit de dropdown (bijv. **Totaal detailhandel**).\n"
+                "- Of zet de toggle **Toon detailhandel-index** uit.\n"
+                "- Tip: niet alle branches hebben waarden voor elke maand/periode."
+            )
+            try:
+                _, avail = list_retail_branches("85828NED")
+                if avail:
+                    st.write("Beschikbare branches (eerste 25):", [b['title'] for b in avail[:25]])
+            except Exception:
+                pass
