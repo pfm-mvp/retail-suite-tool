@@ -14,7 +14,7 @@ from utils_pfmx import api_get_report, friendly_error
 
 # ───────── Page setup ─────────
 st.set_page_config(page_title="AI Advisor — Weer + CBS", page_icon="🧭", layout="wide")
-st.title("🧭 AI Advisor — Weer + CBS (v2)")
+st.title("🧭 AI Advisor — Weer + CBS (v3)")
 
 # ───────── Project helpers ─────────
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -64,7 +64,7 @@ c1, c2, c3 = st.columns([1,1,2])
 with c1:
     months_back = st.slider("Maanden terug (CCI)", 6, 36, 18)
 with c2:
-    use_retail = st.checkbox("Toon detailhandel-index", value=False)
+    use_retail = st.checkbox("Toon detailhandel-index (85828NED)", value=False)
 with c3:
     dim_name, branch_items = list_retail_branches("85828NED")
     if branch_items:
@@ -111,8 +111,7 @@ def add_effective_date_cols(df: pd.DataFrame) -> pd.DataFrame:
     d["ym"]        = d["date_eff"].dt.to_period("M").astype(str)
     d["date_only"] = d["date_eff"].dt.date
     cal = d["date_eff"].dt.isocalendar()
-    # veilige, nullable integers om NA te tolereren
-    d["iso_week"]  = cal.week.astype("Int64")
+    d["iso_week"]  = cal.week.astype("Int64")   # NA-friendly
     d["iso_year"]  = cal.year.astype("Int64")
     return d
 
@@ -161,20 +160,18 @@ def mom_last_month(dfm: pd.DataFrame) -> dict:
     m = dfm.sort_values("ym").reset_index(drop=True).copy()
     last = m.iloc[-1]; prev = m.iloc[-2]
     def pct(a,b): 
-        try:
-            return (float(a)/float(b)-1)*100 if float(b)!=0 else None
-        except: 
-            return None
+        try: return (float(a)/float(b)-1)*100 if float(b)!=0 else None
+        except: return None
     return {
         "ym": last["ym"],
-        "turnover_mom":  pct(last["turnover"],  prev["turnover"]),
-        "visitors_mom":  pct(last["visitors"],  prev["visitors"]),
-        "conversion_mom":pct(last["conversion"],prev["conversion"]),
-        "spv_mom":       pct(last["spv"],       prev["spv"]),
-        "last_values":   last.to_dict()
+        "turnover_mom":   pct(last["turnover"],  prev["turnover"]),
+        "visitors_mom":   pct(last["visitors"],  prev["visitors"]),
+        "conversion_mom": pct(last["conversion"],prev["conversion"]),
+        "spv_mom":        pct(last["spv"],       prev["spv"]),
+        "last_values":    last.to_dict()
     }
 
-# ── postcode → weercoördinaten (PC2 + regiofallback)
+# postcode → weercoördinaten (PC2 + regiofallback)
 REGION_COORDS = {"Noord NL":(53.219,6.566),"Midden NL":(52.090,5.121),"Zuid NL":(51.441,5.469),
                  "West NL":(52.373,4.900),"Oost NL":(52.223,6.000),"ALL":(52.373,4.900)}
 PC2_TO_COORD = {"10":(52.37,4.90),"11":(52.37,4.90),"20":(52.0,4.36),"21":(52.0,4.36),"22":(52.0,4.36),
@@ -197,7 +194,6 @@ def _extract_postcodes_from_df(df: pd.DataFrame) -> list[str]:
     if "shop_name" not in df.columns: return out
     for v in df["shop_name"].dropna().astype(str).head(500):
         pc=None
-        # Als het een JSON-string is met dubbele quotes, normaliseer eerst
         s = v.strip()
         if s.startswith("{") and s.endswith("}"):
             try:
@@ -230,7 +226,7 @@ def pick_coords_for_weather(region_label: str, df_hist: pd.DataFrame) -> tuple[f
             return lat, lon
     return REGION_COORDS.get(region_label, REGION_COORDS["ALL"])
 
-# ── kleine helpers
+# kleine helpers
 def _eur(x): 
     try: return "€{:,.0f}".format(x).replace(",", ".")
     except: return "–"
@@ -255,10 +251,9 @@ if st.button("Genereer aanbevelingen"):
         st.warning("Geen historische KPI-data voor deze selectie/periode. Probeer ‘this_year’ of ‘last_year’.")
         st.stop()
 
-    # Debug-tabel: shop_name JSON → nette kolommen; timestamp → date
+    # Debug-tabel: shop_name → nette kolommen; timestamp → date
     ddbg = df.copy()
     def parse_shopname(x):
-        # retourneer (name, postcode, region)
         if isinstance(x, dict):
             return x.get("name"), x.get("postcode"), x.get("region")
         if isinstance(x, str):
@@ -273,7 +268,6 @@ if st.button("Genereer aanbevelingen"):
                         j = None
                 if isinstance(j, dict):
                     return j.get("name") or j.get("store_name") or s, j.get("postcode"), j.get("region")
-            # plain string (geen JSON)
             return s, None, None
         return x, None, None
 
@@ -285,32 +279,44 @@ if st.button("Genereer aanbevelingen"):
         st.dataframe(ddbg[show_cols].head(15), use_container_width=True)
 
     # 2) Baselines + regiotrend
-    df = add_effective_date_cols(df)
-    baseline = build_weekday_baselines(df)
-    dfm = monthly_agg(df)
-    mom = mom_last_month(dfm)
+    dfW = add_effective_date_cols(df)
+    baseline = build_weekday_baselines(dfW)
+    dfm = monthly_agg(dfW)
+
+    # Fallback voor samenvatting: als laatste maand 0 is, probeer last_month extra op te halen
+    dfm_for_tiles = dfm.copy()
+    if dfm_for_tiles.empty or (dfm_for_tiles.sort_values("ym").iloc[-1][["turnover","visitors"]]==0).all():
+        df_fb = fetch_hist_kpis_df(shop_ids, "last_month")
+        if not df_fb.empty:
+            dfm_for_tiles = monthly_agg(add_effective_date_cols(df_fb))
+
+    mom = mom_last_month(dfm_for_tiles)
 
     # 3) Weer & CCI
     lat, lon = pick_coords_for_weather(region, df)
     forecast = get_daily_forecast(lat, lon, OPENWEATHER_KEY, days_ahead)
 
-    try:
-        cci_info = get_consumer_confidence(CBS_DATASET)
-        cci_val = float(cci_info.get("value", 0.0))
-        cci_period = cci_info.get("period","")
-    except Exception as e:
-        st.warning(f"Kon CCI niet ophalen (gebruik 0). Details: {e}")
-        cci_val, cci_period = 0.0, "n/a"
+    # CCI: gebruik laatste uit reeks; zo niet, fallback op endpoint
+    if cci_series:
+        last_cci = float(cci_series[-1].get("cci", 0.0))
+        last_cci_period = cci_series[-1].get("period","")
+    else:
+        try:
+            cci_info = get_consumer_confidence(CBS_DATASET)
+            last_cci = float(cci_info.get("value", 0.0))
+            last_cci_period = cci_info.get("period","")
+        except Exception:
+            last_cci, last_cci_period = 0.0, "n/a"
 
     def cci_trend_signal(series):
         if not series: return 0.0
         vals = [float(x.get("cci",0)) for x in series[-3:]]
         if len(vals) < 2: return 0.0
-        return vals[-1] - vals[0]  # + opwaarts, - neerwaarts
+        return vals[-1] - vals[0]
     cci_slope = cci_trend_signal(cci_series)
 
     # 4) Adviesregels (dag/winkel)
-    advice = build_advice("Your Company", baseline, forecast, cci_val)
+    advice = build_advice("Your Company", baseline, forecast, last_cci)
 
     # 5) Regionale baseline (gemiddelden per weekday)
     baseline_day = {}
@@ -346,76 +352,88 @@ if st.button("Genereer aanbevelingen"):
     weekly["week_label"] = weekly["iso_year"].astype(str) + "-W" + weekly["iso_week"].astype(str)
     month_total = proj["turnover"].sum()
 
-    # ── Silver-platter regio (incl. MoM badges)
+    # ── Silver-platter regio (robust)
     st.subheader("🔎 Silver-platter samenvatting (regio)")
-    if not dfm.empty:
-        last = dfm.sort_values("ym").iloc[-1]
+    if not dfm_for_tiles.empty:
+        last = dfm_for_tiles.sort_values("ym").iloc[-1]
+        def _safe_metric(val, fmt):
+            try: return fmt(val)
+            except: return "n.v.t."
         colA, colB, colC, colD = st.columns(4)
-        colA.metric(f"Omzet {last['ym']}", _eur(last['turnover']),
+        colA.metric(f"Omzet {last['ym']}", _safe_metric(last['turnover'], _eur),
                     _fmt_pct(mom.get("turnover_mom")) if mom else "—")
-        colB.metric("Bezoekers", f"{last['visitors']:,.0f}".replace(",", "."),
+        colB.metric("Bezoekers", f"{float(last['visitors']):,.0f}".replace(",", "."),
                     _fmt_pct(mom.get("visitors_mom")) if mom else "—")
-        colC.metric("Conversie", f"{last['conversion']*100:.2f}%",
+        colC.metric("Conversie", f"{float(last['conversion'])*100:.2f}%",
                     _fmt_pct(mom.get("conversion_mom")) if mom else "—")
-        colD.metric("SPV", f"€{last['spv']:.2f}",
+        colD.metric("SPV", f"€{float(last['spv']):.2f}",
                     _fmt_pct(mom.get("spv_mom")) if mom else "—")
+    else:
+        st.info("Geen maandsamenvatting beschikbaar voor deze periode.")
 
-    # ── Verwachting per week & maand (duidelijke tekst)
+    # ── Verwachting per week & maand (tekst + kleur)
     st.subheader("🗺️ Verwachting per week & maand (regio)")
     if not weekly.empty:
         wk_lines = [f"- Week {int(r['iso_week'])}: verwacht {_eur(r['turnover'])} omzet en {int(round(r['visitors']))} bezoekers"
                     for _, r in weekly.iterrows()]
         st.markdown("\n".join(wk_lines))
-        trend_text = "vlak"
-        if len(weekly) >= 2:
-            diff = weekly.iloc[-1]["turnover"] - weekly.iloc[0]["turnover"]
-            pct  = (diff/weekly.iloc[0]["turnover"]*100) if weekly.iloc[0]["turnover"] else 0
-            trend_text = "opwaarts" if pct > 3 else ("neerwaarts" if pct < -3 else "vlak")
+
+        trend_flag = "flat"
+        if len(weekly) >= 2 and weekly.iloc[0]["turnover"] > 0:
+            pct = (weekly.iloc[-1]["turnover"] - weekly.iloc[0]["turnover"]) / weekly.iloc[0]["turnover"] * 100
+            trend_flag = "up" if pct > 3 else ("down" if pct < -3 else "flat")
+
         cci_dir = "↗" if cci_slope > 1 else ("↘" if cci_slope < -1 else "→")
-        st.success(
-            f"**Conclusie:** De komende weken ogen **{trend_text}**. "
-            f"Voor de komende {days_ahead} dagen verwachten we in totaal **{_eur(month_total)}** omzet. "
-            f"CCI-trend afgelopen 3 mnd: **{cci_dir}** (lichte SPV-correctie toegepast)."
-        )
+        msg = (f"**Conclusie:** De komende weken ogen **opwaarts**. " if trend_flag=="up" else
+               f"**Conclusie:** De komende weken ogen **neerwaarts**. " if trend_flag=="down" else
+               f"**Conclusie:** De komende weken ogen **vlak**. ")
+        msg += f"Voor de komende {days_ahead} dagen verwachten we **{_eur(month_total)}** omzet. "
+        msg += f"CCI-trend (3 mnd): **{cci_dir}** — lichte SPV-correctie toegepast."
+
+        if trend_flag=="up":
+            st.success(msg)
+        elif trend_flag=="down":
+            st.error(msg)
+        else:
+            st.warning(msg)
     else:
         st.info("Geen weekprognose beschikbaar.")
 
-    # ── Macro duiding (CCI)
+    # ── CCI (duidelijke help)
     cci_help = ("CCI = Consumentenvertrouwen (CBS 83693NED). Rond 0 = neutraal; "
                 "boven 0 positiever sentiment (meer kooplust), onder 0 negatiever. "
                 "We passen een kleine SPV-correctie toe o.b.v. recente CCI-trend.")
-    st.metric("Consumentenvertrouwen (CBS)", f"{cci_val}", help=cci_help)
-    if abs(cci_val) > 100:
-        st.warning("CCI lijkt buiten de gebruikelijke bandbreedte (verwacht ~-60..+40). Controleer de dataset/kolom.")
+    st.metric("Consumentenvertrouwen (CBS)", f"{last_cci:.1f}", help=cci_help)
 
     # ── Dag-advies (ingekort)
     with st.expander("📅 Komende dagen — acties & weer", expanded=False):
-        adv = build_advice("Your Company", baseline, forecast, cci_val)
-        for d in adv["days"]:
+        for d in advice["days"]:
             w = d.get("weather", {})
             temp = w.get("temp",0.0); pop = int((w.get("pop",0.0) or 0)*100)
             st.write(f"• {d['date']}: {temp:.1f}°C, regen {pop}%")
 
-    # ── CCI vs. Omzet — genormaliseerde trend
+    # ── CCI vs. Omzet — alleen tonen bij ≥2 overlappende maanden
     st.subheader("📊 CCI vs. Omzet — genormaliseerde trend")
-    if not dfm.empty and cci_series:
-        df_cci = pd.DataFrame([{"ym": _parse_cbs_period(x.get("period","")), "CCI": float(x.get("cci",0))} for x in cci_series])
+    def _merge_cci_vs_turnover(dfm_in, cci_series_in):
+        if not dfm_in or dfm_in.empty or not cci_series_in: return pd.DataFrame()
+        df_cci = pd.DataFrame([{"ym": _parse_cbs_period(x.get("period","")), "CCI": float(x.get("cci",0))} for x in cci_series_in])
         df_cci = df_cci.dropna().copy()
-        dfm2 = dfm[["ym","turnover"]].copy()
+        dfm2 = dfm_in[["ym","turnover"]].copy()
         merged = pd.merge(dfm2, df_cci, on="ym", how="inner").sort_values("ym")
-        if not merged.empty:
-            merged["Omzet_idx"] = (merged["turnover"]/merged["turnover"].iloc[0])*100.0
-            base_cci = merged["CCI"].iloc[0] if merged["CCI"].iloc[0] != 0 else 1.0
-            merged["CCI_idx"] = (merged["CCI"]/base_cci)*100.0
-            plot = merged.set_index("ym")[["Omzet_idx","CCI_idx"]]
-            st.line_chart(plot, use_container_width=True)
-            st.caption("Beide reeksen als index (100 = eerste gezamenlijke maand) om samenloop zichtbaar te maken.")
-        else:
-            st.info("Onvoldoende overlap tussen CCI-periodes en jouw omzetmaanden om samen te plotten.")
-    else:
-        st.info("Niet genoeg data om CCI en omzet samen te plotten.")
+        return merged
 
-    # ── Detailhandel-tegel (optioneel)
+    merged = _merge_cci_vs_turnover(dfm_for_tiles, cci_series)
+    if not merged.empty and len(merged) >= 2:
+        merged["Omzet_idx"] = (merged["turnover"]/merged["turnover"].iloc[0])*100.0
+        base_cci = merged["CCI"].iloc[0] if merged["CCI"].iloc[0] != 0 else 1.0
+        merged["CCI_idx"] = (merged["CCI"]/base_cci)*100.0
+        st.line_chart(merged.set_index("ym")[["CCI_idx","Omzet_idx"]].rename(columns={"CCI_idx":"CCI_idx","Omzet_idx":"Omzet_idx"}),
+                      use_container_width=True)
+        st.caption("Beide reeksen als index (100 = eerste gezamenlijke maand) om samenloop zichtbaar te maken.")
+    else:
+        st.info("Te weinig overlap tussen CCI-maanden en jouw omzetmaanden om een zinvolle vergelijking te tonen.")
+
+    # ── Detailhandel (optioneel)
     if use_retail and retail_series:
         last_r = retail_series[-1]
         st.metric(f"Detailhandel ({last_r['branch']}) — {last_r['series']}", f"{last_r['retail_value']:.1f}")
