@@ -1,9 +1,12 @@
 # pages/03_AI_Advisor_Weather_CBS.py
-import os, sys, json
+import os
+import sys
+import json
+import re
 import pandas as pd
 import streamlit as st
 
-# ───────── Mapping & API wrapper ─────────
+# ───────── Mapping & API wrapper zoals in je benchmark-tool ─────────
 try:
     from shop_mapping import SHOP_NAME_MAP  # {shop_id: "Store Name", ...}
 except Exception:
@@ -31,7 +34,21 @@ from services.cbs_service import (
     get_retail_index,
     list_retail_branches,
 )
-from services.advisor import build_advice
+
+# (optioneel, nu niet gebruikt) – adviesregels
+try:
+    from services.advisor import build_advice
+except Exception:
+    def build_advice(company, baseline, forecast, cci):
+        # simpele no-op fallback
+        days = []
+        for f in forecast:
+            days.append({
+                "date": f["date"],
+                "weather": {"temp": f.get("temp", 0), "pop": f.get("pop", 0)},
+                "stores": []
+            })
+        return {"days": days}
 
 # ───────── Secrets ─────────
 def _get_secret(key: str, env_fallback: str = "") -> str:
@@ -53,29 +70,37 @@ if missing:
 # ───────── UI Controls ─────────
 region = st.selectbox("Regio", options=["ALL"] + list(REGIONS), index=0)
 
-# Geen lat/lon inputs meer – intern default (mag later per regio)
-_LAT, _LON = 52.37, 4.90
+# 7..30 dagen vooruit
+days_ahead = st.slider("Dagen vooruit (weer-forecast)", min_value=7, max_value=30, value=14, step=1)
 
-days_ahead = st.slider("Dagen vooruit (weer)", 7, 30, 7)
-period_hist = st.selectbox("Historische periode", ["last_month", "this_year", "last_year"], index=0)
+period_hist = st.selectbox(
+    "Historische periode (voor baseline & regio-trend)",
+    ["last_month", "this_year", "last_year"],
+    index=0
+)
 
 st.subheader("Macro-context (CBS)")
 c1, c2, c3 = st.columns([1, 1, 2])
 with c1:
     months_back = st.slider("Maanden terug (CBS)", 6, 36, 18)
 with c2:
-    use_retail = st.checkbox("Toon detailhandel-index (85828NED)", value=True)
+    use_retail = st.checkbox("Toon detailhandel-index", value=False)
 with c3:
+    # Default “NONFOOD”, maar alleen relevant als use_retail True
+    default_branch = "NONFOOD"
     dim_name, branch_items = list_retail_branches("85828NED")
-    # Default op NONFOOD waar beschikbaar
     if branch_items:
         title_to_key = {b["title"]: str(b["key"]) for b in branch_items}
         titles = list(title_to_key.keys())
-        default_idx = next((i for i, t in enumerate(titles) if "nonfood" in t.lower()), 0)
-        branch_title = st.selectbox("Branche (CBS)", titles, index=default_idx)
+        # kies een ‘NONFOOD’-achtige default als beschikbaar
+        df_idx = 0
+        for i, t in enumerate(titles):
+            if "nonfood" in t.lower():
+                df_idx = i; break
+        branch_title = st.selectbox("Branche (CBS, 85828NED)", titles, index=df_idx, disabled=not use_retail)
         branch_key = title_to_key[branch_title]
     else:
-        branch_title = st.selectbox("Branche (CBS)", ["DH_NONFOOD", "DH_TOTAAL", "DH_FOOD"], index=0)
+        branch_title = st.selectbox("Branche (CBS, 85828NED)", ["NONFOOD","FOOD","DH_TOTAAL"], index=0, disabled=not use_retail)
         branch_key = branch_title
 
 # ───────── Macro reeksen (buiten de knop) ─────────
@@ -88,9 +113,9 @@ except Exception as e:
 try:
     retail_series = []
     if use_retail:
-        retail_series = (get_retail_index(branch_code_or_title=branch_key, months_back=months_back)
-                         or get_retail_index(branch_code_or_title=branch_title, months_back=months_back)
-                         or get_retail_index(branch_code_or_title="DH_TOTAAL", months_back=months_back))
+        retail_series = get_retail_index(branch_code_or_title=branch_key, months_back=months_back) or \
+                        get_retail_index(branch_code_or_title=branch_title, months_back=months_back) or \
+                        get_retail_index(branch_code_or_title=default_branch, months_back=months_back)
 except Exception as e:
     retail_series = []
     if use_retail:
@@ -130,14 +155,17 @@ def build_weekday_baselines(df: pd.DataFrame) -> dict:
         stores = {}
         for sid, gs in g.groupby("shop_id"):
             name = ID_TO_NAME.get(int(sid), f"Shop {sid}")
+            # SPV
             if "sales_per_visitor" in gs.columns:
                 spv_series = gs["sales_per_visitor"]
             else:
                 denom = gs["count_in"].replace(0, pd.NA)
                 spv_series = (gs["turnover"] / denom).fillna(0)
+            # Conversie in Vemcount is vaak in % (bv. 10.75). Converteer naar ratio.
+            conv_ratio = (gs["conversion_rate"] / 100.0)
             stores[name] = {
                 "visitors":     float(gs["count_in"].mean()),
-                "conversion":   float(gs["conversion_rate"].mean()),  # dit is al in %
+                "conversion":   float(conv_ratio.mean()),  # ratio 0..1
                 "spv":          float(spv_series.mean()),
                 "spv_median":   float(spv_series.median()),
                 "visitors_p30": float(gs["count_in"].quantile(0.30)),
@@ -146,16 +174,17 @@ def build_weekday_baselines(df: pd.DataFrame) -> dict:
     return out
 
 def monthly_agg(df: pd.DataFrame) -> pd.DataFrame:
+    """Maandtotalen: som visitors/turnover; conversie gewogen (ratio); SPV = omzet/bezoekers."""
     d = add_effective_date_cols(df)
     g = d.groupby("ym", as_index=False).agg(
         visitors=("count_in","sum"),
         turnover=("turnover","sum"),
     )
-    # conversie (in %): gewogen op bezoekers, bron is al in %
-    d["weighted_conv"] = d["conversion_rate"] * d["count_in"]
+    # conversie-gewogen (aanname: conversion_rate is in procenten → deel door 100)
+    d["weighted_conv"] = (d["conversion_rate"]/100.0) * d["count_in"]
     conv = d.groupby("ym", as_index=False).agg(conv_num=("weighted_conv","sum"),
                                               conv_den=("count_in","sum"))
-    conv["conversion"] = (conv["conv_num"]/conv["conv_den"]).fillna(0)
+    conv["conversion"] = (conv["conv_num"]/conv["conv_den"]).fillna(0)  # ratio 0..1
     out = g.merge(conv[["ym","conversion"]], on="ym", how="left")
     out["spv"] = (out["turnover"]/out["visitors"]).replace([float("inf")], 0).fillna(0)
     return out
@@ -183,7 +212,7 @@ def mom_yoy(dfm: pd.DataFrame):
         "last_ym":   last["ym_dt"].strftime("%Y-%m"),
         "visitors":  float(last.get("visitors", 0)),
         "turnover":  float(last.get("turnover", 0)),
-        "conversion":float(last.get("conversion", 0)),  # al in %
+        "conversion":float(last.get("conversion", 0)),   # ratio
         "spv":       float(last.get("spv", 0)),
         "mom": {
             "turnover":  pct(last.get("turnover", 0),  prev.get("turnover", 0))  if prev is not None else None,
@@ -199,59 +228,84 @@ def mom_yoy(dfm: pd.DataFrame):
         },
     }
 
-def estimate_weather_uplift(baseline_day: dict, forecast_days: list[dict]) -> dict:
-    """Vergelijkt baseline (normale weekdag) met weer-gecorrigeerde verwachting."""
-    daily = []
-    for f in forecast_days:
-        wd = pd.to_datetime(f["date"]).weekday()
-        base = baseline_day.get(wd, {"visitors": 0.0, "spv": 0.0})
-        base_vis = float(base["visitors"]); spv = float(base["spv"])
-        pop  = float(f.get("pop", 0.0))
-        temp = float(f.get("temp", 15.0))
-        adj_vis = base_vis * (1 - 0.20*pop) * (1 + 0.01*(temp-15.0))
-        row = {
-            "date": f["date"], "weekday": wd, "temp": temp, "pop": pop,
-            "base_visitors": base_vis, "adj_visitors": adj_vis, "spv": spv,
-            "base_turnover": base_vis * spv, "adj_turnover": adj_vis * spv
-        }
-        row["delta_turnover"] = row["adj_turnover"] - row["base_turnover"]
-        daily.append(row)
-    base_total = sum(x["base_turnover"] for x in daily)
-    adj_total  = sum(x["adj_turnover"]  for x in daily)
-    delta_total = adj_total - base_total
-    delta_pct = (delta_total/base_total*100) if base_total else None
-    return {"daily": daily, "base_total": base_total, "adj_total": adj_total,
-            "delta_total": delta_total, "delta_pct": delta_pct}
+# ───────── Postcode → weercoördinaten (PC2 + regio-fallbacks) ─────────
+REGION_COORDS = {
+    "Noord NL": (53.219, 6.566),     # Groningen
+    "Midden NL": (52.090, 5.121),    # Utrecht
+    "Zuid NL": (51.441, 5.469),      # Eindhoven
+    "West NL": (52.373, 4.900),      # Amsterdam
+    "Oost NL": (52.223, 6.000),      # Deventer-ish
+    "ALL": (52.373, 4.900),          # landelijk
+}
+PC2_TO_COORD = {
+    # West/Randstad
+    "10": (52.37,4.90),"11": (52.37,4.90),"20": (52.0,4.36),"21": (52.0,4.36),
+    "22": (52.0,4.36),"23": (52.39,4.64),"24": (52.39,4.64),"25": (52.39,4.64),
+    "26": (52.39,4.64),"27": (52.08,4.30),"28": (52.08,4.30),"29": (51.85,4.28),
+    # Midden
+    "30": (51.92,4.48),"31": (51.92,4.48),"32": (51.92,4.48),"33": (51.83,4.67),
+    "34": (52.09,5.12),"35": (52.13,5.19),"36": (52.35,5.22),"37": (52.13,5.19),
+    # Oost
+    "38": (52.51,6.09),"39": (52.51,6.09),"80": (52.52,6.09),"81": (52.38,6.64),
+    "82": (52.50,5.47),"83": (52.70,5.75),
+    # Noord
+    "90": (53.20,6.57),"91": (53.20,6.57),"92": (53.19,5.79),"93": (53.05,5.67),
+    "94": (52.99,6.56),"95": (53.32,6.92),"96": (53.10,6.00),"97": (53.22,6.56),
+    "98": (53.22,6.56),"99": (53.22,6.56),
+    # Zuid
+    "50": (51.44,5.47),"51": (51.44,5.47),"52": (51.59,5.08),"53": (51.59,5.08),
+    "54": (51.59,5.08),"55": (51.59,5.08),"56": (51.44,5.47),"57": (51.65,5.05),
+    "58": (51.56,5.09),
+    "60": (51.44,6.17),"61": (51.23,5.99),"62": (50.85,5.69),"63": (50.85,5.69),
+    "64": (50.85,5.69),
+}
+PC2_RE = re.compile(r"^\s*(\d{2})")
 
+def _pc2_from_text(txt: str) -> str | None:
+    m = PC2_RE.match(str(txt)) if txt else None
+    return m.group(1) if m else None
+
+def _extract_postcodes_from_df(df: pd.DataFrame) -> list[str]:
+    out = []
+    if "shop_name" not in df.columns:
+        return out
+    for v in df["shop_name"].dropna().astype(str).head(500):
+        pc = None
+        if v.strip().startswith("{") and '"postcode"' in v:
+            try:
+                j = json.loads(v)
+                pc = j.get("postcode")
+            except Exception:
+                pc = None
+        if not pc:
+            m = re.search(r"\b(\d{4})\s*[A-Z]{0,2}\b", v)
+            pc = m.group(1) if m else None
+        if pc:
+            pc2 = _pc2_from_text(pc)
+            if pc2:
+                out.append(pc2)
+    return out
+
+def pick_coords_for_weather(region_label: str, df_hist: pd.DataFrame) -> tuple[float, float]:
+    pc2_list = _extract_postcodes_from_df(df_hist)
+    if pc2_list:
+        seen, latlons = set(), []
+        for pc2 in pc2_list:
+            if pc2 in PC2_TO_COORD and pc2 not in seen:
+                latlons.append(PC2_TO_COORD[pc2]); seen.add(pc2)
+        if latlons:
+            lat = sum(x[0] for x in latlons) / len(latlons)
+            lon = sum(x[1] for x in latlons) / len(latlons)
+            return (lat, lon)
+    return REGION_COORDS.get(region_label, REGION_COORDS["ALL"])
+
+# ───────── Tiny formatters ─────────
 def _eur(x):
     try: return "€{:,.0f}".format(x).replace(",", ".")
     except: return "–"
 
 def _fmt_pct(x):
     return "—" if (x is None or pd.isna(x)) else f"{x:+.1f}%"
-
-def _parse_shop_meta(val):
-    """'{"name":"…","postcode":"…","region":"…"}' -> dict; anders lege dict."""
-    if isinstance(val, dict):
-        return val
-    if isinstance(val, str):
-        try:
-            return json.loads(val)
-        except Exception:
-            return {}
-    return {}
-
-def tidy_debug_table(df: pd.DataFrame) -> pd.DataFrame:
-    """Maak debug tabel leesbaar: naam/postcode/regio los, timestamp -> date, geen 'date'-kolom."""
-    d = df.copy()
-    meta = d["shop_name"].apply(_parse_shop_meta)
-    d["store_name"] = meta.apply(lambda m: m.get("name"))
-    d["postcode"]   = meta.apply(lambda m: m.get("postcode"))
-    d["region_txt"] = meta.apply(lambda m: m.get("region"))
-    # timestamp naar datum
-    d["date"] = pd.to_datetime(d.get("timestamp"), errors="coerce").dt.date
-    cols = ["date","shop_id","store_name","postcode","region_txt","count_in","conversion_rate","turnover","sales_per_visitor"]
-    return d[cols]
 
 # ───────── Shop selectie ─────────
 st.caption("Selecteer regio en druk op de knop om aanbevelingen te genereren.")
@@ -267,13 +321,27 @@ st.text(f"ShopIDs → {shop_ids[:25]}{' …' if len(shop_ids)>25 else ''}")
 if st.button("Genereer aanbevelingen"):
     # 1) Historische data
     df = fetch_hist_kpis_df(shop_ids, period_hist)
-    with st.expander("🛠️ Debug — eerste rijen (hist KPI’s)"):
-        if df.empty:
-            st.write("— geen rijen —")
-        else:
-            st.dataframe(tidy_debug_table(df).head(15), use_container_width=True)
 
-    if df is None or df.empty:
+    # Debug-tabel: parse shop_name → nette kolommen; timestamp → date; verwijder 'date'
+    if not df.empty:
+        ddbg = df.copy()
+        # parse shop_name JSON → name/postcode/region
+        def parse_shopname(x):
+            if isinstance(x, str) and x.strip().startswith("{"):
+                try:
+                    j = json.loads(x)
+                    return j.get("name"), j.get("postcode"), j.get("region")
+                except Exception:
+                    return None, None, None
+            return x, None, None
+        triples = ddbg["shop_name"].apply(parse_shopname)
+        ddbg[["name","postcode","region"]] = pd.DataFrame(triples.tolist(), index=ddbg.index)
+        ddbg["date"] = pd.to_datetime(ddbg.get("timestamp"), errors="coerce").dt.date
+        show_cols = ["date","shop_id","name","postcode","region","count_in","conversion_rate","turnover","sales_per_visitor"]
+        show_cols = [c for c in show_cols if c in ddbg.columns]
+        with st.expander("🛠️ Debug — eerste rijen (hist KPI’s)"):
+            st.dataframe(ddbg[show_cols].head(15), use_container_width=True)
+    else:
         st.warning("Geen historische KPI-data voor deze selectie/periode. Probeer ‘this_year’ of ‘last_year’.")
         st.stop()
 
@@ -283,25 +351,25 @@ if st.button("Genereer aanbevelingen"):
     dfm = monthly_agg(df)
     trend = mom_yoy(dfm)
 
-    # 3) Weer + CBS
-    forecast = get_daily_forecast(_LAT, _LON, OPENWEATHER_KEY, days_ahead)
+    # 3) Weer (coördinaten automatisch uit postcodes/regio) + CBS
+    lat, lon = pick_coords_for_weather(region, df)
+    forecast = get_daily_forecast(lat, lon, OPENWEATHER_KEY, days_ahead)
+
     try:
         cci_info = get_consumer_confidence(CBS_DATASET)
-        last_cci_raw = cci_info.get("value", 0.0)
-        # Fallback schaal: sommige velden geven x10 (bv 474) → normaliseer
-        last_cci = float(last_cci_raw)/10.0 if float(last_cci_raw) > 100 else float(last_cci_raw)
+        cci_val = cci_info.get("value", 0.0)
         cci_period = cci_info.get("period", "")
     except Exception as e:
-        st.warning(f"Kon CBS Consumentenvertrouwen niet ophalen (gebruik 0). Details: {e}")
-        last_cci, cci_period = 0.0, "n/a"
+        st.warning(f"Kon CBS Consumentenvertrouwen niet ophalen (gebruik standaard 0). Details: {e}")
+        cci_val, cci_period = 0.0, "n/a"
 
     # 4) AI-adviesregels (dag/winkel)
-    advice = build_advice("Your Company", baseline, forecast, last_cci)
+    advice = build_advice("Your Company", baseline, forecast, cci_val)
 
     # 5) Regionale baseline (gemiddelden van alle winkels per weekday)
     baseline_day = {}
     for wd, storemap in baseline.items():
-        if not storemap: 
+        if not storemap:
             continue
         visitors = pd.Series([v["visitors"] for v in storemap.values()]).mean()
         spv      = pd.Series([v["spv"]      for v in storemap.values()]).mean()
@@ -310,82 +378,50 @@ if st.button("Genereer aanbevelingen"):
         st.warning("Geen baseline beschikbaar (te weinig dagen). Kies een ruimere periode.")
         st.stop()
 
-    # 6) 7–30 daagse verwachting met weer-correctie
-    wx = estimate_weather_uplift(baseline_day, forecast)
-
     # ── Silver-platter regio
     st.subheader("🔎 Silver-platter samenvatting (regio)")
     if trend:
         colA, colB, colC, colD = st.columns(4)
         colA.metric(f"Omzet {trend.get('last_ym','-')}", _eur(trend.get('turnover', 0)), _fmt_pct(trend['mom'].get('turnover')))
         colB.metric("Bezoekers", f"{trend.get('visitors', 0):,.0f}".replace(",", "."), _fmt_pct(trend['mom'].get('visitors')))
-        # conversie is al in %, dus NIET ×100
-        colC.metric("Conversie", f"{trend.get('conversion', 0):.2f}%", _fmt_pct(trend['mom'].get('conversion')))
+        # conversie als % (ratio→%)
+        conv_pct = trend.get('conversion', 0)*100.0
+        colC.metric("Conversie", f"{conv_pct:.2f}%", _fmt_pct(trend['mom'].get('conversion')))
         colD.metric("SPV", f"€{trend.get('spv', 0):.2f}", _fmt_pct(trend['mom'].get('spv')))
-        st.caption(
+        yoy_line = (
             "YoY: "
             + (f"Omzet {trend['yoy']['turnover']:.1f}%  " if trend['yoy']['turnover'] is not None else "")
             + (f"• Bezoekers {trend['yoy']['visitors']:.1f}%  " if trend['yoy']['visitors'] is not None else "")
             + (f"• Conversie {trend['yoy']['conversion']:.1f}%  " if trend['yoy']['conversion'] is not None else "")
             + (f"• SPV {trend['yoy']['spv']:.1f}%" if trend['yoy']['spv'] is not None else "")
-        )
+        ).strip()
+        if yoy_line != "YoY:":
+            st.caption(yoy_line)
 
-    # ── Macro duiding (CCI) + helptekst
-    # delta vs vorige maand indien reeks beschikbaar
-    cci_mom = None
-    if cci_series and len(cci_series) >= 2:
-        prev_cci_raw = cci_series[-2]["cci"]
-        prev_cci = float(prev_cci_raw)/10.0 if float(prev_cci_raw) > 100 else float(prev_cci_raw)
-        cci_mom = last_cci - prev_cci
-
-    tone = "positief (kooplustiger)" if last_cci >= 0 else "negatief (voorzichtiger)"
-    help_txt = "CCI is de maandelijkse stemmingsindex van consumenten (ongeveer −60..+40 historisch)."
-    st.metric("Consumentenvertrouwen (CBS)", f"{last_cci:.1f}", help=help_txt)
-    mom_txt = f"{cci_mom:+.1f} pt vs vorige maand" if cci_mom is not None else "—"
-    st.info(
-        f"**CCI ({cci_period})**: {last_cci:.1f} → sentiment {tone}. ({mom_txt})  "
-        "Bij positief sentiment: mik op hogere SPV (premium/upsell). Bij negatief: benadruk bundels/waarde."
+    # ── Macro duiding (CCI)
+    # Toon korte uitleg en waarschuwing bij onrealistische schalen (bv. 474)
+    cci_help = (
+        "CCI = Consumentenvertrouwen-index (CBS 83693NED). Rond 0 is neutraal; "
+        "boven 0 positiever sentiment (meer kooplust), onder 0 negatiever sentiment. "
+        "Gebruik hogere SPV-doelen bij positief sentiment; focus op bundel/waarde bij negatief."
     )
+    st.metric("Consumentenvertrouwen (CBS)", f"{cci_val}", help=cci_help)
+    if abs(float(cci_val or 0)) > 100:
+        st.warning("De CCI-waarde oogt buiten de gebruikelijke bandbreedte (verwacht ~-60..+40). Controleer het gebruikte veld in de dataset.")
 
     # ── Komende dagen — verwachting & acties
     st.subheader("📅 Komende dagen — verwachting & acties")
     for d in advice["days"]:
-        with st.expander(f'📆 {d["date"]} — temp {d["weather"]["temp"]:.1f}°C • POP {int(d["weather"]["pop"]*100)}%'):
-            for s in d["stores"]:
-                st.markdown(f"**{s['store']}**")
-                st.write("— Storemanager:", " • ".join(s["store_actions"]))
-                st.write("— Regiomanager:", " • ".join(s["regional_actions"]))
-
-    # ── Weerimpact per dag
-    st.subheader("🌦️ Weerimpact per dag (t.o.v. normale weekdag)")
-    if wx and wx["daily"]:
-        wx_df = pd.DataFrame(wx["daily"]).copy()
-        wx_df["date"] = pd.to_datetime(wx_df["date"])
-        wx_df = wx_df.sort_values("date")
-        wx_df["impact_pct"] = (wx_df["delta_turnover"] / wx_df["base_turnover"] * 100)
-        st.bar_chart(wx_df.set_index("date")["delta_turnover"].rename("Δ omzet vs baseline"))
-
-        show_cols = ["date","temp","pop","base_turnover","adj_turnover","delta_turnover","impact_pct"]
-        nice = wx_df[show_cols].rename(columns={
-            "date":"Datum","temp":"Temp (°C)","pop":"Regenkans",
-            "base_turnover":"Baseline omzet","adj_turnover":"Verwachte omzet",
-            "delta_turnover":"Δ Omzet","impact_pct":"Δ %"
-        })
-        nice["Regenkans"] = (nice["Regenkans"]*100).round(0).astype(int).astype(str) + "%"
-        nice["Baseline omzet"] = nice["Baseline omzet"].map(_eur)
-        nice["Verwachte omzet"] = nice["Verwachte omzet"].map(_eur)
-        nice["Δ Omzet"] = nice["Δ Omzet"].map(_eur)
-        nice["Δ %"] = nice["Δ %"].apply(_fmt_pct)
-        st.dataframe(nice, use_container_width=True)
-
-        delta_pct_txt = _fmt_pct(wx["delta_pct"])
-        st.success(
-            f"🔮 **Verwachting ({len(wx_df)} dagen)**: { _eur(wx['adj_total']) } ({delta_pct_txt} vs normale week). "
-            "Heuristische weer-correctie toegepast.",
-            icon="🔮"
-        )
-    else:
-        st.info("Geen forecast-gegevens beschikbaar.")
+        w = d.get("weather", {})
+        temp = w.get("temp", 0.0); pop = int((w.get("pop", 0.0) or 0)*100)
+        with st.expander(f'📆 {d["date"]} — temp {temp:.1f}°C • POP {pop}%'):
+            if d.get("stores"):
+                for s in d["stores"]:
+                    st.markdown(f"**{s['store']}**")
+                    st.write("— Storemanager:", " • ".join(s["store_actions"]))
+                    st.write("— Regiomanager:", " • ".join(s["regional_actions"]))
+            else:
+                st.write("Voor deze prototype-pagina zijn winkel-specifieke acties (nog) niet ingevuld.")
 
     # ── Regiotrend (maandelijks)
     st.subheader("📊 Regiotrend (maandelijks)")
@@ -396,11 +432,13 @@ if st.button("Genereer aanbevelingen"):
 
     # ── Macro tiles (context)
     if cci_series:
-        st.metric("CCI (laatste maand)", f"{last_cci:.1f}")
+        try:
+            last_cci = float(cci_series[-1].get("cci", 0))
+            st.metric("CCI (laatste maand)", f"{last_cci:.1f}")
+        except Exception:
+            st.metric("CCI (laatste maand)", f"{cci_series[-1].get('cci')}")
         with st.expander("📈 CCI reeks (CBS)"):
-            # normaliseer eventuele x10 waarden voor de chart
-            chart_vals = [ (x["cci"]/10.0 if float(x["cci"])>100 else float(x["cci"])) for x in cci_series ]
-            st.line_chart({"CCI": chart_vals})
+            st.line_chart({"CCI": [x.get("cci", 0) for x in cci_series]})
 
     if retail_series:
         last_r = retail_series[-1]
@@ -408,4 +446,4 @@ if st.button("Genereer aanbevelingen"):
         with st.expander("🛍️ Detailhandel reeks (CBS 85828NED)"):
             st.line_chart({"Retail": [x["retail_value"] for x in retail_series]})
     elif use_retail:
-        st.info("Geen detailhandelreeks gevonden voor deze branche/periode (85828NED). Probeer 'DH_TOTAAL', 'DH_FOOD' of 'DH_NONFOOD'.")
+        st.info("Geen detailhandelreeks gevonden voor deze branche/periode (85828NED). Probeer een andere branche of zet de tegel uit.")
