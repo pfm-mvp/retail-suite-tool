@@ -268,10 +268,37 @@ if st.button("Genereer aanbevelingen"):
         st.dataframe(ddbg[["date","shop_id","name","postcode","region","count_in","conversion_rate","turnover","sales_per_visitor"]].head(15),
                      use_container_width=True)
 
-    # 2) Baselines + regiotrend
-    dfW = add_effective_date_cols(df)
+    # 2) Baselines + regiotrend (robust, geforceerde datumkolommen)
+    dfW = df.copy()
+
+    # Forceer correcte datumkolom
+    dfW["date_eff"] = pd.to_datetime(dfW.get("date"), errors="coerce")
+    dfW["timestamp_eff"] = pd.to_datetime(dfW.get("timestamp"), errors="coerce")
+    dfW["date_eff"] = dfW["date_eff"].fillna(dfW["timestamp_eff"])
+    dfW = dfW.dropna(subset=["date_eff"])
+
+    # Verwijder lege/nul-waarden (anders alles 0)
+    dfW["turnover"] = pd.to_numeric(dfW["turnover"], errors="coerce").fillna(0)
+    dfW["count_in"] = pd.to_numeric(dfW["count_in"], errors="coerce").fillna(0)
+    dfW = dfW[(dfW["turnover"] > 0) & (dfW["count_in"] > 0)]
+
+    if dfW.empty:
+        st.warning("Geen bruikbare data met datum/omzet gevonden — controleer API-output of periode.")
+        st.stop()
+
+    dfW = add_effective_date_cols(dfW)
     baseline = build_weekday_baselines(dfW)
+
+    # Maandelijkse aggregatie
     dfm = monthly_agg(dfW)
+    if dfm.empty:
+        # Fallback → probeer 'last_month'
+        st.info("Geen maandaggregatie beschikbaar in huidige periode, probeer fallback 'last_month'.")
+        df_fb = fetch_hist_kpis_df(shop_ids, "last_month")
+        if not df_fb.empty:
+            dfW_fb = add_effective_date_cols(df_fb)
+            dfm = monthly_agg(dfW_fb)
+
     mom = mom_last_two(dfm)
 
     # 3) Weer & CCI
