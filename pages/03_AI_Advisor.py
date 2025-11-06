@@ -51,7 +51,6 @@ def add_effective_date(df: pd.DataFrame) -> pd.DataFrame:
     d["shop_id"] = d["shop_id"].astype(int)
     return d
 
-@st.cache_data(ttl=1800, show_spinner=False)
 def fetch(shop_ids, period: str) -> pd.DataFrame:
     params = [
         ("source", "shops"),
@@ -66,6 +65,7 @@ def fetch(shop_ids, period: str) -> pd.DataFrame:
         r = requests.post(API_URL, params=params, timeout=45)
         r.raise_for_status()
         js = r.json()
+        st.success(f"Planet PFM online – {len(js)} records")
         df = normalize_vemcount_response(js, ID_TO_NAME, METRICS)
         df = add_effective_date(df)
         if period.startswith("this_"):
@@ -77,9 +77,9 @@ def fetch(shop_ids, period: str) -> pd.DataFrame:
         st.error(f"Planet PFM: {str(e)[:100]}")
         return pd.DataFrame()
 
-# Fetch current + previous period
 df = fetch(shop_ids, period)
 
+# Vergelijkingsperiode
 prev_period_map = {
     "this_week": "last_week",
     "this_month": "last_month",
@@ -92,10 +92,6 @@ prev_period_map = {
 }
 prev_period = prev_period_map.get(period)
 df_prev = fetch(shop_ids, prev_period) if prev_period else pd.DataFrame()
-
-# Show success only once (for current period)
-if not df.empty:
-    st.success(f"Planet PFM online – {len(df)} records")
 
 @st.cache_data(ttl=1800)
 def weer(pc):
@@ -120,15 +116,13 @@ def cbs():
 
 cbs_df = cbs()
 
-# KPI's + delta
+# KPI's + vs vorige periode
 if not df.empty:
     total_foot = df["count_in"].sum()
     total_omzet = df["turnover"].sum()
     avg_conv = df["conversion_rate"].mean()
     avg_spv = df["sales_per_visitor"].mean()
 
-    c1,c2,c3,c4 = st.columns(4)
-    
     if not df_prev.empty:
         prev_foot = df_prev["count_in"].sum()
         prev_omzet = df_prev["turnover"].sum()
@@ -137,14 +131,16 @@ if not df.empty:
 
         vs_foot = ((total_foot / prev_foot) - 1) * 100 if prev_foot > 0 else 0
         vs_omzet = ((total_omzet / prev_omzet) - 1) * 100 if prev_omzet > 0 else 0
-        vs_conv = avg_conv - prev_conv
-        vs_spv = avg_spv - prev_spv
+        vs_conv = (avg_conv - prev_conv) if prev_conv > 0 else 0
+        vs_spv = (avg_spv - prev_spv) if prev_spv > 0 else 0
 
+        c1,c2,c3,c4 = st.columns(4)
         c1.metric("Footfall", f"{int(total_foot):,}".replace(",","."), delta=f"{vs_foot:+.1f}%")
         c2.metric("Omzet", f"€{int(total_omzet):,}".replace(",","."), delta=f"{vs_omzet:+.1f}%")
         c3.metric("Conversie", f"{avg_conv:.1f}%", delta=f"{vs_conv:+.1f} pp")
         c4.metric("SPV", f"€{avg_spv:.0f}", delta=f"{vs_spv:+.1f}")
     else:
+        c1,c2,c3,c4 = st.columns(4)
         c1.metric("Footfall", f"{int(total_foot):,}".replace(",","."))
         c2.metric("Omzet", f"€{int(total_omzet):,}".replace(",","."))
         c3.metric("Conversie", f"{avg_conv:.1f}%")
@@ -155,8 +151,10 @@ tab1,tab2,tab3 = st.tabs(["YTD vs. CBS","4 Weken","Actieplan"])
 with tab1:
     if not df.empty:
         group_by = "maand" if len(df["date_eff"].unique()) > 30 else "week"
-        periods = pd.to_datetime(df["date_eff"]).dt.to_period('M' if group_by=="maand" else 'W')
-        df["group"] = periods.apply(lambda x: x.start_time.strftime("%Y-%m" if group_by=="maand" else "%Y-W%V"))
+        # FIX: Period → string direct
+        df["group"] = pd.to_datetime(df["date_eff"]).dt.to_period('M' if group_by=="maand" else 'W').astype(str)
+        if group_by == "week":
+            df["group"] = df["group"].str.replace(r"(\d{4})-W(\d{2})", r"\1-W\2", regex=True)
 
         agg = df.groupby(["group","shop_id"]).agg({"count_in":"sum","turnover":"sum","conversion_rate":"mean"}).reset_index()
         agg["regio"] = agg["shop_id"].map(lambda x: SHOP_NAME_MAP.get(x, {}).get("region", "Onbekend"))
@@ -206,6 +204,7 @@ def voorspel():
             foot = int(avg_foot * 7 * adj)
             omzet = foot * avg_spv
             duiding = []
+
             if rain > 5: duiding.append("regen (-10%)")
             if temp > 18: duiding.append("zon (+15%)")
             if holiday: duiding.append("feestdag (+20%)")
