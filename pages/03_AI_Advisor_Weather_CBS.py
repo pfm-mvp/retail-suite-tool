@@ -353,30 +353,36 @@ if st.button("Genereer aanbevelingen"):
     # 1) Historische data
     df = fetch_hist_kpis_df(shop_ids, period_hist)
 
-    # Debug-tabel met nette kolommen
-    with st.expander("🛠️ Debug — eerste rijen (hist KPI’s)"):
-        dshow = df.copy()
-        def parse_shop_meta(v):
-            try:
-                obj = json.loads(v) if isinstance(v, str) else v
-                if isinstance(obj, dict):
-                    return obj.get("name"), obj.get("postcode"), obj.get("region")
-            except Exception:
-                pass
-            return (v, None, None)
-        name, pc, rg = [], [], []
-        for v in dshow.get("shop_name", []):
-            n, p, r = parse_shop_meta(v)
-            name.append(n); pc.append(p); rg.append(r)
-        if name:
-            dshow["name"] = name; dshow["postcode"] = pc; dshow["region"] = rg
-            if "shop_name" in dshow.columns: dshow.drop(columns=["shop_name"], inplace=True)
-        # prefer 'timestamp' als 'date'
-        if "timestamp" in dshow.columns:
-            dshow.rename(columns={"timestamp":"date"}, inplace=True)
-        if "date" in dshow.columns and dshow["date"].notna().any():
-            dshow["date"] = pd.to_datetime(dshow["date"], errors="coerce").dt.date
-        st.dataframe(dshow.head(15), use_container_width=True)
+# --- Debug-tabel met nette kolommen (SAFE) ---
+with st.expander("🛠️ Debug — eerste rijen (hist KPI’s)"):
+    dshow = df.copy()
+
+    # 1) shop_name uitpakken naar name / postcode / region
+    def parse_shop_meta(v):
+        try:
+            obj = json.loads(v) if isinstance(v, str) else v
+            if isinstance(obj, dict):
+                return obj.get("name"), obj.get("postcode"), obj.get("region")
+        except Exception:
+            pass
+        # fallback: zet alles in 'name'
+        return (str(v), None, None)
+
+    if "shop_name" in dshow.columns:
+        parsed = [parse_shop_meta(v) for v in dshow["shop_name"]]
+        dshow["name"] = [p[0] for p in parsed]
+        dshow["postcode"] = [p[1] for p in parsed]
+        dshow["region"] = [p[2] for p in parsed]
+        dshow.drop(columns=["shop_name"], inplace=True, errors="ignore")
+
+    # 2) datumkolom robuust maken zonder truthiness op Series
+    #    kies eerst bron: timestamp > date > niets
+    date_src = "timestamp" if "timestamp" in dshow.columns else ("date" if "date" in dshow.columns else None)
+    if date_src is not None:
+        dshow["date"] = pd.to_datetime(dshow[date_src], errors="coerce").dt.date
+    # toon compact
+    cols_order = [c for c in ["date","shop_id","name","postcode","region","count_in","conversion_rate","turnover","sales_per_visitor"] if c in dshow.columns]
+    st.dataframe(dshow[cols_order].head(15), use_container_width=True)
 
     if df is None or df.empty:
         st.warning("Geen historische KPI-data voor deze selectie/periode. Probeer ‘this_year’ of ‘last_year’.")
