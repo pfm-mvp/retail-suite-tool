@@ -152,13 +152,15 @@ tab1,tab2,tab3 = st.tabs(["YTD vs. CBS","4 Weken","Actieplan"])
 
 with tab1:
     if not df.empty:
-        # Use consistent monthly grouping for quarters/years
-        df["maand"] = pd.to_datetime(df["date_eff"]).dt.to_period('M').apply(lambda x: x.start_time.strftime("%Y-%m"))
+        # FIX: .to_period() returns Period, .start_time is property → use .start_time directly
+        periods = pd.to_datetime(df["date_eff"]).dt.to_period('M')
+        df["maand"] = periods.apply(lambda x: x.start_time.strftime("%Y-%m") if pd.notnull(x) else "")
+
         agg = df.groupby(["maand","shop_id"]).agg({"count_in":"sum","turnover":"sum","conversion_rate":"mean"}).reset_index()
         agg["regio"] = agg["shop_id"].map(lambda x: SHOP_NAME_MAP.get(x, {}).get("region", "Onbekend"))
         maand_agg = agg.groupby(["maand","regio"]).agg({"count_in":"sum","turnover":"sum","conversion_rate":"mean"}).reset_index()
 
-        # CBS always monthly
+        # CBS monthly
         cbs_monthly = cbs_df.copy()
         cbs_monthly["maand"] = cbs_monthly["maand"].dt.strftime("%Y-%m")
 
