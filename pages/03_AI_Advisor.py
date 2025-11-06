@@ -152,7 +152,7 @@ tab1,tab2,tab3 = st.tabs(["YTD vs. CBS","4 Weken","Actieplan"])
 
 with tab1:
     if not df.empty:
-        # FIX: .to_period() returns Period, .start_time is property → use .start_time directly
+        # FIX: Always monthly grouping, wide bars even for 1 month
         periods = pd.to_datetime(df["date_eff"]).dt.to_period('M')
         df["maand"] = periods.apply(lambda x: x.start_time.strftime("%Y-%m") if pd.notnull(x) else "")
 
@@ -160,7 +160,6 @@ with tab1:
         agg["regio"] = agg["shop_id"].map(lambda x: SHOP_NAME_MAP.get(x, {}).get("region", "Onbekend"))
         maand_agg = agg.groupby(["maand","regio"]).agg({"count_in":"sum","turnover":"sum","conversion_rate":"mean"}).reset_index()
 
-        # CBS monthly
         cbs_monthly = cbs_df.copy()
         cbs_monthly["maand"] = cbs_monthly["maand"].dt.strftime("%Y-%m")
 
@@ -168,7 +167,15 @@ with tab1:
         for r in [regio] if regio != "All" else ["Noord NL", "Zuid NL"]:
             if r not in maand_agg["regio"].unique(): continue
             d = maand_agg[maand_agg.regio==r]
-            fig.add_trace(go.Bar(x=d["maand"], y=d["turnover"]/1000, name=f"Omzet {r}", marker_color="#1f77b4" if r=="Noord NL" else "#ff7f0e"))
+            # Force wide bars: use width=0.8 * days_in_month
+            bar_widths = [0.8] * len(d)
+            fig.add_trace(go.Bar(
+                x=d["maand"],
+                y=d["turnover"]/1000,
+                name=f"Omzet {r}",
+                marker_color="#1f77b4" if r=="Noord NL" else "#ff7f0e",
+                width=bar_widths
+            ))
             fig.add_trace(go.Scatter(x=d["maand"], y=d["count_in"]/1000, name=f"Footfall {r}", yaxis="y2", line=dict(dash="dot")))
             fig.add_trace(go.Scatter(x=d["maand"], y=d["conversion_rate"], name=f"Conversie {r}", yaxis="y4", line=dict(dash="dash")))
         fig.add_trace(go.Scatter(x=cbs_monthly["maand"], y=cbs_monthly["CBS_vertrouwen"], name="CBS Vertrouwen", yaxis="y3", line=dict(color="red")))
@@ -177,8 +184,10 @@ with tab1:
             yaxis2=dict(title="Footfall (×1.000)", overlaying="y", side="right"),
             yaxis3=dict(title="CBS", overlaying="y", side="right", position=0.99),
             yaxis4=dict(title="Conversie %", overlaying="y", side="right", position=0.95),
-            barmode="group", height=500,
-            xaxis=dict(tickangle=45)
+            barmode="group",
+            height=500,
+            xaxis=dict(tickangle=45),
+            bargap=0.2  # consistent spacing
         )
         st.plotly_chart(fig, use_container_width=True)
 
