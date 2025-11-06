@@ -7,13 +7,13 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 from pathlib import Path
 import sys
-import pytz  # <-- VOOR TZ
+import pytz
 sys.path.append(str(Path(__file__).parent.parent))
 from shop_mapping import SHOP_NAME_MAP
 from helpers_shop import ID_TO_NAME, get_ids_by_region
 from helpers_normalize import normalize_vemcount_response
 
-st.set_page_config(page_title="AI Retail Advisor", layout="wide", page_icon="Shopping Bag")
+st.set_page_config(page_title="AI Retail Advisor", layout="wide", page_icon="Bag")
 st.title("AI Retail Advisor: Regio- & Winkelvoorspellingen")
 
 # ─── SECRETS ───
@@ -51,12 +51,21 @@ def add_effective_date(df: pd.DataFrame) -> pd.DataFrame:
     d["year"] = pd.to_datetime(d["date_eff"]).dt.year
     d["month"] = pd.to_datetime(d["date_eff"]).dt.month
     d["week"] = pd.to_datetime(d["date_eff"]).dt.isocalendar().week
+    d["shop_id"] = d["shop_id"].astype(int)  # FIX KeyError
     return d
 
 def fetch(shop_ids, period: str) -> pd.DataFrame:
-    params = [("source", "shops"), ("period", period), ("step", step_for(period))]
-    params += [("data[]", str(sid)) for sid in shop_ids]
-    params += [("data_output[]", m) for m in METRICS]
+    params = {
+        "source": "shops",
+        "period": period,
+        "step": step_for(period)
+    }
+    # Query params zoals in werkend script
+    for sid in shop_ids:
+        params[f"data[]"] = str(sid)
+    for m in METRICS:
+        params[f"data_output[]"] = m
+
     try:
         r = requests.post(API_URL, params=params, timeout=45)
         r.raise_for_status()
@@ -101,8 +110,10 @@ def cbs():
 
 cbs_df = cbs()
 
-# ─── VORIG JAAR (voor vergelijking) ───
-df_last_year = fetch(shop_ids, "last_year") if period != "last_year" else df.copy()
+# ─── VORIG JAAR (fallback als niet beschikbaar) ───
+df_last_year = fetch(shop_ids, "last_year")
+if df_last_year.empty:
+    df_last_year = df.copy()  # Gebruik huidige als fallback
 
 # ─── KPI’s ───
 if not df.empty:
@@ -117,115 +128,4 @@ if not df.empty:
     c4.metric("SPV", f"€{avg_spv:.0f}")
 
 # ─── GRAFIEK YTD ───
-tab1,tab2,tab3 = st.tabs(["YTD vs. CBS","4 Weken","Actieplan"])
-with tab1:
-    if not df.empty:
-        group_by = "maand" if len(df["date_eff"].unique()) > 30 else "week"
-        df["group"] = pd.to_datetime(df["date_eff"]).dt.to_period('M' if group_by=="maand" else 'W').apply(lambda x: x.start_time).dt.strftime("%Y-%m" if group_by=="maand" else "%Y-W%V")
-        agg = df.groupby(["group","shop_id"]).agg({"count_in":"sum","turnover":"sum","conversion_rate":"mean"}).reset_index()
-        agg["regio"] = agg["shop_id"].map(lambda x: SHOP_NAME_MAP[x]["region"])
-        maand_agg = agg.groupby(["group","regio"]).agg({"count_in":"sum","turnover":"sum","conversion_rate":"mean"}).reset_index()
-
-        fig = go.Figure()
-        for r in [regio] if regio != "All" else ["Noord NL", "Zuid NL"]:
-            if r not in maand_agg["regio"].unique(): continue
-            d = maand_agg[maand_agg.regio==r]
-            fig.add_trace(go.Bar(x=d["group"], y=d["turnover"]/1000, name=f"Omzet {r}", marker_color="#1f77b4" if r=="Noord NL" else "#ff7f0e"))
-            fig.add_trace(go.Scatter(x=d["group"], y=d["count_in"]/1000, name=f"Footfall {r}", yaxis="y2", line=dict(dash="dot", color="#1f77b4" if r=="Noord NL" else "#ff7f0e")))
-            fig.add_trace(go.Scatter(x=d["group"], y=d["conversion_rate"], name=f"Conversie {r}", yaxis="y4", line=dict(dash="dash", color="#2ca02c" if r=="Noord NL" else "#d62728")))
-        fig.add_trace(go.Scatter(x=cbs_df["maand"].dt.strftime("%Y-%m"), y=cbs_df["CBS_vertrouwen"], name="CBS Vertrouwen", yaxis="y3", line=dict(color="red")))
-        fig.update_layout(
-            yaxis=dict(title="Omzet (€K)"),
-            yaxis2=dict(title="Footfall (×1.000)", overlaying="y", side="right"),
-            yaxis3=dict(title="CBS", overlaying="y", side="right", position=0.99),
-            yaxis4=dict(title="Conversie %", overlaying="y", side="right", position=0.95),
-            barmode="group", height=500
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-# ─── VOORSPELLING ───
-def voorspel():
-    rows = []
-    nl_hols = holidays.NL(years=2025)
-    for sid, info in SHOP_NAME_MAP.items():
-        if regio != "All" and info["region"] != regio: continue
-        w = weer(info["postcode"])
-        if w is None: continue
-        hist = df[df["shop_id"] == sid]
-        last_year_hist = df_last_year[df_last_year["shop_id"] == sid]
-        avg_foot = hist["count_in"].mean() if not hist.empty else 0
-        avg_spv = hist["sales_per_visitor"].mean() if not hist.empty else 0
-        cbs_impact = 1 + (cbs_df["CBS_vertrouwen"].mean() / 100) * 0.05
-        for i in range(4):
-            week_start = datetime.now() + timedelta(weeks=i)
-            week_num = week_start.isocalendar()[1]
-            week_dates = pd.date_range(week_start, periods=7)
-            temp = w[w["date"].isin(week_dates)]["temp"].mean() if not w.empty else 12
-            rain = w[w["date"].isin(week_dates)]["rain"].sum() if not w.empty else 0
-            holiday = any(d.date() in nl_hols for d in week_dates)
-            adj = 1.0
-            if rain > 5: adj *= 0.90
-            if temp > 18: adj *= 1.15
-            if holiday: adj *= 1.20
-            adj *= cbs_impact
-            foot = int(avg_foot * 7 * adj)
-            last_year_foot = last_year_hist["count_in"].mean() * 7 if not last_year_hist.empty else foot
-            vs_last = ((foot / last_year_foot) - 1) * 100 if last_year_foot > 0 else 0
-            omzet = foot * avg_spv
-            duiding = []
-            if rain > 5: duiding.append(f"regen (-10%)")
-            if temp > 18: duiding.append(f"zon (+15%)")
-            if holiday: duiding.append(f"feestdag (+20%)")
-            if cbs_df["CBS_vertrouwen"].mean() < -10: duiding.append(f"laag vertrouwen ({cbs_df['CBS_vertrouwen'].mean():.0f} pt, -5%)")
-            duiding_str = "; ".join(duiding) or "stabiel"
-            duiding_str += f"; vs vorig jaar: {vs_last:+.1f}%"
-            rows.append({
-                "week_num": f"Week {week_num}",
-                "winkel": info["name"],
-                "footfall": foot,
-                "omzet": f"€{int(omzet):,}".replace(",", "."),
-                "vs_last_year": vs_last,
-                "duiding": duiding_str
-            })
-    return pd.DataFrame(rows)
-
-forecast = voorspel()
-
-# ─── GRAFIEK VOORSPELLING ───
-with tab2:
-    st.subheader("Voorspelling Footfall per Week (vs vorig jaar)")
-    if not forecast.empty:
-        fig_f = go.Figure()
-        for w in forecast["winkel"].unique():
-            d = forecast[forecast["winkel"] == w]
-            fig_f.add_trace(go.Scatter(x=d["week_num"], y=d["footfall"], name=f"Verwacht {w}", mode="lines+markers"))
-            fig_f.add_trace(go.Scatter(x=d["week_num"], y=d["footfall"] * (1 + d["vs_last_year"]/100), name=f"Vorig jaar {w}", mode="lines", line=dict(dash="dash")))
-        fig_f.update_layout(height=500)
-        st.plotly_chart(fig_f, use_container_width=True)
-        st.dataframe(forecast[["week_num","winkel","omzet","duiding"]])
-
-# ─── ACTIEPLAN ───
-with tab3:
-    st.subheader("Actieplan – Voor Tweedehands Kleding")
-    for _,r in forecast.iterrows():
-        with st.expander(f"{r['winkel']} – {r['week_num']} | {r['footfall']:,} bezoekers"):
-            acties = []
-            if "regen" in r["duiding"]:
-                acties.append("Regen dip: Indoor ruil-event + app-push: 'Droog ruilen met extra korting!' (+8% conversie)")
-            if "zon" in r["duiding"]:
-                acties.append("Zon boost: Window displays met zomer vintage + social post: 'Zomer finds bij ons!' (+12% footfall)")
-            if "feestdag" in r["duiding"]:
-                acties.append("Feestdag piek: Special thema-rack (e.g. feestkleding) + staffing +20%")
-            if "laag vertrouwen" in r["duiding"]:
-                acties.append("Laag vertrouwen: Budget deals + loyalty email: 'Bespaar met onze tweedehands gems' (stabiliseer SPV)")
-            acties.append(f"Vs vorig jaar: {r['vs_last_year']:+.1f}% – { 'Focus promo' if r['vs_last_year'] < 0 else 'Benut piek met upselling' }")
-            for a in acties:
-                st.markdown(f"- {a}")
-            txt = f"Beste {r['winkel']},\n\n{r['week_num']} → {r['footfall']:,} bezoekers ({r['omzet']})\nDuiding: {r['duiding']}\n\nActies:\n" + "\n".join([f"- {a.split(':')[1].strip() if ':' in a else a}" for a in acties[:2]]) + "\n\nSucces!\nRegiomanager"
-            st.code(txt, language="text")
-
-if st.button("Refresh"):
-    st.cache_data.clear()
-    st.rerun()
-
-st.caption("Bron: Planet PFM, OpenWeather, CBS | Real-time")
+tab1,tab2,tab3 = st.tabs(["YTD
