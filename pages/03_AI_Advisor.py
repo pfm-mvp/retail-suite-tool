@@ -72,7 +72,6 @@ def fetch(shop_ids, period: str) -> pd.DataFrame:
             df = df[df["date_eff"] < TODAY]
         df = df.sort_values(["shop_id", "date_eff"])
         df["sq_meter"] = df.groupby("shop_id")["sq_meter"].ffill().bfill()
-        # GEEN *100 → API levert al %
         return df
     except Exception as e:
         st.error(f"Planet PFM: {str(e)[:100]}")
@@ -80,14 +79,18 @@ def fetch(shop_ids, period: str) -> pd.DataFrame:
 
 df = fetch(shop_ids, period)
 
-# Haal vergelijking op: vorige periode
+# Vergelijkingsperiode
 prev_period_map = {
     "this_week": "last_week",
     "this_month": "last_month",
     "this_quarter": "last_quarter",
-    "this_year": "last_year"
+    "this_year": "last_year",
+    "last_week": "this_week",
+    "last_month": "this_month",
+    "last_quarter": "this_quarter",
+    "last_year": "this_year"
 }
-prev_period = prev_period_map.get(period, None)
+prev_period = prev_period_map.get(period)
 df_prev = fetch(shop_ids, prev_period) if prev_period else pd.DataFrame()
 
 @st.cache_data(ttl=1800)
@@ -129,16 +132,28 @@ if not df.empty:
     if not df_prev.empty:
         prev_foot = df_prev["count_in"].sum()
         prev_omzet = df_prev["turnover"].sum()
+        prev_conv = df_prev["conversion_rate"].mean()
+        prev_spv = df_prev["sales_per_visitor"].mean()
+
         vs_foot = ((total_foot / prev_foot) - 1) * 100 if prev_foot > 0 else 0
         vs_omzet = ((total_omzet / prev_omzet) - 1) * 100 if prev_omzet > 0 else 0
-        st.caption(f"vs vorige periode: Footfall {vs_foot:+.1f}% | Omzet {vs_omzet:+.1f}%")
+        vs_conv = (avg_conv - prev_conv) if prev_conv > 0 else 0
+        vs_spv = (avg_spv - prev_spv) if prev_spv > 0 else 0
+
+        c1.metric("Footfall", f"{int(total_foot):,}".replace(",","."), delta=f"{vs_foot:+.1f}%")
+        c2.metric("Omzet", f"€{int(total_omzet):,}".replace(",","."), delta=f"{vs_omzet:+.1f}%")
+        c3.metric("Conversie", f"{avg_conv:.1f}%", delta=f"{vs_conv:+.1f} pp")
+        c4.metric("SPV", f"€{avg_spv:.0f}", delta=f"{vs_spv:+.1f}")
 
 tab1,tab2,tab3 = st.tabs(["YTD vs. CBS","4 Weken","Actieplan"])
 
 with tab1:
     if not df.empty:
         group_by = "maand" if len(df["date_eff"].unique()) > 30 else "week"
-        df["group"] = pd.to_datetime(df["date_eff"]).dt.to_period('M' if group_by=="maand" else 'W').apply(lambda x: x.to_timestamp()).dt.strftime("%Y-%m" if group_by=="maand" else "%Y-W%V")
+        # FIX: gebruik .start_time direct op Period
+        periods = pd.to_datetime(df["date_eff"]).dt.to_period('M' if group_by=="maand" else 'W')
+        df["group"] = periods.apply(lambda x: x.start_time.strftime("%Y-%m" if group_by=="maand" else "%Y-W%V"))
+
         agg = df.groupby(["group","shop_id"]).agg({"count_in":"sum","turnover":"sum","conversion_rate":"mean"}).reset_index()
         agg["regio"] = agg["shop_id"].map(lambda x: SHOP_NAME_MAP.get(x, {}).get("region", "Onbekend"))
         maand_agg = agg.groupby(["group","regio"]).agg({"count_in":"sum","turnover":"sum","conversion_rate":"mean"}).reset_index()
