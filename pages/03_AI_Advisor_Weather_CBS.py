@@ -312,8 +312,34 @@ if st.button("Genereer aanbevelingen"):
     dfm = monthly_agg(df)
     trend = mom_yoy(dfm)
 
-    # 3) Weer + CBS (lat/lon niet interactief; gebruik eenvoudige NL-centroid)
-    # Je kunt dit later vervangen door postcodes → coördinaten per winkel.
+    # 3) Weer + CBS  (LAT/LON centroid of NL; later per winkel)
+    try:
+        forecast = get_daily_forecast(lat=52.37, lon=4.90, api_key=OPENWEATHER_KEY, days=days_ahead)
+    except Exception:
+        # graceful degrade: geen weerdata ⇒ maak neutrale reeks
+        forecast = [{"date": pd.Timestamp.today().date() + pd.Timedelta(days=i), "temp": 15.0, "pop": 0.0} for i in range(days_ahead)]
+
+    # 🔧 FIX: normalizeer forecast → ISO strings + floats (build_advice vereist ISO-string)
+    def _normalize_forecast_dates(fx):
+        norm = []
+        for f in fx or []:
+            d_iso = pd.to_datetime(f.get("date"), errors="coerce")
+            if pd.isna(d_iso):
+                continue
+            norm.append({
+                **f,
+                "date": d_iso.date().isoformat(),                 # <-- ISO-string
+                "temp": float(f.get("temp", 0.0) or 0.0),
+                "pop":  float(f.get("pop", 0.0) or 0.0),
+            })
+        return norm
+
+    forecast = _normalize_forecast_dates(forecast)
+
+    # 4) Adviesregels (dag/winkel) — gebruikt weer en cci
+    advice = build_advice("Your Company", baseline, forecast, float(last_cci))
+
+    
     try:
         forecast = get_daily_forecast(lat=52.37, lon=4.90, api_key=OPENWEATHER_KEY, days=days_ahead)
     except Exception:
@@ -327,9 +353,6 @@ if st.button("Genereer aanbevelingen"):
     except Exception as e:
         last_cci, cci_period = 0.0, "n/a"
         st.warning(f"Kon CCI niet ophalen (gebruik 0). Details: {e}")
-
-    # 4) Adviesregels (dag/winkel) — gebruikt weer en cci
-    advice = build_advice("Your Company", baseline, forecast, last_cci)
 
     # 5) Regionale baseline (gemiddelden van alle winkels per weekday)
     baseline_day = {}
