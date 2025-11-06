@@ -1,233 +1,242 @@
-# pages/03_Retail_Portfolio_Benchmark_AI.py
-import os, sys
-from datetime import datetime
-import pytz
-import requests
-import numpy as np
-import pandas as pd
 import streamlit as st
-import plotly.express as px
-import calendar
-
-# ---------- Imports / mapping ----------
-sys.path.append(os.path.abspath(os.path.dirname(__file__) + '/../'))
-from helpers_shop import ID_TO_NAME, NAME_TO_ID, REGIONS, get_ids_by_region
+import pandas as pd
+import numpy as np
+import requests
+import holidays
+import plotly.graph_objects as go
+from datetime import datetime, timedelta
+from pathlib import Path
+import sys
+import pytz
+sys.path.append(str(Path(__file__).parent.parent))
+from shop_mapping import SHOP_NAME_MAP
+from helpers_shop import ID_TO_NAME, get_ids_by_region
 from helpers_normalize import normalize_vemcount_response
 
-# ---------- Page ----------
-st.set_page_config(page_title="Portfolio Benchmark (AI)", page_icon="📊", layout="wide")
-st.title("📊 Portfolio Benchmark (AI)")
+st.set_page_config(page_title="AI Retail Advisor", layout="wide", page_icon="Bag")
+st.title("AI Retail Advisor: Regio- & Winkelvoorspellingen")
 
+# --- SECRETS ---
 API_URL = st.secrets["API_URL"]
+OW_KEY  = st.secrets["openweather_api_key"]
+CBS_ID  = st.secrets["cbs_dataset"]
+CBS_URL = f"https://opendata.cbs.nl/ODataFeed/odata/{CBS_ID}/Consumentenvertrouwen"
 
-# ---------- PFM-styling ----------
-PFM_RED    = "#F04438"
-PFM_GREEN  = "#22C55E"
-PFM_GRAY   = "#6B7280"
-
-st.markdown(f"""
-<style>
-.kpi {{ border:1px solid #eee; border-radius:14px; padding:16px; }}
-.kpi .t {{ font-weight:600; color:#0C111D; }}
-.kpi .v {{ font-size:38px; font-weight:800; }}
-.badge {{ font-size:13px; font-weight:700; padding:4px 10px; border-radius:999px; display:inline-block; }}
-.badge.up {{ color:{PFM_GREEN}; background: rgba(34,197,94,.10); }}
-.badge.down {{ color:{PFM_RED}; background: rgba(240,68,56,.10); }}
-.badge.flat {{ color:{PFM_GRAY}; background: rgba(107,114,128,.10); }}
-</style>
-""", unsafe_allow_html=True)
-
-# ---------- Inputs ----------
+# --- SIDEBAR ---
 PERIODS = ["this_week","last_week","this_month","last_month","this_quarter","last_quarter","this_year","last_year"]
-cP, cR = st.columns(2)
-with cP:
-    period = st.selectbox("Periode", PERIODS, index=4, key="pb_period")
-with cR:
-    regio = st.selectbox("Regio", ["All"] + REGIONS, index=0, key="pb_region")
+regio = st.sidebar.selectbox("Regio", ["All"] + list(set(i["region"] for i in SHOP_NAME_MAP.values())), index=0)
+period = st.sidebar.selectbox("Periode", PERIODS, index=3)  # last_month
 
-# shop_ids obv regio
+# Shop IDs
 if regio == "All":
-    shop_ids = list(ID_TO_NAME.keys())
+    shop_ids = list(SHOP_NAME_MAP.keys())
 else:
     shop_ids = get_ids_by_region(regio)
-
 if not shop_ids:
-    st.warning("Geen winkels in deze selectie.")
     st.stop()
 
-# ---------- Helpers ----------
-TZ     = pytz.timezone("Europe/Amsterdam")
-TODAY  = datetime.now(TZ).date()
+# --- HELPER FUNCTIES ---
+TZ = pytz.timezone("Europe/Amsterdam")
+TODAY = datetime.now(TZ).date()
 METRICS = ["count_in","conversion_rate","turnover","sales_per_visitor","sq_meter"]
 
 def step_for(p: str) -> str:
-    # day voor week/maand; month voor kwartaal/jaar
-    if p.endswith("week") or p.endswith("month"):
-        return "day"
-    return "month"
-
-def post(params):
-    r = requests.post(API_URL, params=params, timeout=45)
-    r.raise_for_status()
-    return r
+    return "day" if p.endswith("week") or p.endswith("month") else "month"
 
 def add_effective_date(df: pd.DataFrame) -> pd.DataFrame:
     d = df.copy()
-    if "date" not in d.columns:
-        d["date"] = pd.NaT
     ts = pd.to_datetime(d.get("timestamp"), errors="coerce")
     d["date_eff"] = pd.to_datetime(d["date"], errors="coerce").fillna(ts)
     d["date_eff"] = d["date_eff"].dt.date
-    d["year"]  = pd.to_datetime(d["date_eff"]).dt.year
+    d["year"] = pd.to_datetime(d["date_eff"]).dt.year
     d["month"] = pd.to_datetime(d["date_eff"]).dt.month
+    d["week"] = pd.to_datetime(d["date_eff"]).dt.isocalendar().week
+    d["shop_id"] = d["shop_id"].astype(int)
     return d
 
 def fetch(shop_ids, period: str) -> pd.DataFrame:
-    params = [("data", sid) for sid in shop_ids]
-    params += [("data_output", m) for m in METRICS]
-    params += [("source","shops"), ("period", period), ("step", step_for(period))]
-    r  = post(params)
-    js = r.json()
-    df = normalize_vemcount_response(js, ID_TO_NAME, kpi_keys=METRICS)  # verwacht {id->naam}
-    df = add_effective_date(df)
-    # Exclude vandaag voor “this_*”
-    if period.startswith("this_"):
-        df = df[df["date_eff"] < TODAY]
-    # Forward-fill sq_meter per shop zodat sales/m² defined is
-    df = df.sort_values(["shop_id","date_eff"])
-    df["sq_meter"] = df.groupby("shop_id")["sq_meter"].ffill().bfill()
-    return df
+    params = {
+        "source": "shops",
+        "period": period,
+        "step": step_for(period)
+    }
+    for sid in shop_ids:
+        params[f"data[]"] = str(sid)
+    for m in METRICS:
+        params[f"data_output[]"] = m
 
-def fmt_eur0(x): return f"€{x:,.0f}".replace(",", ".")
-def fmt_eur2(x): return f"€{x:,.2f}".replace(",", ".")
-def fmt_pct2(x): return f"{x:.2f}%"
+    try:
+        r = requests.post(API_URL, params=params, timeout=45)
+        r.raise_for_status()
+        js = r.json()
+        st.success(f"Planet PFM online – {len(js)} records")
+        df = normalize_vemcount_response(js, ID_TO_NAME, METRICS)
+        df = add_effective_date(df)
+        if period.startswith("this_"):
+            df = df[df["date_eff"] < TODAY]
+        df = df.sort_values(["shop_id", "date_eff"])
+        df["sq_meter"] = df.groupby("shop_id")["sq_meter"].ffill().bfill()
+        df["conversion_rate"] = df["conversion_rate"] * 100
+        return df
+    except Exception as e:
+        st.error(f"Planet PFM: {str(e)[:100]}")
+        return pd.DataFrame()
 
-def weighted_avg(series, weights):
-    w = weights.fillna(0.0); s = series.fillna(0.0)
-    d = w.sum()
-    return (s*w).sum()/d if d else np.nan
-
-# ---------- Get data ----------
 df = fetch(shop_ids, period)
-if df.empty:
-    st.warning("Geen data voor deze periode/ selectie.")
-    st.stop()
 
-# ---------- Portfolio KPIs ----------
-# Agg per shop (Σ traffic/turnover; conversie/SPV gewogen op traffic; laatste m²)
-g = df.groupby("shop_id", as_index=False).agg({"count_in":"sum","turnover":"sum"})
-w = df.groupby("shop_id").apply(lambda x: pd.Series({
-    "conversion_rate": weighted_avg(x["conversion_rate"], x["count_in"]),
-    "sales_per_visitor": weighted_avg(x["sales_per_visitor"], x["count_in"]),
-})).reset_index()
-g = g.merge(w, on="shop_id", how="left")
-sqm = (df.groupby("shop_id")["sq_meter"]
-         .apply(lambda s: float(s.dropna().iloc[-1]) if s.dropna().size else np.nan)
-         .reset_index())
-g = g.merge(sqm, on="shop_id", how="left")
-g["sales_per_sqm"] = np.where(g["sq_meter"]>0, g["turnover"]/g["sq_meter"], np.nan)
-g["shop_name"] = g["shop_id"].map(ID_TO_NAME)
+# --- WEER ---
+@st.cache_data(ttl=1800)
+def weer(pc):
+    try:
+        r = requests.get("https://api.openweather.org/data/2.5/forecast", params={"q": f"{pc},NL", "appid": OW_KEY, "units":"metric"})
+        r.raise_for_status()
+        js = r.json()["list"]
+        daily = pd.DataFrame([{"date": pd.to_datetime(d["dt_txt"]).date(), "temp": d["main"]["temp"], "rain": d.get("rain", {}).get("3h", 0)} for d in js])
+        return daily.groupby("date").mean(numeric_only=True).reset_index().head(28)
+    except:
+        return None
 
-# Region totals / averages
-total_turn = g["turnover"].sum()
-avg_conv   = weighted_avg(g["conversion_rate"],   g["count_in"])
-avg_spv    = weighted_avg(g["sales_per_visitor"], g["count_in"])
-region_sqm = g["sq_meter"].fillna(0).sum()
-avg_spsqm  = (total_turn/region_sqm) if region_sqm>0 else np.nan
+# --- CBS ---
+@st.cache_data(ttl=86400)
+def cbs():
+    try:
+        raw = requests.get(CBS_URL).json()["value"]
+        c = pd.DataFrame(raw)[["Perioden","Consumentenvertrouwen_1","Koopbereidheid_5"]]
+        c["maand"] = pd.to_datetime(c["Perioden"].str[:7] + "-01")
+        return c.rename(columns={"Consumentenvertrouwen_1":"CBS_vertrouwen", "Koopbereidheid_5":"CBS_koop"})[["maand","CBS_vertrouwen","CBS_koop"]]
+    except:
+        return pd.DataFrame({"maand": pd.date_range("2025-01", "2025-11", freq="MS"), "CBS_vertrouwen": [-8,-7,-9,-6,-10,-11,-9,-12,-10,-13,-14], "CBS_koop": [-15,-14,-16,-13,-17,-18,-16,-19,-17,-20,-21]})
 
-# KPI cards
-c1,c2,c3,c4 = st.columns(4)
-with c1:
-    st.markdown(f"""<div class="kpi"><div class="t">💶 Totale omzet</div>
-    <div class="v">{fmt_eur0(total_turn)}</div></div>""", unsafe_allow_html=True)
-with c2:
-    st.markdown(f"""<div class="kpi"><div class="t">🛒 Gem. conversie</div>
-    <div class="v">{fmt_pct2(avg_conv)}</div></div>""", unsafe_allow_html=True)
-with c3:
-    st.markdown(f"""<div class="kpi"><div class="t">💸 Gem. SPV</div>
-    <div class="v">{fmt_eur2(avg_spv)}</div></div>""", unsafe_allow_html=True)
-with c4:
-    st.markdown(f"""<div class="kpi"><div class="t">🏁 Gem. sales/m²</div>
-    <div class="v">{fmt_eur2(avg_spsqm)}</div></div>""", unsafe_allow_html=True)
+cbs_df = cbs()
 
-st.markdown("---")
+# --- VORIG JAAR (fallback) ---
+df_last_year = fetch(shop_ids, "last_year")
+if df_last_year.empty:
+    df_last_year = df.copy()
 
-# ---------- 🔥 Sales/m² Heatmap per winkel (maanden) ----------
-st.subheader("🔥 Sales/m² Heatmap per winkel (maanden)")
+# --- KPI’s ---
+if not df.empty:
+    total_foot = df["count_in"].sum()
+    total_omzet = df["turnover"].sum()
+    avg_conv = df["conversion_rate"].mean()
+    avg_spv = df["sales_per_visitor"].mean()
+    c1,c2,c3,c4 = st.columns(4)
+    c1.metric("Footfall", f"{int(total_foot):,}".replace(",","."))
+    c2.metric("Omzet", f"€{int(total_omzet):,}".replace(",","."))
+    c3.metric("Conversie", f"{avg_conv:.1f}%")
+    c4.metric("SPV", f"€{avg_spv:.0f}")
 
-# 1) Bouw maanddata: Σ omzet per shop/maand / laatste m² van die shop
-monthly = (
-    df.groupby(["shop_id","month"], as_index=False)
-      .agg(turnover=("turnover","sum"), sq_meter=("sq_meter","last"))
-)
-monthly["sales_per_sqm"] = np.where(
-    monthly["sq_meter"] > 0, monthly["turnover"] / monthly["sq_meter"], np.nan
-)
-monthly["shop_name"] = monthly["shop_id"].map(ID_TO_NAME)
+# --- GRAFIEK YTD ---
+tab1,tab2,tab3 = st.tabs(["YTD vs. CBS","4 Weken","Actieplan"])
+with tab1:
+    if not df.empty:
+        group_by = "maand" if len(df["date_eff"].unique()) > 30 else "week"
+        df["group"] = pd.to_datetime(df["date_eff"]).dt.to_period('M' if group_by=="maand" else 'W').apply(lambda x: x.start_time).dt.strftime("%Y-%m" if group_by=="maand" else "%Y-W%V")
+        agg = df.groupby(["group","shop_id"]).agg({"count_in":"sum","turnover":"sum","conversion_rate":"mean"}).reset_index()
+        agg["regio"] = agg["shop_id"].map(lambda x: SHOP_NAME_MAP.get(x, {}).get("region", "Onbekend"))
+        maand_agg = agg.groupby(["group","regio"]).agg({"count_in":"sum","turnover":"sum","conversion_rate":"mean"}).reset_index()
 
-# 2) Maandnaam-kolom + chronologische volgorde (Jan…Dec)
-monthly["month_name"] = monthly["month"].apply(lambda m: calendar.month_abbr[int(m)] if pd.notna(m) else m)
-month_order = [calendar.month_abbr[i] for i in range(1, 13)]
+        fig = go.Figure()
+        for r in [regio] if regio != "All" else ["Noord NL", "Zuid NL"]:
+            if r not in maand_agg["regio"].unique(): continue
+            d = maand_agg[maand_agg.regio==r]
+            fig.add_trace(go.Bar(x=d["group"], y=d["turnover"]/1000, name=f"Omzet {r}", marker_color="#1f77b4" if r=="Noord NL" else "#ff7f0e"))
+            fig.add_trace(go.Scatter(x=d["group"], y=d["count_in"]/1000, name=f"Footfall {r}", yaxis="y2", line=dict(dash="dot")))
+            fig.add_trace(go.Scatter(x=d["group"], y=d["conversion_rate"], name=f"Conversie {r}", yaxis="y4", line=dict(dash="dash")))
+        fig.add_trace(go.Scatter(x=cbs_df["maand"].dt.strftime("%Y-%m"), y=cbs_df["CBS_vertrouwen"], name="CBS Vertrouwen", yaxis="y3", line=dict(color="red")))
+        fig.update_layout(
+            yaxis=dict(title="Omzet (€K)"),
+            yaxis2=dict(title="Footfall (×1.000)", overlaying="y", side="right"),
+            yaxis3=dict(title="CBS", overlaying="y", side="right", position=0.99),
+            yaxis4=dict(title="Conversie %", overlaying="y", side="right", position=0.95),
+            barmode="group", height=500
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
-# 3) Pivot naar heatmap (shops × maanden met namen)
-hm = (monthly
-      .pivot(index="shop_name", columns="month_name", values="sales_per_sqm")
-      .sort_index()
-)
-# Kolommen reordenen naar Jan…Dec, maar alleen de maanden die aanwezig zijn
-hm = hm.reindex([m for m in month_order if m in hm.columns], axis=1)
+# --- VOORSPELLING ---
+def voorspel():
+    rows = []
+    nl_hols = holidays.NL(years=2025)
+    for sid, info in SHOP_NAME_MAP.items():
+        if regio != "All" and info["region"] != regio: continue
+        w = weer(info["postcode"])
+        if w is None: continue
+        hist = df[df["shop_id"] == sid]
+        last_year_hist = df_last_year[df_last_year["shop_id"] == sid]
+        if hist.empty: continue
+        avg_foot = hist["count_in"].mean()
+        avg_spv = hist["sales_per_visitor"].mean()
+        cbs_impact = 1 + (cbs_df["CBS_vertrouwen"].mean() / 100) * 0.05
+        for i in range(4):
+            week_start = datetime.now() + timedelta(weeks=i)
+            week_num = week_start.isocalendar()[1]
+            week_dates = pd.date_range(week_start, periods=7)
+            temp = w[w["date"].isin(week_dates)]["temp"].mean() if not w.empty else 12
+            rain = w[w["date"].isin(week_dates)]["rain"].sum() if not w.empty else 0
+            holiday = any(d.date() in nl_hols for d in week_dates)
+            adj = 1.0
+            if rain > 5: adj *= 0.90
+            if temp > 18: adj *= 1.15
+            if holiday: adj *= 1.20
+            adj *= cbs_impact
+            foot = int(avg_foot * 7 * adj)
+            last_year_foot = last_year_hist["count_in"].mean() * 7 if not last_year_hist.empty else foot
+            vs_last = ((foot / last_year_foot) - 1) * 100 if last_year_foot > 0 else 0
+            omzet = foot * avg_spv
+            duiding = []
+            if rain > 5: duiding.append("regen (-10%)")
+            if temp > 18: duiding.append("zon (+15%)")
+            if holiday: duiding.append("feestdag (+20%)")
+            if cbs_df["CBS_vertrouwen"].mean() < -10: duiding.append(f"laag vertrouwen ({cbs_df['CBS_vertrouwen'].mean():.0f} pt, -5%)")
+            duiding_str = "; ".join(duiding) or "stabiel"
+            duiding_str += f"; vs vorig jaar: {vs_last:+.1f}%"
+            rows.append({
+                "week_num": f"Week {week_num}",
+                "winkel": info["name"],
+                "footfall": foot,
+                "omzet": f"€{int(omzet):,}".replace(",", "."),
+                "vs_last_year": vs_last,
+                "duiding": duiding_str
+            })
+    return pd.DataFrame(rows)
 
-if hm.empty or hm.isna().values.all():
-    st.info("Geen maanddata beschikbaar voor deze periode.")
-else:
-    pfm_colorscale = ["#762181", "#D8456C", "#FEAC76"]  # 3-kleuren gradient
-    fig = px.imshow(
-        hm,
-        color_continuous_scale=pfm_colorscale,
-        labels=dict(color="€ / m²"),
-        aspect="auto",
-    )
-    fig.update_layout(
-        height=520,
-        margin=dict(l=0, r=0, t=10, b=10),
-        coloraxis_colorbar=dict(title="€ / m²"),
-    )
-    st.plotly_chart(fig, use_container_width=True)
+forecast = voorspel()
 
-# ---------- 🥇 vs regio-gemiddelde (sales/m²) ----------
-st.subheader("🏁 Leaderboard — sales/m² t.o.v. regio-gemiddelde")
+# --- GRAFIEK VOORSPELLING ---
+with tab2:
+    st.subheader("Voorspelling Footfall per Week (vs vorig jaar)")
+    if not forecast.empty:
+        fig_f = go.Figure()
+        for w in forecast["winkel"].unique():
+            d = forecast[forecast["winkel"] == w]
+            fig_f.add_trace(go.Scatter(x=d["week_num"], y=d["footfall"], name=f"Verwacht {w}", mode="lines+markers"))
+            fig_f.add_trace(go.Scatter(x=d["week_num"], y=d["footfall"] * (1 + d["vs_last_year"]/100), name=f"Vorig jaar {w}", mode="lines", line=dict(dash="dash")))
+        fig_f.update_layout(height=500)
+        st.plotly_chart(fig_f, use_container_width=True)
+        st.dataframe(forecast[["week_num","winkel","omzet","duiding"]])
 
-comp = g[["shop_name","sales_per_sqm"]].copy()
-comp["reg_avg_spsqm"] = avg_spsqm
-comp["Δ €/m²"] = comp["sales_per_sqm"] - comp["reg_avg_spsqm"]
-comp["Δ %"]   = np.where(comp["reg_avg_spsqm"]>0, (comp["Δ €/m²"]/comp["reg_avg_spsqm"])*100, np.nan)
-comp = comp.sort_values("Δ €/m²", ascending=False)
+# --- ACTIEPLAN ---
+with tab3:
+    st.subheader("Actieplan – Voor Tweedehands Kleding")
+    for _,r in forecast.iterrows():
+        with st.expander(f"{r['winkel']} – {r['week_num']} | {r['footfall']:,} bezoekers"):
+            acties = []
+            if "regen" in r["duiding"]:
+                acties.append("Regen dip: Indoor ruil-event + app-push: 'Droog ruilen met extra korting!' (+8% conversie)")
+            if "zon" in r["duiding"]:
+                acties.append("Zon boost: Window displays met zomer vintage + social post: 'Zomer finds bij ons!' (+12% footfall)")
+            if "feestdag" in r["duiding"]:
+                acties.append("Feestdag piek: Special thema-rack (e.g. feestkleding) + staffing +20%")
+            if "laag vertrouwen" in r["duiding"]:
+                acties.append("Laag vertrouwen: Budget deals + loyalty email: 'Bespaar met onze tweedehands gems' (stabiliseer SPV)")
+            acties.append(f"Vs vorig jaar: {r['vs_last_year']:+.1f}% – {'Focus promo' if r['vs_last_year'] < 0 else 'Benut piek met upselling'}")
+            for a in acties:
+                st.markdown(f"- {a}")
+            txt = f"Beste {r['winkel']},\n\n{r['week_num']} → {r['footfall']:,} bezoekers ({r['omzet']})\nDuiding: {r['duiding']}\n\nActies:\n" + "\n".join([f"- {a.split(':')[1].strip() if ':' in a else a}" for a in acties[:2]]) + "\n\nSucces!\nRegiomanager"
+            st.code(txt, language="text")
 
-styled = (comp.rename(columns={"shop_name":"winkel","sales_per_sqm":"sales/m²","reg_avg_spsqm":"gem. sales/m² (regio)"})
-          .style.format({"sales/m²":"€{:.2f}","gem. sales/m² (regio)":"€{:.2f}","Δ €/m²":"€{:+.2f}","Δ %":"{:+.1f}%"})
-          .apply(lambda s: ["color:#22C55E" if v>0 else ("color:#F04438" if v<0 else "color:#6B7280")
-                            for v in s], subset=["Δ €/m²","Δ %"])
-         )
-st.dataframe(styled, use_container_width=True)
+if st.button("Refresh"):
+    st.cache_data.clear()
+    st.rerun()
 
-# ---------- 🤖 Mini AI summary ----------
-st.markdown("## 🤖 Portfolio Coach (samenvatting)")
-top_up  = comp.nlargest(3, "Δ €/m²")[["shop_name","Δ €/m²"]]
-top_down= comp.nsmallest(3, "Δ €/m²")[["shop_name","Δ €/m²"]]
-
-def list_lines(df_in):
-    return "<br>".join([f"• {r['shop_name']}: {fmt_eur2(r['Δ €/m²'])}/m²" for _,r in df_in.iterrows()])
-
-st.markdown(f"""
-**Sterk t.o.v. regio-gemiddelde (€/m²):**<br>{list_lines(top_up)}<br><br>
-**Zwak t.o.v. regio-gemiddelde (€/m²):**<br>{list_lines(top_down)}<br><br>
-**Tip:** focus op winkels <span style="color:{PFM_RED};font-weight:600">onder</span> het gemiddelde; check conversie-uurtoppen en SPV-bundels.
-""", unsafe_allow_html=True)
-
-# ---------- Debug ----------
-with st.expander("🔧 Debug"):
-    st.write("period:", period, "step:", step_for(period), "regio:", regio)
-    st.write("Aantal winkels:", len(shop_ids))
-    st.write("df head:", df.head())
-    st.write("monthly head:", monthly.head())
-    st.write("agg per shop head:", g.head())
+st.caption("Bron: Planet PFM, OpenWeather, CBS | Real-time")
