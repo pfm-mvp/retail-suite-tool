@@ -72,13 +72,23 @@ def fetch(shop_ids, period: str) -> pd.DataFrame:
             df = df[df["date_eff"] < TODAY]
         df = df.sort_values(["shop_id", "date_eff"])
         df["sq_meter"] = df.groupby("shop_id")["sq_meter"].ffill().bfill()
-        df["conversion_rate"] = df["conversion_rate"] * 100
+        # GEEN *100 → API levert al %
         return df
     except Exception as e:
         st.error(f"Planet PFM: {str(e)[:100]}")
         return pd.DataFrame()
 
 df = fetch(shop_ids, period)
+
+# Haal vergelijking op: vorige periode
+prev_period_map = {
+    "this_week": "last_week",
+    "this_month": "last_month",
+    "this_quarter": "last_quarter",
+    "this_year": "last_year"
+}
+prev_period = prev_period_map.get(period, None)
+df_prev = fetch(shop_ids, prev_period) if prev_period else pd.DataFrame()
 
 @st.cache_data(ttl=1800)
 def weer(pc):
@@ -103,27 +113,32 @@ def cbs():
 
 cbs_df = cbs()
 
-df_last_year = fetch(shop_ids, "last_year")
-if df_last_year.empty:
-    df_last_year = df.copy()
-
+# KPI's + vs vorige periode
 if not df.empty:
     total_foot = df["count_in"].sum()
     total_omzet = df["turnover"].sum()
     avg_conv = df["conversion_rate"].mean()
     avg_spv = df["sales_per_visitor"].mean()
+
     c1,c2,c3,c4 = st.columns(4)
     c1.metric("Footfall", f"{int(total_foot):,}".replace(",","."))
     c2.metric("Omzet", f"€{int(total_omzet):,}".replace(",","."))
     c3.metric("Conversie", f"{avg_conv:.1f}%")
     c4.metric("SPV", f"€{avg_spv:.0f}")
 
+    if not df_prev.empty:
+        prev_foot = df_prev["count_in"].sum()
+        prev_omzet = df_prev["turnover"].sum()
+        vs_foot = ((total_foot / prev_foot) - 1) * 100 if prev_foot > 0 else 0
+        vs_omzet = ((total_omzet / prev_omzet) - 1) * 100 if prev_omzet > 0 else 0
+        st.caption(f"vs vorige periode: Footfall {vs_foot:+.1f}% | Omzet {vs_omzet:+.1f}%")
+
 tab1,tab2,tab3 = st.tabs(["YTD vs. CBS","4 Weken","Actieplan"])
 
 with tab1:
     if not df.empty:
         group_by = "maand" if len(df["date_eff"].unique()) > 30 else "week"
-        df["group"] = pd.to_datetime(df["date_eff"]).dt.to_period('M' if group_by=="maand" else 'W').apply(lambda x: x.start_time).dt.strftime("%Y-%m" if group_by=="maand" else "%Y-W%V")
+        df["group"] = pd.to_datetime(df["date_eff"]).dt.to_period('M' if group_by=="maand" else 'W').apply(lambda x: x.to_timestamp()).dt.strftime("%Y-%m" if group_by=="maand" else "%Y-W%V")
         agg = df.groupby(["group","shop_id"]).agg({"count_in":"sum","turnover":"sum","conversion_rate":"mean"}).reset_index()
         agg["regio"] = agg["shop_id"].map(lambda x: SHOP_NAME_MAP.get(x, {}).get("region", "Onbekend"))
         maand_agg = agg.groupby(["group","regio"]).agg({"count_in":"sum","turnover":"sum","conversion_rate":"mean"}).reset_index()
@@ -153,7 +168,6 @@ def voorspel():
         w = weer(info["postcode"])
         if w is None: continue
         hist = df[df["shop_id"] == sid]
-        last_year_hist = df_last_year[df_last_year["shop_id"] == sid]
         if hist.empty: continue
         avg_foot = hist["count_in"].mean()
         avg_spv = hist["sales_per_visitor"].mean()
@@ -171,8 +185,6 @@ def voorspel():
             if holiday: adj *= 1.20
             adj *= cbs_impact
             foot = int(avg_foot * 7 * adj)
-            last_year_foot = last_year_hist["count_in"].mean() * 7 if not last_year_hist.empty else foot
-            vs_last = ((foot / last_year_foot) - 1) * 100 if last_year_foot > 0 else 0
             omzet = foot * avg_spv
             duiding = []
             if rain > 5: duiding.append("regen (-10%)")
@@ -180,13 +192,11 @@ def voorspel():
             if holiday: duiding.append("feestdag (+20%)")
             if cbs_df["CBS_vertrouwen"].mean() < -10: duiding.append(f"laag vertrouwen ({cbs_df['CBS_vertrouwen'].mean():.0f} pt, -5%)")
             duiding_str = "; ".join(duiding) or "stabiel"
-            duiding_str += f"; vs vorig jaar: {vs_last:+.1f}%"
             rows.append({
                 "week_num": f"Week {week_num}",
                 "winkel": info["name"],
                 "footfall": foot,
                 "omzet": f"€{int(omzet):,}".replace(",", "."),
-                "vs_last_year": vs_last,
                 "duiding": duiding_str
             })
     return pd.DataFrame(rows)
@@ -194,13 +204,12 @@ def voorspel():
 forecast = voorspel()
 
 with tab2:
-    st.subheader("Voorspelling Footfall per Week (vs vorig jaar)")
+    st.subheader("Voorspelling Footfall per Week")
     if not forecast.empty:
         fig_f = go.Figure()
         for w in forecast["winkel"].unique():
             d = forecast[forecast["winkel"] == w]
             fig_f.add_trace(go.Scatter(x=d["week_num"], y=d["footfall"], name=f"Verwacht {w}", mode="lines+markers"))
-            fig_f.add_trace(go.Scatter(x=d["week_num"], y=d["footfall"] * (1 + d["vs_last_year"]/100), name=f"Vorig jaar {w}", mode="lines", line=dict(dash="dash")))
         fig_f.update_layout(height=500)
         st.plotly_chart(fig_f, use_container_width=True)
         st.dataframe(forecast[["week_num","winkel","omzet","duiding"]])
@@ -218,7 +227,6 @@ with tab3:
                 acties.append("Feestdag piek: Special thema-rack (e.g. feestkleding) + staffing +20%")
             if "laag vertrouwen" in r["duiding"]:
                 acties.append("Laag vertrouwen: Budget deals + loyalty email: 'Bespaar met onze tweedehands gems' (stabiliseer SPV)")
-            acties.append(f"Vs vorig jaar: {r['vs_last_year']:+.1f}% – {'Focus promo' if r['vs_last_year'] < 0 else 'Benut piek met upselling'}")
             for a in acties:
                 st.markdown(f"- {a}")
             txt = f"Beste {r['winkel']},\n\n{r['week_num']} → {r['footfall']:,} bezoekers ({r['omzet']})\nDuiding: {r['duiding']}\n\nActies:\n" + "\n".join([f"- {a.split(':')[1].strip() if ':' in a else a}" for a in acties[:2]]) + "\n\nSucces!\nRegiomanager"
