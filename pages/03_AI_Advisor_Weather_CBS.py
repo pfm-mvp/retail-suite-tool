@@ -313,6 +313,7 @@ if st.button("Genereer aanbevelingen"):
     trend = mom_yoy(dfm)
 
     # 3) Weer + CBS  (LAT/LON centroid of NL; later per winkel)
+    st.write("forecast sample:", forecast[:2])
     try:
         forecast = get_daily_forecast(lat=52.37, lon=4.90, api_key=OPENWEATHER_KEY, days=days_ahead)
     except Exception:
