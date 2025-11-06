@@ -9,28 +9,23 @@ from pathlib import Path
 import sys
 import pytz
 
-# Voeg pad toe voor helpers
 sys.path.append(str(Path(__file__).parent.parent))
 from shop_mapping import SHOP_NAME_MAP
 from helpers_shop import ID_TO_NAME, get_ids_by_region
 from helpers_normalize import normalize_vemcount_response
 
-# Streamlit config
 st.set_page_config(page_title="AI Retail Advisor", layout="wide", page_icon="shopping_bag")
 st.title("AI Retail Advisor: Regio- & Winkelvoorspellingen")
 
-# Secrets
 API_URL = st.secrets["API_URL"]
 OW_KEY  = st.secrets["openweather_api_key"]
 CBS_ID  = st.secrets["cbs_dataset"]
 CBS_URL = f"https://opendata.cbs.nl/ODataFeed/odata/{CBS_ID}/Consumentenvertrouwen"
 
-# Sidebar
 PERIODS = ["this_week","last_week","this_month","last_month","this_quarter","last_quarter","this_year","last_year"]
 regio = st.sidebar.selectbox("Regio", ["All"] + list(set(i["region"] for i in SHOP_NAME_MAP.values())), index=0)
 period = st.sidebar.selectbox("Periode", PERIODS, index=3)
 
-# Shop IDs
 if regio == "All":
     shop_ids = list(SHOP_NAME_MAP.keys())
 else:
@@ -38,7 +33,6 @@ else:
 if not shop_ids:
     st.stop()
 
-# Helpers
 TZ = pytz.timezone("Europe/Amsterdam")
 TODAY = datetime.now(TZ).date()
 METRICS = ["count_in","conversion_rate","turnover","sales_per_visitor","sq_meter"]
@@ -58,16 +52,15 @@ def add_effective_date(df: pd.DataFrame) -> pd.DataFrame:
     return d
 
 def fetch(shop_ids, period: str) -> pd.DataFrame:
-    params = {
-        "source": "shops",
-        "period": period,
-        "step": step_for(period)
-    }
+    params = [
+        ("source", "shops"),
+        ("period", period),
+        ("step", step_for(period))
+    ]
     for sid in shop_ids:
-        params[f"data[]"] = str(sid)
+        params.append(("data", str(sid)))
     for m in METRICS:
-        params[f"data_output[]"] = m
-
+        params.append(("data_output", m))
     try:
         r = requests.post(API_URL, params=params, timeout=45)
         r.raise_for_status()
@@ -87,7 +80,6 @@ def fetch(shop_ids, period: str) -> pd.DataFrame:
 
 df = fetch(shop_ids, period)
 
-# Weer
 @st.cache_data(ttl=1800)
 def weer(pc):
     try:
@@ -99,7 +91,6 @@ def weer(pc):
     except:
         return None
 
-# CBS
 @st.cache_data(ttl=86400)
 def cbs():
     try:
@@ -112,12 +103,10 @@ def cbs():
 
 cbs_df = cbs()
 
-# Vorig jaar
 df_last_year = fetch(shop_ids, "last_year")
 if df_last_year.empty:
     df_last_year = df.copy()
 
-# KPI's
 if not df.empty:
     total_foot = df["count_in"].sum()
     total_omzet = df["turnover"].sum()
@@ -129,10 +118,8 @@ if not df.empty:
     c3.metric("Conversie", f"{avg_conv:.1f}%")
     c4.metric("SPV", f"€{avg_spv:.0f}")
 
-# Tabs
 tab1,tab2,tab3 = st.tabs(["YTD vs. CBS","4 Weken","Actieplan"])
 
-# YTD Grafiek
 with tab1:
     if not df.empty:
         group_by = "maand" if len(df["date_eff"].unique()) > 30 else "week"
@@ -158,7 +145,6 @@ with tab1:
         )
         st.plotly_chart(fig, use_container_width=True)
 
-# Voorspelling
 def voorspel():
     rows = []
     nl_hols = holidays.NL(years=2025)
@@ -207,7 +193,6 @@ def voorspel():
 
 forecast = voorspel()
 
-# 4 Weken
 with tab2:
     st.subheader("Voorspelling Footfall per Week (vs vorig jaar)")
     if not forecast.empty:
@@ -220,7 +205,6 @@ with tab2:
         st.plotly_chart(fig_f, use_container_width=True)
         st.dataframe(forecast[["week_num","winkel","omzet","duiding"]])
 
-# Actieplan
 with tab3:
     st.subheader("Actieplan – Voor Tweedehands Kleding")
     for _,r in forecast.iterrows():
@@ -240,7 +224,6 @@ with tab3:
             txt = f"Beste {r['winkel']},\n\n{r['week_num']} → {r['footfall']:,} bezoekers ({r['omzet']})\nDuiding: {r['duiding']}\n\nActies:\n" + "\n".join([f"- {a.split(':')[1].strip() if ':' in a else a}" for a in acties[:2]]) + "\n\nSucces!\nRegiomanager"
             st.code(txt, language="text")
 
-# Refresh
 if st.button("Refresh"):
     st.cache_data.clear()
     st.rerun()
