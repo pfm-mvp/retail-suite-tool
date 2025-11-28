@@ -212,3 +212,31 @@ def get_retail_index(series: str = "Omzetontwikkeling_1",
     out.sort(key=lambda x: x["period"])
     return out
 
+# -----------------------------
+# Postcode4 stub – simpele context voor de AI Copilot
+# -----------------------------
+from typing import Dict
+
+def get_cbs_stats_for_postcode4(postcode4: str) -> Dict:
+    """
+    Simpele placeholder voor CBS-context op postcode4-niveau.
+
+    Nu:
+    - levert generieke indices terug (NL = 100, iets erboven)
+    - voorkomt import errors in de AI Copilot
+
+    Later:
+    - kun je dit vervangen door een echte koppeling
+      (bv. met CBS-wijk/ buurtstatistieken op basis van postcode → wijkcode).
+    """
+    postcode4 = (postcode4 or "").strip()
+    if not postcode4:
+        return {}
+
+    return {
+        "postcode4": postcode4,
+        "avg_income_index": 100,          # NL = 100
+        "population_density_index": 110,  # iets boven het gemiddelde
+        "note": "Demo-indices op basis van CBS. Vervang deze stub later door een echte postcode4-koppeling."
+    }
+
