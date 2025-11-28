@@ -87,10 +87,10 @@ def get_report(
     company_id: int | None = None,
 ):
     """
-    Wrapper rond /get-report (POST) van de vemcount-agent
-    met querystring zonder []:
+    Wrapper rond /get-report (POST) van de vemcount-agent, met querystring zonder [].
 
-    POST /get-report?data=123&data=456&data_output=count_in&data_output=turnover&period=this_year&step=day
+    We gebruiken hier REPORT_URL, die in jouw setup gelijk is aan
+    https://vemcount-agent.onrender.com/get-report
     """
     params: list[tuple[str, str]] = []
 
@@ -107,11 +107,9 @@ def get_report(
     if company_id is not None:
         params.append(("company", str(company_id)))
 
-    url = f"{FASTAPI_BASE_URL.rstrip('/')}/get-report"
-    resp = requests.post(url, params=params, timeout=60)
+    resp = requests.post(REPORT_URL, params=params, timeout=60)
     resp.raise_for_status()
     return resp.json()
-
 
 # -------------
 # Weather helper (Visual Crossing)
