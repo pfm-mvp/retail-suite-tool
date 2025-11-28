@@ -11,20 +11,19 @@ import streamlit as st
 PATHZZ_API_KEY = st.secrets.get("PATHZZ_API_KEY", None)
 PATHZZ_BASE_URL = st.secrets.get("PATHZZ_BASE_URL", "https://api.pathzz.com")
 
-# Gebruik jouw gedownloade file:
+# Jouw Pathzz weekly export
 SAMPLE_PATHZZ_FILE = Path("data/pathzz_sample_weekly.csv")
 
 
 def _normalize_number(val) -> float:
     """
-    Probeert Pathzz getallen zoals '16.725' of '16,725' om te zetten naar een 'echte' waarde.
-    - Verwijdert punten/komma's als duizendtalseparator
-    - Converteert naar float
+    Converteert Pathzz-getallen zoals '16.725' of '16,725' naar een getal.
+    We interpreteren 16.725 als 16725 (duizendtallen), niet als 16,7.
     """
     if pd.isna(val):
         return 0.0
     s = str(val).strip()
-    # haal zowel . als , eruit, dan naar float
+    # duizendtalseparators eruit
     s = s.replace(".", "").replace(",", "")
     if not s:
         return 0.0
@@ -35,13 +34,14 @@ def _load_sample_pathzz() -> pd.DataFrame:
     """
     Laadt een lokale Pathzz-sample dataset.
 
-    Ondersteunt twee structuren:
-    1) Monthly:
-       - kolommen: 'month', 'street_footfall'
-    2) Weekly:
-       - kolom 'Week' met tekst als '2024-01-07 To 2024-01-13'
-       - één of meer kolommen met 'Visits' in de naam
-       -> wordt geaggregeerd naar maandniveau.
+    Ondersteunt:
+    - Weekly CSV met:
+        'Week' + 'Visits'
+      waarbij 'Week' strings heeft als:
+        '2023-12-31 To 2024-01-06'
+
+    Geeft terug:
+    - DataFrame met kolommen: ['month', 'street_footfall']
     """
     if not SAMPLE_PATHZZ_FILE.exists():
         raise FileNotFoundError(
@@ -50,14 +50,14 @@ def _load_sample_pathzz() -> pd.DataFrame:
 
     df = pd.read_csv(SAMPLE_PATHZZ_FILE)
 
-    # CASE 1: al monthly
+    # CASE 1: als je later zelf al 'month' + 'street_footfall' maakt
     if "month" in df.columns and "street_footfall" in df.columns:
         df["month"] = pd.to_datetime(df["month"])
         return df[["month", "street_footfall"]]
 
-    # CASE 2: weekly export met 'Week' + 'Visits' kolom
-    if "Week" in df.columns:
-        # parse week_start (eerste datum vóór ' To ')
+    # CASE 2: Weekly structuur: 'Week' + 'Visits'
+    if "Week" in df.columns and "Visits" in df.columns:
+        # parse week_start: tekst vóór 'To'
         df["week_start"] = (
             df["Week"]
             .astype(str)
@@ -67,20 +67,9 @@ def _load_sample_pathzz() -> pd.DataFrame:
             .pipe(pd.to_datetime, errors="coerce")
         )
 
-        # Zoek eerste kolom met 'Visits' in de naam én niet 'Comparison'
-        visit_cols = [
-            c for c in df.columns
-            if "Visits" in c and "Comparison" not in c
-        ]
-        if not visit_cols:
-            raise ValueError(
-                "Kon geen kolom met 'Visits' (zonder 'Comparison') vinden in Pathzz CSV."
-            )
+        df["street_footfall"] = df["Visits"].apply(_normalize_number)
 
-        visit_col = visit_cols[0]
-        df["street_footfall"] = df[visit_col].apply(_normalize_number)
-
-        # Aggregatie naar maandniveau
+        # week_start -> maand
         df["month"] = df["week_start"].dt.to_period("M").dt.to_timestamp()
 
         monthly = (
@@ -92,7 +81,7 @@ def _load_sample_pathzz() -> pd.DataFrame:
         return monthly
 
     raise ValueError(
-        "Onbekende Pathzz-sample structuur. Verwacht óf 'month' + 'street_footfall', óf 'Week' + '...Visits'."
+        "Onbekende Pathzz-sample structuur. Verwacht óf 'month' + 'street_footfall', óf 'Week' + 'Visits'."
     )
 
 
@@ -106,7 +95,7 @@ def fetch_monthly_street_traffic(
     """
     Haalt maandelijkse straatdrukte op.
 
-    - Als PATHZZ_API_KEY aanwezig is: roept de echte Pathzz API aan (endpoint = placeholder).
+    - Als PATHZZ_API_KEY aanwezig is: roept de echte Pathzz API aan (placeholder endpoint).
     - Als PATHZZ_API_KEY ontbreekt: gebruikt een lokale sample dataset.
     """
 
@@ -122,7 +111,7 @@ def fetch_monthly_street_traffic(
         )
         return df.loc[mask].reset_index(drop=True)
 
-    # MODE A – LIVE API CALL (placeholder; pas endpoint & params aan op jullie contract)
+    # MODE A – LIVE API CALL (placeholder; pas aan zodra jullie Pathzz-API gebruiken)
     url = f"{PATHZZ_BASE_URL.rstrip('/')}/v1/street-traffic-monthly"
     headers = {"Authorization": f"Bearer {PATHZZ_API_KEY}"}
     params = {
