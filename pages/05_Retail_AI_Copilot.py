@@ -9,7 +9,6 @@ from datetime import datetime, timedelta
 
 from helpers_clients import load_clients
 from helpers_normalize import normalize_vemcount_response
-from services.weather_service import fetch_weather_history
 from services.cbs_service import get_cbs_stats_for_postcode4
 from services.pathzz_service import fetch_monthly_street_traffic
 
