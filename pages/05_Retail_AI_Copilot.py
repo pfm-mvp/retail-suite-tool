@@ -18,9 +18,21 @@ st.set_page_config(
     layout="wide"
 )
 
-FASTAPI_BASE_URL = st.secrets["API_URL"]  # base URL van vemcount-agent
-VISUALCROSSING_KEY = st.secrets.get("visualcrossing_key", None)
+# Bepaal dynamisch de juiste base URLs op basis van API_URL in secrets.
+# In jouw setup wijst API_URL naar /get-report, omdat andere tools daar direct op praten.
+# Voor deze Copilot splitsen we 'm op:
+# - REPORT_URL = volledige /get-report URL (voor metrics)
+# - FASTAPI_BASE_URL = root zonder /get-report (voor /company/{company_id}/location)
+raw_api_url = st.secrets["API_URL"].rstrip("/")
 
+if raw_api_url.endswith("/get-report"):
+    REPORT_URL = raw_api_url
+    FASTAPI_BASE_URL = raw_api_url.rsplit("/get-report", 1)[0]
+else:
+    FASTAPI_BASE_URL = raw_api_url
+    REPORT_URL = raw_api_url + "/get-report"
+
+VISUALCROSSING_KEY = st.secrets.get("visualcrossing_key", None)
 
 # -------------
 # Format helpers
