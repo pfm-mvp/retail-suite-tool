@@ -215,8 +215,6 @@ def get_retail_index(series: str = "Omzetontwikkeling_1",
 # -----------------------------
 # Postcode4 stub – simpele context voor de AI Copilot
 # -----------------------------
-from typing import Dict
-
 def get_cbs_stats_for_postcode4(postcode4: str) -> Dict:
     """
     Simpele placeholder voor CBS-context op postcode4-niveau.
