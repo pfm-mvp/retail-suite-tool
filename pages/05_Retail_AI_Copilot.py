@@ -83,7 +83,7 @@ def get_report(
     for dout in data_outputs:
         params.append(("data_output", dout))
     params.append(("period", period))
-    params.append(("period_step", period_step))
+    params.append(("step", period_step))
     params.append(("source", source))
     if company_id is not None:
         params.append(("company", str(company_id)))
