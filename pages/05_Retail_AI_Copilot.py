@@ -18,7 +18,8 @@ st.set_page_config(
     layout="wide"
 )
 
-FASTAPI_BASE_URL = st.secrets["API_URL"]  # zelfde base URL als in andere pages/tools
+FASTAPI_BASE_URL = st.secrets["API_URL"]  # base URL van vemcount-agent
+VISUALCROSSING_KEY = st.secrets.get("visualcrossing_key", None)
 
 
 # -------------
@@ -50,7 +51,16 @@ def fmt_int(x: float) -> str:
 @st.cache_data(ttl=600)
 def get_locations_by_company(company_id: int) -> pd.DataFrame:
     """
-    Wrapper rond /company/{company_id}/location
+    Wrapper rond /company/{company_id}/location van de vemcount-agent.
+    Verwacht response:
+    {
+      "company_id": ...,
+      "onlyActive": true,
+      "locations": [
+        {"id": ..., "name": "...", ...},
+        ...
+      ]
+    }
     """
     url = f"{FASTAPI_BASE_URL.rstrip('/')}/company/{company_id}/location"
     resp = requests.get(url, timeout=30)
@@ -68,30 +78,73 @@ def get_report(
     shop_ids,
     data_outputs,
     period: str,
-    period_step: str = "day",
+    step: str = "day",
     source: str = "shops",
     company_id: int | None = None,
 ):
     """
-    Wrapper rond /get-report met querystring zonder []:
+    Wrapper rond /get-report (POST) van de vemcount-agent
+    met querystring zonder []:
 
-    ?data=123&data_output=count_in&data_output=turnover&period=this_year&...
+    POST /get-report?data=123&data=456&data_output=count_in&data_output=turnover&period=this_year&step=day
     """
     params: list[tuple[str, str]] = []
+
     for sid in shop_ids:
         params.append(("data", str(sid)))
+
     for dout in data_outputs:
         params.append(("data_output", dout))
+
     params.append(("period", period))
-    params.append(("step", period_step))
+    params.append(("step", step))
     params.append(("source", source))
+
     if company_id is not None:
         params.append(("company", str(company_id)))
 
     url = f"{FASTAPI_BASE_URL.rstrip('/')}/get-report"
-    resp = requests.get(url, params=params, timeout=60)
+    resp = requests.post(url, params=params, timeout=60)
     resp.raise_for_status()
     return resp.json()
+
+
+# -------------
+# Weather helper (Visual Crossing)
+# -------------
+
+@st.cache_data(ttl=3600)
+def fetch_visualcrossing_history(location_str: str, start_date, end_date) -> pd.DataFrame:
+    """
+    Haalt historische daily weather data op via Visual Crossing.
+
+    location_str:
+    - "52.3702,4.8952" (lat,lon) of
+    - "Amsterdam,NL"
+    """
+    if not VISUALCROSSING_KEY:
+        return pd.DataFrame()
+
+    start = pd.to_datetime(start_date).strftime("%Y-%m-%d")
+    end = pd.to_datetime(end_date).strftime("%Y-%m-%d")
+
+    url = f"https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/{location_str}/{start}/{end}"
+    params = {
+        "unitGroup": "metric",
+        "key": VISUALCROSSING_KEY,
+        "include": "days",
+    }
+
+    resp = requests.get(url, params=params, timeout=60)
+    resp.raise_for_status()
+    data = resp.json()
+
+    if "days" not in data:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(data["days"])
+    df["date"] = pd.to_datetime(df["datetime"])
+    return df[["date", "temp", "precip", "windspeed"]]
 
 
 # -------------
@@ -344,7 +397,7 @@ def main():
             [shop_id],
             list(metric_map.keys()),
             period="this_year",
-            period_step="day",
+            step="day",
             source="shops",
             company_id=company_id,
         )
@@ -354,7 +407,7 @@ def main():
             [shop_id],
             list(metric_map.keys()),
             period="last_year",
-            period_step="day",
+            step="day",
             source="shops",
             company_id=company_id,
         )
@@ -376,10 +429,10 @@ def main():
     df_cur = compute_daily_kpis(df_cur)
     df_prev = compute_daily_kpis(df_prev)
 
-    # --- Weerdata ---
+    # --- Weerdata via Visual Crossing ---
     weather_df = pd.DataFrame()
-    if weather_location and st.secrets.get("WEATHER_API_KEY", None):
-        weather_df = fetch_weather_history(weather_location, start_cur, end_cur)
+    if weather_location and VISUALCROSSING_KEY:
+        weather_df = fetch_visualcrossing_history(weather_location, start_cur, end_cur)
 
     # --- Pathzz street traffic (maandniveau) ---
     pathzz_monthly = pd.DataFrame()
@@ -503,6 +556,7 @@ def main():
         st.write("Pathzz monthly:", pathzz_monthly.head())
         st.write("YoY monthly:", yoy_monthly.head())
         st.write("CBS stats:", cbs_stats)
+        st.write("Weather df:", weather_df.head())
 
 
 if __name__ == "__main__":
