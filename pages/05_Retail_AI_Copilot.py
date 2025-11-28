@@ -1,17 +1,16 @@
 # pages/05_Retail_AI_Copilot.py
 
-import streamlit as st
-import pandas as pd
 import numpy as np
+import pandas as pd
+import requests
+import streamlit as st
+
 from datetime import datetime, timedelta
 
-import requests
-
 from helpers_clients import load_clients
-from helpers_normalize import normalize_vemcount_response  # bestaande normalizer
-from helpers_shop import get_shop_label  # als je zoiets hebt; anders kun je zelf labels maken
-from services.weather_service import fetch_weather_history  # bestaande service
-from services.cbs_service import get_cbs_stats_for_postcode4  # of soortgelijk
+from helpers_normalize import normalize_vemcount_response
+from services.weather_service import fetch_weather_history
+from services.cbs_service import get_cbs_stats_for_postcode4
 from services.pathzz_service import fetch_monthly_street_traffic
 
 
@@ -20,8 +19,12 @@ st.set_page_config(
     layout="wide"
 )
 
-FASTAPI_BASE_URL = st.secrets["API_URL"]  # zelfde als in andere pages/tools
+FASTAPI_BASE_URL = st.secrets["API_URL"]  # zelfde base URL als in andere pages/tools
 
+
+# -------------
+# Format helpers
+# -------------
 
 def fmt_eur(x: float) -> str:
     if pd.isna(x):
@@ -41,11 +44,14 @@ def fmt_int(x: float) -> str:
     return f"{x:,.0f}".replace(",", ".")
 
 
+# -------------
+# API helpers
+# -------------
+
 @st.cache_data(ttl=600)
 def get_locations_by_company(company_id: int) -> pd.DataFrame:
     """
-    Zelfde endpoint als in je andere tools:
-    /company/{company_id}/location
+    Wrapper rond /company/{company_id}/location
     """
     url = f"{FASTAPI_BASE_URL.rstrip('/')}/company/{company_id}/location"
     resp = requests.get(url, timeout=30)
@@ -68,8 +74,9 @@ def get_report(
     company_id: int | None = None,
 ):
     """
-    Wrapper rond /get-report.
-    Params zonder [] (data=...).
+    Wrapper rond /get-report met querystring zonder []:
+
+    ?data=123&data_output=count_in&data_output=turnover&period=this_year&...
     """
     params: list[tuple[str, str]] = []
     for sid in shop_ids:
@@ -87,6 +94,10 @@ def get_report(
     resp.raise_for_status()
     return resp.json()
 
+
+# -------------
+# KPI helpers
+# -------------
 
 def compute_daily_kpis(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -108,6 +119,7 @@ def compute_daily_kpis(df: pd.DataFrame) -> pd.DataFrame:
 def aggregate_monthly(df: pd.DataFrame, sqm: float | None) -> pd.DataFrame:
     df = df.copy()
     df["month"] = df["date"].dt.to_period("M").dt.to_timestamp()
+
     agg = df.groupby("month").agg(
         {
             "footfall": "sum",
@@ -130,12 +142,13 @@ def aggregate_monthly(df: pd.DataFrame, sqm: float | None) -> pd.DataFrame:
 def compute_capture_rate(store_monthly: pd.DataFrame, street_monthly: pd.DataFrame) -> pd.DataFrame:
     s = store_monthly.copy()
     st_df = street_monthly.copy()
+
     s["month"] = pd.to_datetime(s["month"])
     st_df["month"] = pd.to_datetime(st_df["month"])
 
     merged = pd.merge(s, st_df, on="month", how="left")
 
-    if "street_footfall" in merged.columns:
+    if "street_footfall" in merged.columns and "footfall" in merged.columns:
         merged["capture_rate"] = np.where(
             merged["street_footfall"] > 0,
             merged["footfall"] / merged["street_footfall"] * 100,
@@ -148,6 +161,9 @@ def compute_capture_rate(store_monthly: pd.DataFrame, street_monthly: pd.DataFra
 
 
 def compute_yoy_monthly(df_monthly: pd.DataFrame) -> pd.DataFrame:
+    """
+    YoY op maandniveau, op basis van laatste jaar vs jaar ervoor.
+    """
     df = df_monthly.copy()
     df["year"] = df["month"].dt.year
     df["month_num"] = df["month"].dt.month
@@ -189,13 +205,23 @@ def generate_insights(yoy_df: pd.DataFrame) -> list[str]:
         insights.append("Nog onvoldoende maanddata voor een YoY-analyse.")
         return insights
 
+    # Omzet YoY
     if "turnover_cur" in yoy_df.columns and "turnover_prev" in yoy_df.columns:
         cur_total = yoy_df["turnover_cur"].sum()
         prev_total = yoy_df["turnover_prev"].sum()
         if prev_total > 0:
             yoy = (cur_total - prev_total) / prev_total * 100
-            insights.append(f"Totale omzet in de gekozen maanden: {yoy:+.1f}% vs vorig jaar.")
+            insights.append(f"Totale omzet over de gekozen maanden: {yoy:+.1f}% vs vorig jaar.")
 
+    # Footfall YoY
+    if "footfall_cur" in yoy_df.columns and "footfall_prev" in yoy_df.columns:
+        cur_f = yoy_df["footfall_cur"].sum()
+        prev_f = yoy_df["footfall_prev"].sum()
+        if prev_f > 0:
+            yoyf = (cur_f - prev_f) / prev_f * 100
+            insights.append(f"Totale footfall over de gekozen maanden: {yoyf:+.1f}% vs vorig jaar.")
+
+    # Capture rate YoY
     if "capture_rate_cur" in yoy_df.columns and "capture_rate_prev" in yoy_df.columns:
         cr_cur = yoy_df["capture_rate_cur"].mean()
         cr_prev = yoy_df["capture_rate_prev"].mean()
@@ -203,13 +229,14 @@ def generate_insights(yoy_df: pd.DataFrame) -> list[str]:
             cr_yoy = (cr_cur - cr_prev) / cr_prev * 100
             if cr_yoy < -5:
                 insights.append(
-                    f"Capture rate is {cr_yoy:.1f}% gedaald vs vorig jaar. Straat is drukker dan jouw winkel; etalage / instore experience onder de loep nemen."
+                    f"Capture rate is ~{cr_yoy:.1f}% gedaald vs vorig jaar – straatdrukte groeit harder dan winkeltraffic."
                 )
             elif cr_yoy > 5:
                 insights.append(
-                    f"Capture rate is {cr_yoy:.1f}% gestegen vs vorig jaar. Je weet meer passanten naar binnen te trekken dan vorig jaar."
+                    f"Capture rate is ~{cr_yoy:.1f}% gestegen vs vorig jaar – je trekt relatief meer passanten naar binnen."
                 )
 
+    # m²-index YoY
     if "turnover_per_sqm_cur" in yoy_df.columns and "turnover_per_sqm_prev" in yoy_df.columns:
         m2_cur = yoy_df["turnover_per_sqm_cur"].mean()
         m2_prev = yoy_df["turnover_per_sqm_prev"].mean()
@@ -217,7 +244,7 @@ def generate_insights(yoy_df: pd.DataFrame) -> list[str]:
             m2_yoy = (m2_cur - m2_prev) / m2_prev * 100
             if m2_yoy < -5:
                 insights.append(
-                    f"Omzet per m² ligt gemiddeld {m2_yoy:.1f}% lager dan vorig jaar. Dit wijst op ruimte- of assortimentsinefficiëntie."
+                    f"Omzet per m² ligt gemiddeld {m2_yoy:.1f}% lager dan vorig jaar – ruimteproductiviteit is afgenomen."
                 )
             elif m2_yoy > 5:
                 insights.append(
@@ -225,18 +252,23 @@ def generate_insights(yoy_df: pd.DataFrame) -> list[str]:
                 )
 
     if not insights:
-        insights.append("De prestaties zijn redelijk stabiel; geen grote uitschieters op maandniveau.")
+        insights.append("De prestaties zijn redelijk stabiel; geen opvallende afwijkingen op maandniveau.")
     return insights
 
+
+# -------------
+# MAIN UI
+# -------------
 
 def main():
     st.title("PFM Retail Performance Copilot – Fase 1")
 
-    # 1. Client selectie via clients.json
+    # --- Retailer selectie via clients.json ---
     clients = load_clients("clients.json")
     clients_df = pd.DataFrame(clients)
     clients_df["label"] = clients_df.apply(
-        lambda r: f"{r['brand']} – {r['name']} (company_id {r['company_id']})", axis=1
+        lambda r: f"{r['brand']} – {r['name']} (company_id {r['company_id']})",
+        axis=1,
     )
 
     st.sidebar.header("Selecteer retailer & winkel")
@@ -245,7 +277,7 @@ def main():
     selected_client = clients_df[clients_df["label"] == client_label].iloc[0].to_dict()
     company_id = int(selected_client["company_id"])
 
-    # 2. Locaties via FastAPI
+    # --- Winkels ophalen via FastAPI ---
     locations_df = get_locations_by_company(company_id)
     if locations_df.empty:
         st.error("Geen winkels gevonden voor deze retailer.")
@@ -266,7 +298,7 @@ def main():
     lat = float(shop_row.get("lat", 0) or 0)
     lon = float(shop_row.get("lon", 0) or 0)
 
-    # Periode
+    # --- Periode ---
     period_choice = st.sidebar.selectbox(
         "Periode",
         ["Laatste 6 maanden", "Laatste 12 maanden", "Huidig jaar"],
@@ -285,11 +317,14 @@ def main():
     start_prev = start_cur.replace(year=start_cur.year - 1)
     end_prev = end_cur.replace(year=end_cur.year - 1)
 
+    # --- Weather & CBS input ---
     weather_location = st.sidebar.text_input(
-        "Weerlocatie", value=f"{lat:.4f},{lon:.4f}" if lat and lon else "Amsterdam,NL"
+        "Weerlocatie",
+        value=f"{lat:.4f},{lon:.4f}" if lat and lon else "Amsterdam,NL",
     )
     postcode4 = st.sidebar.text_input(
-        "CBS postcode (4-cijferig)", value=postcode[:4] if postcode else ""
+        "CBS postcode (4-cijferig)",
+        value=postcode[:4] if postcode else "",
     )
 
     run_btn = st.sidebar.button("Analyseer", type="primary")
@@ -298,8 +333,8 @@ def main():
         st.info("Selecteer retailer & winkel en klik op **Analyseer**.")
         return
 
-    # 3. Data ophalen uit FastAPI (Storescan/Vemcount)
-    with st.spinner("Data ophalen..."):
+    # --- Data ophalen uit FastAPI ---
+    with st.spinner("Data ophalen uit Storescan / FastAPI..."):
         metric_map = {
             "count_in": "footfall",
             "turnover": "turnover",
@@ -327,10 +362,12 @@ def main():
         df_prev_raw = normalize_vemcount_response(resp_prev, metric_map, shop_id)
 
     df_cur = df_cur_raw[
-        (df_cur_raw["date"].dt.date >= start_cur) & (df_cur_raw["date"].dt.date <= end_cur)
+        (df_cur_raw["date"].dt.date >= start_cur)
+        & (df_cur_raw["date"].dt.date <= end_cur)
     ].copy()
     df_prev = df_prev_raw[
-        (df_prev_raw["date"].dt.date >= start_prev) & (df_prev_raw["date"].dt.date <= end_prev)
+        (df_prev_raw["date"].dt.date >= start_prev)
+        & (df_prev_raw["date"].dt.date <= end_prev)
     ].copy()
 
     if df_cur.empty or df_prev.empty:
@@ -340,14 +377,14 @@ def main():
     df_cur = compute_daily_kpis(df_cur)
     df_prev = compute_daily_kpis(df_prev)
 
-    # Weerdata
+    # --- Weerdata ---
     weather_df = pd.DataFrame()
     if weather_location and st.secrets.get("WEATHER_API_KEY", None):
         weather_df = fetch_weather_history(weather_location, start_cur, end_cur)
 
-    # Pathzz – maandniveau
+    # --- Pathzz street traffic (maandniveau) ---
     pathzz_monthly = pd.DataFrame()
-    if lat and lon and st.secrets.get("PATHZZ_API_KEY", None):
+    if lat and lon:
         pathzz_monthly = fetch_monthly_street_traffic(
             lat=lat,
             lon=lon,
@@ -356,12 +393,12 @@ def main():
             radius_m=100,
         )
 
-    # CBS
+    # --- CBS context ---
     cbs_stats = {}
     if postcode4:
         cbs_stats = get_cbs_stats_for_postcode4(postcode4)
 
-    # KPI-cards
+    # --- KPI-cards ---
     st.subheader(f"{selected_client['brand']} – {shop_row['name']}")
 
     col1, col2, col3, col4 = st.columns(4)
@@ -382,12 +419,12 @@ def main():
                 fmt_pct(df_cur["conversion_rate"].mean()),
             )
 
-    # Daily chart
+    # --- Dagelijkse grafiek ---
     st.markdown("### Dagelijkse footfall & omzet")
     daily_chart = df_cur.set_index("date")[["footfall", "turnover"]]
     st.line_chart(daily_chart)
 
-    # Weather overlay (optioneel)
+    # --- Weer vs footfall (optioneel) ---
     if not weather_df.empty:
         st.markdown("#### Neerslag vs footfall (indicatief)")
         m = pd.merge(
@@ -398,7 +435,7 @@ def main():
         ).set_index("date")
         st.line_chart(m)
 
-    # Maandniveau
+    # --- Maandniveau: m²-index & capture rate ---
     st.markdown("### Maandniveau: m²-index & capture rate")
 
     cur_monthly = aggregate_monthly(df_cur, sqm)
@@ -442,11 +479,12 @@ def main():
             tdf["month_cur"] = pd.to_datetime(tdf["month_cur"]).dt.strftime("%Y-%m")
         st.dataframe(tdf, use_container_width=True)
 
+    # --- AI Insights ---
     st.markdown("### AI Insights")
     for insight in generate_insights(yoy_monthly):
         st.markdown(f"- {insight}")
 
-    # CBS context
+    # --- CBS context ---
     if cbs_stats:
         st.markdown("### CBS context (postcodegebied)")
         c1, c2 = st.columns(2)
@@ -457,6 +495,7 @@ def main():
         if "note" in cbs_stats:
             st.caption(cbs_stats["note"])
 
+    # --- Debug ---
     with st.expander("🔧 Debug"):
         st.write("Shop row:", shop_row)
         st.write("Dagdata (cur):", df_cur.head())
