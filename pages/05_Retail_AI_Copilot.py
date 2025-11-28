@@ -12,7 +12,6 @@ from helpers_normalize import normalize_vemcount_response
 from services.cbs_service import get_cbs_stats_for_postcode4
 from services.pathzz_service import fetch_monthly_street_traffic
 
-
 st.set_page_config(
     page_title="PFM Retail Performance Copilot",
     layout="wide"
@@ -64,26 +63,19 @@ def fmt_int(x: float) -> str:
 def get_locations_by_company(company_id: int) -> pd.DataFrame:
     """
     Wrapper rond /company/{company_id}/location van de vemcount-agent.
-    Verwacht response:
-    {
-      "company_id": ...,
-      "onlyActive": true,
-      "locations": [
-        {"id": ..., "name": "...", ...},
-        ...
-      ]
-    }
     """
     url = f"{FASTAPI_BASE_URL.rstrip('/')}/company/{company_id}/location"
+
     resp = requests.get(url, timeout=30)
     resp.raise_for_status()
     data = resp.json()
+
     if isinstance(data, dict) and "locations" in data:
         df = pd.DataFrame(data["locations"])
     else:
         df = pd.DataFrame(data)
-    return df
 
+    return df
 
 @st.cache_data(ttl=600)
 def get_report(
