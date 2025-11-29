@@ -416,49 +416,66 @@ def main():
         st.info("Selecteer retailer & winkel en klik op **Analyseer**.")
         return
 
-    # --- Data ophalen uit FastAPI ---
-    with st.spinner("Data ophalen uit Storescan / FastAPI..."):
-        metric_map = {
-            "count_in": "footfall",
-            "turnover": "turnover",
-            "sales_per_sqm": "sales_per_sqm",
-        }
+# --- Data ophalen uit FastAPI ---
+with st.spinner("Data ophalen uit Storescan / FastAPI..."):
+    # Vemcount-veldnaam -> interne naam
+    metric_map = {
+        "count_in": "footfall",
+        "turnover": "turnover",
+        "sales_per_sqm": "sales_per_sqm",
+    }
 
-        resp_cur = get_report(
-            [shop_id],
-            list(metric_map.keys()),
-            period="this_year",
-            step="day",
-            source="shops",
-            company_id=company_id,
-        )
-        df_cur_raw = normalize_vemcount_response(resp_cur, metric_map, shop_id)
+    # Huidig jaar ophalen
+    resp_cur = get_report(
+        [shop_id],
+        list(metric_map.keys()),
+        period="this_year",
+        step="day",
+        source="shops",
+        company_id=company_id,
+    )
+    df_cur_raw = normalize_vemcount_response(
+        resp_cur,
+        kpi_keys=metric_map.keys(),  # LET OP: géén shop_id hier
+    )
+    df_cur_raw = df_cur_raw.rename(columns=metric_map)
 
-        resp_prev = get_report(
-            [shop_id],
-            list(metric_map.keys()),
-            period="last_year",
-            step="day",
-            source="shops",
-            company_id=company_id,
-        )
-        df_prev_raw = normalize_vemcount_response(resp_prev, metric_map, shop_id)
+    # Vorig jaar ophalen
+    resp_prev = get_report(
+        [shop_id],
+        list(metric_map.keys()),
+        period="last_year",
+        step="day",
+        source="shops",
+        company_id=company_id,
+    )
+    df_prev_raw = normalize_vemcount_response(
+        resp_prev,
+        kpi_keys=metric_map.keys(),
+    )
+    df_prev_raw = df_prev_raw.rename(columns=metric_map)
 
-    df_cur = df_cur_raw[
-        (df_cur_raw["date"].dt.date >= start_cur)
-        & (df_cur_raw["date"].dt.date <= end_cur)
-    ].copy()
-    df_prev = df_prev_raw[
-        (df_prev_raw["date"].dt.date >= start_prev)
-        & (df_prev_raw["date"].dt.date <= end_prev)
-    ].copy()
+# 'date' omzetten naar datetime, anders crasht .dt.date
+if not df_cur_raw.empty:
+    df_cur_raw["date"] = pd.to_datetime(df_cur_raw["date"], errors="coerce")
+if not df_prev_raw.empty:
+    df_prev_raw["date"] = pd.to_datetime(df_prev_raw["date"], errors="coerce")
 
-    if df_cur.empty or df_prev.empty:
-        st.warning("Onvoldoende data in deze periode om YoY te berekenen.")
-        return
+df_cur = df_cur_raw[
+    (df_cur_raw["date"].dt.date >= start_cur)
+    & (df_cur_raw["date"].dt.date <= end_cur)
+].copy()
+df_prev = df_prev_raw[
+    (df_prev_raw["date"].dt.date >= start_prev)
+    & (df_prev_raw["date"].dt.date <= end_prev)
+].copy()
 
-    df_cur = compute_daily_kpis(df_cur)
-    df_prev = compute_daily_kpis(df_prev)
+if df_cur.empty or df_prev.empty:
+    st.warning("Onvoldoende data in deze periode om YoY te berekenen.")
+    return
+
+df_cur = compute_daily_kpis(df_cur)
+df_prev = compute_daily_kpis(df_prev)
 
     # --- Weerdata via Visual Crossing ---
     weather_df = pd.DataFrame()
