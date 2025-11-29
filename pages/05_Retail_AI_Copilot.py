@@ -437,13 +437,20 @@ def main():
     if not df_prev_raw.empty:
         df_prev_raw["date"] = pd.to_datetime(df_prev_raw["date"], errors="coerce")
 
+    # Zorg dat we datetime64[ns] met Timestamp vergelijken (geen .dt.date)
+    start_cur_ts = pd.Timestamp(start_cur)
+    end_cur_ts = pd.Timestamp(end_cur)
+    start_prev_ts = pd.Timestamp(start_prev)
+    end_prev_ts = pd.Timestamp(end_prev)
+
     df_cur = df_cur_raw[
-        (df_cur_raw["date"].dt.date >= start_cur)
-        & (df_cur_raw["date"].dt.date <= end_cur)
+        (df_cur_raw["date"] >= start_cur_ts)
+        & (df_cur_raw["date"] <= end_cur_ts)
     ].copy()
+
     df_prev = df_prev_raw[
-        (df_prev_raw["date"].dt.date >= start_prev)
-        & (df_prev_raw["date"].dt.date <= end_prev)
+        (df_prev_raw["date"] >= start_prev_ts)
+        & (df_prev_raw["date"] <= end_prev_ts)
     ].copy()
 
     if df_cur.empty or df_prev.empty:
