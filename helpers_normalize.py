@@ -46,14 +46,19 @@ def _extract_metrics(data_node: Dict[str, Any], kpi_keys: Iterable[str]) -> Dict
             out[k] = fv
     return out
 
-def normalize_vemcount_response(resp_json: Dict[str, Any],
-                                shop_name_map: Optional[Dict[int, str]] = None,
-                                kpi_keys: Optional[Iterable[str]] = None) -> pd.DataFrame:
+def normalize_vemcount_response(
+    resp_json: Dict[str, Any],
+    shop_name_map: Optional[Dict[int, str]] = None,
+    kpi_keys: Optional[Iterable[str]] = None,
+) -> pd.DataFrame:
     """
     Flatten Vemcount /report-like responses into a tidy DataFrame.
-    Handles both:
-      - day-level: resp["data"]["date_YYYY-MM-DD"][shop_id]["data"]
-      - timestamp-level: resp["data"][bucket][shop_id]["dates"][timestamp]["data"]
+
+    Ondersteunt o.a.:
+      - year/month/day buckets: resp["data"]["date_YYYY-MM-DD"][shop_id]["data"]
+      - week buckets: resp["data"]["this_week" | "last_week"][shop_id]["dates"][timestamp]["data"]
+        waarbij de echte datum in data["dt"] zit ("YYYY-MM-DD HH:MM:SS").
+
     Returns columns: ['date','timestamp','shop_id','shop_name', <metrics...>]
     """
     if not isinstance(resp_json, dict) or "data" not in resp_json:
@@ -65,7 +70,9 @@ def normalize_vemcount_response(resp_json: Dict[str, Any],
     data_block = resp_json.get("data", {})
 
     for bucket_key, shops_dict in data_block.items():
-        # parse ISO date if available in bucket key
+        # voorbeeld:
+        # - "date_2025-11-24"  -> date_str = "2025-11-24"
+        # - "this_week"        -> date_str = None (we pakken dan data["dt"])
         date_str = None
         if isinstance(bucket_key, str) and bucket_key.startswith("date_"):
             date_str = bucket_key.replace("date_", "", 1)
@@ -78,31 +85,69 @@ def normalize_vemcount_response(resp_json: Dict[str, Any],
                 shop_id = int(shop_id_str)
             except Exception:
                 continue
+
             shop_name = shop_name_map.get(shop_id) if shop_name_map else None
 
             if not isinstance(shop_node, dict):
                 continue
 
-            # timestamp-level nodes
+            # ---------- timestamp-level nodes (met "dates") ----------
             if "dates" in shop_node and isinstance(shop_node["dates"], dict):
                 for ts, node in shop_node["dates"].items():
                     data_node = node.get("data", {}) if isinstance(node, dict) else {}
                     metrics = _extract_metrics(data_node, kpi_keys)
                     ts_str = str(ts)
-                    # if timestamp is full ISO, derive date; else keep bucket date
-                    try:
-                        d_iso = datetime.fromisoformat(ts_str.replace(" ", "T")).date().isoformat()
-                    except Exception:
-                        d_iso = date_str
-                    row = {"date": d_iso, "timestamp": ts_str, "shop_id": shop_id, "shop_name": shop_name}
+
+                    # 1) probeer eerst data["dt"] of data["date"] (bv. "2025-11-24 00:00:00")
+                    d_iso = None
+                    dt_raw = data_node.get("dt") or data_node.get("date")
+                    if isinstance(dt_raw, str):
+                        try:
+                            d_iso = datetime.fromisoformat(dt_raw).date().isoformat()
+                        except Exception:
+                            d_iso = None
+
+                    # 2) lukt dat niet? probeer de timestamp-key zelf
+                    if d_iso is None:
+                        try:
+                            d_iso = (
+                                datetime.fromisoformat(ts_str.replace(" ", "T"))
+                                .date()
+                                .isoformat()
+                            )
+                        except Exception:
+                            # 3) laatste fallback: date_str uit bucket (kan None zijn)
+                            d_iso = date_str
+
+                    row = {
+                        "date": d_iso,
+                        "timestamp": ts_str,
+                        "shop_id": shop_id,
+                        "shop_name": shop_name,
+                    }
                     row.update(metrics)
                     rows.append(row)
 
-            # day-level node
+            # ---------- day-level node (zonder "dates") ----------
             if "data" in shop_node and isinstance(shop_node["data"], dict):
                 data_node = shop_node["data"]
                 metrics = _extract_metrics(data_node, kpi_keys)
-                row = {"date": date_str, "timestamp": None, "shop_id": shop_id, "shop_name": shop_name}
+
+                # idem: probeer eerst data["dt"], dan bucket-key
+                d_iso = date_str
+                dt_raw = data_node.get("dt") or data_node.get("date")
+                if isinstance(dt_raw, str):
+                    try:
+                        d_iso = datetime.fromisoformat(dt_raw).date().isoformat()
+                    except Exception:
+                        pass
+
+                row = {
+                    "date": d_iso,
+                    "timestamp": None,
+                    "shop_id": shop_id,
+                    "shop_name": shop_name,
+                }
                 row.update(metrics)
                 rows.append(row)
 
@@ -112,13 +157,18 @@ def normalize_vemcount_response(resp_json: Dict[str, Any],
     df = pd.DataFrame(rows)
 
     # order columns: id cols first, then KPIs
-    id_cols = ["date","timestamp","shop_id","shop_name"]
+    id_cols = ["date", "timestamp", "shop_id", "shop_name"]
     present_kpis = [k for k in (kpi_keys or []) if k in df.columns]
     extra_kpis = [c for c in df.columns if c not in id_cols and c not in present_kpis]
     df = df.reindex(columns=id_cols + present_kpis + extra_kpis)
 
     # friendly sort
-    df = df.sort_values(by=["date","shop_id","timestamp"], kind="stable", na_position="last").reset_index(drop=True)
+    df = df.sort_values(
+        by=["date", "shop_id", "timestamp"],
+        kind="stable",
+        na_position="last",
+    ).reset_index(drop=True)
+
     return df
 
 def attach_shop_names(df: pd.DataFrame, shop_name_map: Dict[int,str]) -> pd.DataFrame:
