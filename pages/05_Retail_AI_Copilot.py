@@ -5,7 +5,7 @@ import pandas as pd
 import requests
 import streamlit as st
 
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from helpers_clients import load_clients
 from helpers_normalize import normalize_vemcount_response
@@ -17,7 +17,10 @@ st.set_page_config(
     layout="wide"
 )
 
-# Bepaal dynamisch de juiste base URLs op basis van API_URL in secrets.
+# ----------------------
+# API URL / secrets setup
+# ----------------------
+
 # In jouw setup wijst API_URL naar /get-report, omdat andere tools daar direct op praten.
 # Voor deze Copilot splitsen we 'm op:
 # - REPORT_URL = volledige /get-report URL (voor metrics)
@@ -63,15 +66,6 @@ def fmt_int(x: float) -> str:
 def get_locations_by_company(company_id: int) -> pd.DataFrame:
     """
     Wrapper rond /company/{company_id}/location van de vemcount-agent.
-    Verwacht response:
-    {
-      "company_id": ...,
-      "onlyActive": true,
-      "locations": [
-        {"id": ..., "name": "...", "city": "...", "postcode": "...", "lat": ..., "lon": ..., "sqm": ...},
-        ...
-      ]
-    }
     """
     url = f"{FASTAPI_BASE_URL.rstrip('/')}/company/{company_id}/location"
 
@@ -359,11 +353,7 @@ def main():
     shop_row = locations_df[locations_df["label"] == shop_label].iloc[0].to_dict()
     shop_id = int(shop_row["id"])
     sqm = float(shop_row.get("sqm", 0) or 0)
-
-    # optionele extra velden
-    postcode = shop_row.get("postcode", "") or shop_row.get("postal_code", "")
-    city = shop_row.get("city", "") or shop_row.get("town", "")
-    country = shop_row.get("country", "NL") or "NL"
+    postcode = shop_row.get("postcode", "")
     lat = float(shop_row.get("lat", 0) or 0)
     lon = float(shop_row.get("lon", 0) or 0)
 
@@ -387,27 +377,13 @@ def main():
     end_prev = end_cur.replace(year=end_cur.year - 1)
 
     # --- Weather & CBS input ---
-    # Slimme default voor weerlocatie:
-    # 1) lat/lon → "52.21,5.96"
-    # 2) city,country → "Apeldoorn,NL"
-    # 3) postcode,NL → "7311,NL"
-    # 4) fallback: Amsterdam,NL
-    if lat and lon:
-        default_weather_loc = f"{lat:.4f},{lon:.4f}"
-    elif city:
-        default_weather_loc = f"{city},{country}"
-    elif postcode:
-        default_weather_loc = f"{postcode},{country}"
-    else:
-        default_weather_loc = "Amsterdam,NL"
-
     weather_location = st.sidebar.text_input(
         "Weerlocatie",
-        value=default_weather_loc,
+        value=f"{lat:.4f},{lon:.4f}" if lat and lon else "Amsterdam,NL",
     )
     postcode4 = st.sidebar.text_input(
         "CBS postcode (4-cijferig)",
-        value=(postcode or "")[:4] if postcode else "",
+        value=postcode[:4] if postcode else "",
     )
 
     run_btn = st.sidebar.button("Analyseer", type="primary")
@@ -416,66 +392,66 @@ def main():
         st.info("Selecteer retailer & winkel en klik op **Analyseer**.")
         return
 
-# --- Data ophalen uit FastAPI ---
-with st.spinner("Data ophalen uit Storescan / FastAPI..."):
-    # Vemcount-veldnaam -> interne naam
-    metric_map = {
-        "count_in": "footfall",
-        "turnover": "turnover",
-        "sales_per_sqm": "sales_per_sqm",
-    }
+    # --- Data ophalen uit FastAPI ---
+    with st.spinner("Data ophalen uit Storescan / FastAPI..."):
+        # Vemcount-veldnaam -> interne naam
+        metric_map = {
+            "count_in": "footfall",
+            "turnover": "turnover",
+            "sales_per_sqm": "sales_per_sqm",
+        }
 
-    # Huidig jaar ophalen
-    resp_cur = get_report(
-        [shop_id],
-        list(metric_map.keys()),
-        period="this_year",
-        step="day",
-        source="shops",
-        company_id=company_id,
-    )
-    df_cur_raw = normalize_vemcount_response(
-        resp_cur,
-        kpi_keys=metric_map.keys(),  # LET OP: géén shop_id hier
-    )
-    df_cur_raw = df_cur_raw.rename(columns=metric_map)
+        # Huidig jaar ophalen
+        resp_cur = get_report(
+            [shop_id],
+            list(metric_map.keys()),
+            period="this_year",
+            step="day",
+            source="shops",
+            company_id=company_id,
+        )
+        df_cur_raw = normalize_vemcount_response(
+            resp_cur,
+            kpi_keys=metric_map.keys(),
+        )
+        df_cur_raw = df_cur_raw.rename(columns=metric_map)
 
-    # Vorig jaar ophalen
-    resp_prev = get_report(
-        [shop_id],
-        list(metric_map.keys()),
-        period="last_year",
-        step="day",
-        source="shops",
-        company_id=company_id,
-    )
-    df_prev_raw = normalize_vemcount_response(
-        resp_prev,
-        kpi_keys=metric_map.keys(),
-    )
-    df_prev_raw = df_prev_raw.rename(columns=metric_map)
+        # Vorig jaar ophalen
+        resp_prev = get_report(
+            [shop_id],
+            list(metric_map.keys()),
+            period="last_year",
+            step="day",
+            source="shops",
+            company_id=company_id,
+        )
+        df_prev_raw = normalize_vemcount_response(
+            resp_prev,
+            kpi_keys=metric_map.keys(),
+        )
+        df_prev_raw = df_prev_raw.rename(columns=metric_map)
 
-# 'date' omzetten naar datetime, anders crasht .dt.date
-if not df_cur_raw.empty:
-    df_cur_raw["date"] = pd.to_datetime(df_cur_raw["date"], errors="coerce")
-if not df_prev_raw.empty:
-    df_prev_raw["date"] = pd.to_datetime(df_prev_raw["date"], errors="coerce")
+    # Zorg dat 'date' als datetime wordt geïnterpreteerd
+    if not df_cur_raw.empty:
+        df_cur_raw["date"] = pd.to_datetime(df_cur_raw["date"], errors="coerce")
+    if not df_prev_raw.empty:
+        df_prev_raw["date"] = pd.to_datetime(df_prev_raw["date"], errors="coerce")
 
-df_cur = df_cur_raw[
-    (df_cur_raw["date"].dt.date >= start_cur)
-    & (df_cur_raw["date"].dt.date <= end_cur)
-].copy()
-df_prev = df_prev_raw[
-    (df_prev_raw["date"].dt.date >= start_prev)
-    & (df_prev_raw["date"].dt.date <= end_prev)
-].copy()
+    df_cur = df_cur_raw[
+        (df_cur_raw["date"].dt.date >= start_cur)
+        & (df_cur_raw["date"].dt.date <= end_cur)
+    ].copy()
+    df_prev = df_prev_raw[
+        (df_prev_raw["date"].dt.date >= start_prev)
+        & (df_prev_raw["date"].dt.date <= end_prev)
+    ].copy()
 
-if df_cur.empty or df_prev.empty:
-    st.warning("Onvoldoende data in deze periode om YoY te berekenen.")
-    return
+    if df_cur.empty or df_prev.empty:
+        st.warning("Onvoldoende data in deze periode om YoY te berekenen.")
+        return
 
-df_cur = compute_daily_kpis(df_cur)
-df_prev = compute_daily_kpis(df_prev)
+    df_cur = compute_daily_kpis(df_cur)
+    df_prev = compute_daily_kpis(df_prev)
 
     # --- Weerdata via Visual Crossing ---
     weather_df = pd.DataFrame()
