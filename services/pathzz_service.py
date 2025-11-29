@@ -1,151 +1,83 @@
 # services/pathzz_service.py
+from __future__ import annotations
 
-from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any
-
+from typing import Optional
 import pandas as pd
-import requests
-import streamlit as st
 
-PATHZZ_API_KEY = st.secrets.get("PATHZZ_API_KEY", None)
-PATHZZ_BASE_URL = st.secrets.get("PATHZZ_BASE_URL", "https://api.pathzz.com")
-
-# Jouw Pathzz weekly export
-SAMPLE_PATHZZ_FILE = Path("data/pathzz_sample_weekly.csv")
-
-
-def _normalize_number(val) -> float:
-    """
-    Converteert Pathzz-getallen zoals '16.725' of '16,725' naar een getal.
-    We interpreteren 16.725 als 16725 (duizendtallen), niet als 16,7.
-    """
-    if pd.isna(val):
-        return 0.0
-    s = str(val).strip()
-    # duizendtalseparators eruit
-    s = s.replace(".", "").replace(",", "")
-    if not s:
-        return 0.0
-    return float(s)
+# We verwachten in /data een file zoals:
+# pathzz_sample_weekly.csv met kolommen:
+#   Week      -> "2024-01-07 To 2024-01-13"
+#   Visits    -> 17578
+BASE_DIR = Path(__file__).resolve().parent.parent
+DATA_DIR = BASE_DIR / "data"
+DEFAULT_CSV = DATA_DIR / "pathzz_sample_weekly.csv"
 
 
-def _load_sample_pathzz() -> pd.DataFrame:
-    """
-    Laadt een lokale Pathzz-sample dataset.
+def _load_pathzz_weekly(csv_path: Optional[str] = None) -> pd.DataFrame:
+    """Leest de Pathzz weekly CSV en geeft een DataFrame met week_start & visits."""
+    path = Path(csv_path) if csv_path else DEFAULT_CSV
+    if not path.exists():
+        return pd.DataFrame()
 
-    Ondersteunt:
-    - Weekly CSV met:
-        'Week' + 'Visits'
-      waarbij 'Week' strings heeft als:
-        '2023-12-31 To 2024-01-06'
+    df = pd.read_csv(path)
 
-    Geeft terug:
-    - DataFrame met kolommen: ['month', 'street_footfall']
-    """
-    if not SAMPLE_PATHZZ_FILE.exists():
-        raise FileNotFoundError(
-            f"Sample Pathzz-bestand niet gevonden: {SAMPLE_PATHZZ_FILE.resolve()}"
-        )
+    # Kolomnamen robuust oppakken
+    cols = {c.lower(): c for c in df.columns}
+    week_col = cols.get("week") or cols.get("week comparison")
+    visits_col = cols.get("visits") or cols.get("visit") or cols.get("volume")
 
-    df = pd.read_csv(SAMPLE_PATHZZ_FILE)
+    if not week_col or not visits_col:
+        return pd.DataFrame()
 
-    # CASE 1: als je later zelf al 'month' + 'street_footfall' maakt
-    if "month" in df.columns and "street_footfall" in df.columns:
-        df["month"] = pd.to_datetime(df["month"])
-        return df[["month", "street_footfall"]]
-
-    # CASE 2: Weekly structuur: 'Week' + 'Visits'
-    if "Week" in df.columns and "Visits" in df.columns:
-        # parse week_start: tekst vóór 'To'
-        df["week_start"] = (
-            df["Week"]
-            .astype(str)
-            .str.split("To")
-            .str[0]
-            .str.strip()
-            .pipe(pd.to_datetime, errors="coerce")
-        )
-
-        df["street_footfall"] = df["Visits"].apply(_normalize_number)
-
-        # week_start -> maand
-        df["month"] = df["week_start"].dt.to_period("M").dt.to_timestamp()
-
-        monthly = (
-            df.groupby("month", as_index=False)["street_footfall"]
-            .sum()
-            .sort_values("month")
-            .reset_index(drop=True)
-        )
-        return monthly
-
-    raise ValueError(
-        "Onbekende Pathzz-sample structuur. Verwacht óf 'month' + 'street_footfall', óf 'Week' + 'Visits'."
+    df = df[[week_col, visits_col]].rename(
+        columns={week_col: "week_raw", visits_col: "visits"}
     )
+
+    # "2024-01-07 To 2024-01-13" → startdatum pakken
+    df["week_start"] = (
+        df["week_raw"]
+        .astype(str)
+        .str.split("To")
+        .str[0]
+        .str.strip()
+    )
+    df["week_start"] = pd.to_datetime(df["week_start"], errors="coerce")
+    df = df.dropna(subset=["week_start"])
+
+    return df
 
 
 def fetch_monthly_street_traffic(
     lat: float,
     lon: float,
-    start_date: datetime,
-    end_date: datetime,
+    start_date,
+    end_date,
     radius_m: int = 100,
+    csv_path: Optional[str] = None,
 ) -> pd.DataFrame:
     """
-    Haalt maandelijkse straatdrukte op.
-
-    - Als PATHZZ_API_KEY aanwezig is: roept de echte Pathzz API aan (placeholder endpoint).
-    - Als PATHZZ_API_KEY ontbreekt: gebruikt een lokale sample dataset.
+    Simpele wrapper voor de Copilot:
+    - Negeert lat/lon/radius (we gebruiken 1 vaste CSV voor de pilot)
+    - Filtert de Pathzz-weken op de opgegeven periode
+    - Aggregateert naar maandniveau → kolommen: ['month', 'street_footfall']
     """
+    df = _load_pathzz_weekly(csv_path)
+    if df.empty:
+        return df
 
-    # MODE B – GEEN API KEY: sampledataset
-    if PATHZZ_API_KEY is None:
-        st.warning(
-            "PATHZZ_API_KEY ontbreekt – gebruik Pathzz sample dataset als placeholder.",
-            icon="⚠️",
-        )
-        df = _load_sample_pathzz()
-        mask = (df["month"].dt.date >= start_date.date()) & (
-            df["month"].dt.date <= end_date.date()
-        )
-        return df.loc[mask].reset_index(drop=True)
+    start_date = pd.to_datetime(start_date).normalize()
+    end_date = pd.to_datetime(end_date).normalize()
 
-    # MODE A – LIVE API CALL (placeholder; pas aan zodra jullie Pathzz-API gebruiken)
-    url = f"{PATHZZ_BASE_URL.rstrip('/')}/v1/street-traffic-monthly"
-    headers = {"Authorization": f"Bearer {PATHZZ_API_KEY}"}
-    params = {
-        "lat": lat,
-        "lon": lon,
-        "radius": radius_m,
-        "start": start_date.strftime("%Y-%m-%d"),
-        "end": end_date.strftime("%Y-%m-%d"),
-        "aggregation": "month",
-    }
+    mask = (df["week_start"] >= start_date) & (df["week_start"] <= end_date)
+    df = df.loc[mask].copy()
+    if df.empty:
+        return df
 
-    resp = requests.get(url, headers=headers, params=params, timeout=60)
-    resp.raise_for_status()
-    data: Dict[str, Any] = resp.json()
-
-    if "data" in data:
-        df = pd.DataFrame(data["data"])
-    else:
-        df = pd.DataFrame(data)
-
-    if "month" not in df.columns:
-        raise ValueError("Pathzz-response mist 'month'-kolom, pas mapping in pathzz_service aan.")
-
-    df["month"] = pd.to_datetime(df["month"])
-
-    if "street_footfall" not in df.columns:
-        if "visits" in df.columns:
-            df = df.rename(columns={"visits": "street_footfall"})
-        else:
-            raise ValueError(
-                "Pathzz-response mist 'street_footfall' (of 'visits'), pas mapping in pathzz_service aan."
-            )
-
-    mask = (df["month"].dt.date >= start_date.date()) & (
-        df["month"].dt.date <= end_date.date()
+    df["month"] = df["week_start"].dt.to_period("M").dt.to_timestamp()
+    monthly = (
+        df.groupby("month", as_index=False)["visits"]
+        .sum()
+        .rename(columns={"visits": "street_footfall"})
     )
-    return df.loc[mask, ["month", "street_footfall"]].reset_index(drop=True)
+    return monthly
