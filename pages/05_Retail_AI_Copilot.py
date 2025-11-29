@@ -63,6 +63,15 @@ def fmt_int(x: float) -> str:
 def get_locations_by_company(company_id: int) -> pd.DataFrame:
     """
     Wrapper rond /company/{company_id}/location van de vemcount-agent.
+    Verwacht response:
+    {
+      "company_id": ...,
+      "onlyActive": true,
+      "locations": [
+        {"id": ..., "name": "...", "city": "...", "postcode": "...", "lat": ..., "lon": ..., "sqm": ...},
+        ...
+      ]
+    }
     """
     url = f"{FASTAPI_BASE_URL.rstrip('/')}/company/{company_id}/location"
 
@@ -76,6 +85,7 @@ def get_locations_by_company(company_id: int) -> pd.DataFrame:
         df = pd.DataFrame(data)
 
     return df
+
 
 @st.cache_data(ttl=600)
 def get_report(
@@ -110,6 +120,7 @@ def get_report(
     resp = requests.post(REPORT_URL, params=params, timeout=60)
     resp.raise_for_status()
     return resp.json()
+
 
 # -------------
 # Weather helper (Visual Crossing)
@@ -348,7 +359,11 @@ def main():
     shop_row = locations_df[locations_df["label"] == shop_label].iloc[0].to_dict()
     shop_id = int(shop_row["id"])
     sqm = float(shop_row.get("sqm", 0) or 0)
-    postcode = shop_row.get("postcode", "")
+
+    # optionele extra velden
+    postcode = shop_row.get("postcode", "") or shop_row.get("postal_code", "")
+    city = shop_row.get("city", "") or shop_row.get("town", "")
+    country = shop_row.get("country", "NL") or "NL"
     lat = float(shop_row.get("lat", 0) or 0)
     lon = float(shop_row.get("lon", 0) or 0)
 
@@ -372,13 +387,27 @@ def main():
     end_prev = end_cur.replace(year=end_cur.year - 1)
 
     # --- Weather & CBS input ---
+    # Slimme default voor weerlocatie:
+    # 1) lat/lon → "52.21,5.96"
+    # 2) city,country → "Apeldoorn,NL"
+    # 3) postcode,NL → "7311,NL"
+    # 4) fallback: Amsterdam,NL
+    if lat and lon:
+        default_weather_loc = f"{lat:.4f},{lon:.4f}"
+    elif city:
+        default_weather_loc = f"{city},{country}"
+    elif postcode:
+        default_weather_loc = f"{postcode},{country}"
+    else:
+        default_weather_loc = "Amsterdam,NL"
+
     weather_location = st.sidebar.text_input(
         "Weerlocatie",
-        value=f"{lat:.4f},{lon:.4f}" if lat and lon else "Amsterdam,NL",
+        value=default_weather_loc,
     )
     postcode4 = st.sidebar.text_input(
         "CBS postcode (4-cijferig)",
-        value=postcode[:4] if postcode else "",
+        value=(postcode or "")[:4] if postcode else "",
     )
 
     run_btn = st.sidebar.button("Analyseer", type="primary")
