@@ -462,9 +462,10 @@ def main():
         start_prev, end_prev = get_quarter_range(prev_y, prev_start_month)
 
     # --- Weather & CBS input ---
+    default_city = shop_row.get("city") or "Amsterdam"
     weather_location = st.sidebar.text_input(
         "Weerlocatie",
-        value=f"{lat:.4f},{lon:.4f}" if lat and lon else "Amsterdam,NL",
+        value=f"{default_city},NL",
     )
     postcode4 = st.sidebar.text_input(
         "CBS postcode (4-cijferig)",
@@ -604,13 +605,14 @@ def main():
 
     # --- Weer vs footfall (optioneel) ---
     if not weather_df.empty:
-        st.markdown("#### Neerslag vs footfall (indicatief)")
+        st.markdown("#### Weer vs footfall (indicatief)")
         m = pd.merge(
             df_cur[["date", "footfall"]],
-            weather_df[["date", "precip"]],
+            weather_df[["date", "temp", "precip"]],
             on="date",
             how="left",
         ).set_index("date")
+        # toont 3 lijnen: footfall, temperatuur, neerslag
         st.line_chart(m)
 
     # Voor nu: maandniveau / capture-rate laten we zoals eerder (of later verfijnen),
