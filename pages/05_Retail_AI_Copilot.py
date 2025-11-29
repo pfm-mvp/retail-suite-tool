@@ -80,6 +80,7 @@ def get_locations_by_company(company_id: int) -> pd.DataFrame:
 
     return df
 
+
 @st.cache_data(ttl=600)
 def get_report(
     shop_ids,
@@ -112,6 +113,7 @@ def get_report(
     resp = requests.post(REPORT_URL, params=params, timeout=60)
     resp.raise_for_status()
     return resp.json()
+
 
 # -------------
 # Weather helper (Visual Crossing)
@@ -215,101 +217,6 @@ def compute_capture_rate(store_monthly: pd.DataFrame, street_monthly: pd.DataFra
 
     return merged
 
-
-def compute_yoy_monthly(df_monthly: pd.DataFrame) -> pd.DataFrame:
-    """
-    YoY op maandniveau, op basis van laatste jaar vs jaar ervoor.
-    """
-    df = df_monthly.copy()
-    df["year"] = df["month"].dt.year
-    df["month_num"] = df["month"].dt.month
-
-    cur_year = df["year"].max()
-    prev_year = cur_year - 1
-
-    cur = df[df["year"] == cur_year]
-    prev = df[df["year"] == prev_year]
-
-    if cur.empty or prev.empty:
-        return df_monthly
-
-    merged = pd.merge(
-        cur,
-        prev,
-        on="month_num",
-        how="left",
-        suffixes=("_cur", "_prev"),
-    )
-
-    for col in ["footfall", "turnover", "capture_rate", "turnover_per_sqm"]:
-        cur_col = f"{col}_cur"
-        prev_col = f"{col}_prev"
-        yoy_col = f"{col}_yoy_pct"
-        if cur_col in merged.columns and prev_col in merged.columns:
-            merged[yoy_col] = np.where(
-                merged[prev_col] > 0,
-                (merged[cur_col] - merged[prev_col]) / merged[prev_col] * 100,
-                np.nan,
-            )
-
-    return merged
-
-
-def generate_insights(yoy_df: pd.DataFrame) -> list[str]:
-    insights: list[str] = []
-    if yoy_df.empty:
-        insights.append("Nog onvoldoende maanddata voor een YoY-analyse.")
-        return insights
-
-    # Omzet YoY
-    if "turnover_cur" in yoy_df.columns and "turnover_prev" in yoy_df.columns:
-        cur_total = yoy_df["turnover_cur"].sum()
-        prev_total = yoy_df["turnover_prev"].sum()
-        if prev_total > 0:
-            yoy = (cur_total - prev_total) / prev_total * 100
-            insights.append(f"Totale omzet over de gekozen maanden: {yoy:+.1f}% vs vorig jaar.")
-
-    # Footfall YoY
-    if "footfall_cur" in yoy_df.columns and "footfall_prev" in yoy_df.columns:
-        cur_f = yoy_df["footfall_cur"].sum()
-        prev_f = yoy_df["footfall_prev"].sum()
-        if prev_f > 0:
-            yoyf = (cur_f - prev_f) / prev_f * 100
-            insights.append(f"Totale footfall over de gekozen maanden: {yoyf:+.1f}% vs vorig jaar.")
-
-    # Capture rate YoY
-    if "capture_rate_cur" in yoy_df.columns and "capture_rate_prev" in yoy_df.columns:
-        cr_cur = yoy_df["capture_rate_cur"].mean()
-        cr_prev = yoy_df["capture_rate_prev"].mean()
-        if pd.notna(cr_cur) and pd.notna(cr_prev) and cr_prev > 0:
-            cr_yoy = (cr_cur - cr_prev) / cr_prev * 100
-            if cr_yoy < -5:
-                insights.append(
-                    f"Capture rate is ~{cr_yoy:.1f}% gedaald vs vorig jaar – straatdrukte groeit harder dan winkeltraffic."
-                )
-            elif cr_yoy > 5:
-                insights.append(
-                    f"Capture rate is ~{cr_yoy:.1f}% gestegen vs vorig jaar – je trekt relatief meer passanten naar binnen."
-                )
-
-    # m²-index YoY
-    if "turnover_per_sqm_cur" in yoy_df.columns and "turnover_per_sqm_prev" in yoy_df.columns:
-        m2_cur = yoy_df["turnover_per_sqm_cur"].mean()
-        m2_prev = yoy_df["turnover_per_sqm_prev"].mean()
-        if m2_prev and m2_prev > 0:
-            m2_yoy = (m2_cur - m2_prev) / m2_prev * 100
-            if m2_yoy < -5:
-                insights.append(
-                    f"Omzet per m² ligt gemiddeld {m2_yoy:.1f}% lager dan vorig jaar – ruimteproductiviteit is afgenomen."
-                )
-            elif m2_yoy > 5:
-                insights.append(
-                    f"Omzet per m² ligt gemiddeld {m2_yoy:.1f}% hoger dan vorig jaar – sterke verbetering in ruimteproductiviteit."
-                )
-
-    if not insights:
-        insights.append("De prestaties zijn redelijk stabiel; geen opvallende afwijkingen op maandniveau.")
-    return insights
 
 # -------------
 # MAIN UI
@@ -548,10 +455,34 @@ def main():
             radius_m=100,
         )
 
-    # --- CBS context ---
+    # --- CBS context (data ophalen) ---
     cbs_stats = {}
     if postcode4:
         cbs_stats = get_cbs_stats_for_postcode4(postcode4)
+
+    # --- Maandniveau + capture rate (voor KPI + tabel) ---
+    cur_monthly = pd.DataFrame()
+    prev_monthly = pd.DataFrame()
+    cur_capture = pd.DataFrame()
+    prev_capture = pd.DataFrame()
+    avg_capture_cur = None
+    avg_capture_prev = None
+
+    if not pathzz_monthly.empty:
+        if not df_cur.empty:
+            cur_monthly = aggregate_monthly(df_cur, sqm)
+        if not df_prev.empty:
+            prev_monthly = aggregate_monthly(df_prev, sqm)
+
+        if not cur_monthly.empty:
+            cur_capture = compute_capture_rate(cur_monthly, pathzz_monthly)
+            if "capture_rate" in cur_capture.columns:
+                avg_capture_cur = cur_capture["capture_rate"].mean()
+
+        if not prev_monthly.empty:
+            prev_capture = compute_capture_rate(prev_monthly, pathzz_monthly)
+            if "capture_rate" in prev_capture.columns:
+                avg_capture_prev = prev_capture["capture_rate"].mean()
 
     # --- KPI-cards met vergelijking vorige periode ---
     st.subheader(f"{selected_client['brand']} – {shop_row['name']}")
@@ -594,8 +525,21 @@ def main():
             value = f"€ {spv_cur:.2f}".replace(".", ",") if pd.notna(spv_cur) else "-"
             st.metric("Gem. besteding/visitor", value, delta=spv_delta)
     with col4:
-        if "conversion_rate" in df_cur.columns:
-            st.metric("Gem. conversie", fmt_pct(conv_cur) if pd.notna(conv_cur) else "-", delta=conv_delta)
+        # Als Pathzz beschikbaar is, laten we capture rate zien; anders conversie
+        if avg_capture_cur is not None and not pd.isna(avg_capture_cur) and avg_capture_prev not in (None, 0):
+            st.metric(
+                "Gem. capture rate",
+                fmt_pct(avg_capture_cur),
+                delta=f"{((avg_capture_cur - avg_capture_prev) / avg_capture_prev * 100):+.1f}%"
+                if avg_capture_prev not in (None, 0)
+                else None,
+            )
+        elif "conversion_rate" in df_cur.columns:
+            st.metric(
+                "Gem. conversie",
+                fmt_pct(conv_cur) if pd.notna(conv_cur) else "-",
+                delta=conv_delta,
+            )
 
     # --- Dagelijkse grafiek ---
     st.markdown("### Dagelijkse footfall & omzet")
@@ -615,11 +559,51 @@ def main():
         # toont 3 lijnen: footfall, temperatuur, neerslag
         st.line_chart(m)
 
-    # Voor nu: maandniveau / capture-rate laten we zoals eerder (of later verfijnen),
-    # maar je hebt nu in elk geval:
-    # - Periode-selectie
-    # - Vergelijking met vorige periode
-    # - KPI-delta's in de cards
+    # --- Straatdrukte & capture rate (maandniveau) ---
+    if not pathzz_monthly.empty and not cur_capture.empty and "street_footfall" in cur_capture.columns:
+        st.markdown("### Straatdrukte & capture rate (maandniveau)")
+        cap_view = cur_capture[["month", "street_footfall", "footfall", "capture_rate"]].copy()
+        cap_view["month"] = pd.to_datetime(cap_view["month"]).dt.strftime("%Y-%m")
+        cap_view = cap_view.rename(
+            columns={
+                "street_footfall": "Street footfall",
+                "footfall": "Store footfall",
+                "capture_rate": "Capture rate (%)",
+            }
+        )
+        st.dataframe(cap_view, use_container_width=True)
+
+    # --- AI Insights (lichte interpretatie huidige vs vorige periode) ---
+    st.markdown("### AI Insights (huidige vs vorige periode)")
+    insights = []
+    if foot_delta is not None:
+        insights.append(f"Footfall veranderde met {foot_delta} vs de vorige periode.")
+    if turn_delta is not None:
+        insights.append(f"Omzet veranderde met {turn_delta} vs de vorige periode.")
+    if spv_delta is not None:
+        insights.append(f"Gemiddelde besteding per bezoeker veranderde met {spv_delta}.")
+    if conv_delta is not None and avg_capture_cur is None:
+        insights.append(f"Gemiddelde conversie veranderde met {conv_delta}.")
+    if avg_capture_cur is not None and avg_capture_prev not in (None, 0):
+        cap_delta_val = (avg_capture_cur - avg_capture_prev) / avg_capture_prev * 100
+        insights.append(
+            f"Capture rate veranderde met {cap_delta_val:+.1f}% vs de vorige periode."
+        )
+    if not insights:
+        insights.append("Nog onvoldoende data om een goede vergelijking te maken met de vorige periode.")
+    for txt in insights:
+        st.markdown(f"- {txt}")
+
+    # --- CBS context ---
+    if cbs_stats:
+        st.markdown("### CBS context (postcodegebied)")
+        c1, c2 = st.columns(2)
+        if "avg_income_index" in cbs_stats:
+            c1.metric("Inkomensindex (NL = 100)", cbs_stats["avg_income_index"])
+        if "population_density_index" in cbs_stats:
+            c2.metric("Bevolkingsdichtheid-index", cbs_stats["population_density_index"])
+        if "note" in cbs_stats:
+            st.caption(cbs_stats["note"])
 
     # --- Debug ---
     with st.expander("🔧 Debug"):
@@ -631,6 +615,7 @@ def main():
         st.write("Dagdata (cur):", df_cur.head())
         st.write("Dagdata (prev):", df_prev.head())
         st.write("Pathzz monthly:", pathzz_monthly.head())
+        st.write("cur_capture:", cur_capture.head())
         st.write("CBS stats:", cbs_stats)
         st.write("Weather df:", weather_df.head())
 
