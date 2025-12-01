@@ -10,7 +10,47 @@ from datetime import datetime, timedelta
 from helpers_clients import load_clients
 from helpers_normalize import normalize_vemcount_response
 from services.cbs_service import get_cbs_stats_for_postcode4
-from services.pathzz_service import fetch_monthly_street_traffic  # gebruikt sample weekly CSV
+# Probeer de service-import; als die er niet is, gebruik een lokale CSV-loader
+try:
+    from services.pathzz_service import fetch_monthly_street_traffic  # gebruikt sample weekly CSV
+except Exception:
+    def fetch_monthly_street_traffic(start_date, end_date):
+        """
+        Fallback: lees demo-straattraffic uit data/pathzz_sample_weekly.csv
+
+        CSV-structuur:
+        Week;Visits
+        2025-11-02 To 2025-11-08;20000
+        ...
+
+        We geven een DataFrame terug met:
+        - week_start (datetime)
+        - street_footfall (int/float)
+        """
+        csv_path = "data/pathzz_sample_weekly.csv"
+        try:
+            df = pd.read_csv(csv_path, sep=";")
+        except Exception:
+            return pd.DataFrame()
+
+        # Kolommen hernoemen
+        df = df.rename(columns={"Week": "week", "Visits": "street_footfall"})
+
+        # "2025-11-02 To 2025-11-08" → 2025-11-02
+        def _parse_week_start(s):
+            if isinstance(s, str) and "To" in s:
+                return pd.to_datetime(s.split("To")[0].strip(), errors="coerce")
+            return pd.NaT
+
+        df["week_start"] = df["week"].apply(_parse_week_start)
+        df = df.dropna(subset=["week_start"])
+
+        # Filter op aangevraagde periode
+        start = pd.to_datetime(start_date)
+        end = pd.to_datetime(end_date)
+        df = df[(df["week_start"] >= start) & (df["week_start"] <= end)]
+
+        return df[["week_start", "street_footfall"]].reset_index(drop=True)
 
 st.set_page_config(
     page_title="PFM Retail Performance Copilot",
