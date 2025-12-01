@@ -20,12 +20,12 @@ except Exception:
 
         CSV-structuur:
         Week;Visits
-        2025-11-02 To 2025-11-08;20000
+        2025-10-05 To 2025-10-11;11.613  (→ 11613)
         ...
 
-        We geven een DataFrame terug met:
+        Return:
         - week_start (datetime)
-        - street_footfall (int/float)
+        - street_footfall (float)
         """
         csv_path = "data/pathzz_sample_weekly.csv"
         try:
@@ -36,7 +36,16 @@ except Exception:
         # Kolommen hernoemen
         df = df.rename(columns={"Week": "week", "Visits": "street_footfall"})
 
-        # "2025-11-02 To 2025-11-08" → 2025-11-02
+        # Visits: "11.613" → "11613" → 11613.0
+        df["street_footfall"] = (
+            df["street_footfall"]
+            .astype(str)
+            .str.replace(".", "", regex=False)   # punt = duizendscheiding
+            .str.replace(",", ".", regex=False)  # just in case er komma's staan
+            .astype(float)
+        )
+
+        # "2025-10-05 To 2025-10-11" → 2025-10-05
         def _parse_week_start(s):
             if isinstance(s, str) and "To" in s:
                 return pd.to_datetime(s.split("To")[0].strip(), errors="coerce")
