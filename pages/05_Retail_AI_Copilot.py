@@ -455,6 +455,72 @@ def main():
             radius_m=100,
         )
 
+    # --- Straatdrukte & capture rate (Pathzz demo) ---
+    if not pathzz_monthly.empty:
+        st.markdown("### Straatdrukte vs winkeltraffic (Pathzz demo)")
+
+        # Maandaggregatie voor de winkel (over alle data die we hebben voor dit jaar)
+        store_monthly_all = aggregate_monthly(df_all_raw, sqm)
+
+        # Filter op gecombineerde periode (vorige + huidige)
+        combined_start = min(start_prev, start_cur)
+        combined_end = end_cur
+        store_monthly = store_monthly_all[
+            (store_monthly_all["month"] >= pd.to_datetime(combined_start))
+            & (store_monthly_all["month"] <= pd.to_datetime(combined_end))
+        ].copy()
+
+        cap_df = compute_capture_rate(store_monthly, pathzz_monthly)
+
+        if not cap_df.empty:
+            cap_df = cap_df.sort_values("month")
+
+            # Markeer welke maanden bij welke periode horen
+            cap_df["period"] = np.where(
+                (cap_df["month"] >= pd.to_datetime(start_cur))
+                & (cap_df["month"] <= pd.to_datetime(end_cur)),
+                "huidige",
+                np.where(
+                    (cap_df["month"] >= pd.to_datetime(start_prev))
+                    & (cap_df["month"] <= pd.to_datetime(end_prev)),
+                    "vorige",
+                    "overig",
+                ),
+            )
+
+            # Lijngrafiek: straat vs winkel
+            chart_df = cap_df.set_index("month")[["footfall", "street_footfall"]]
+            chart_df = chart_df.rename(
+                columns={
+                    "footfall": "store_footfall",
+                    "street_footfall": "street_footfall",
+                }
+            )
+            st.line_chart(chart_df)
+
+            # Gemiddelde capture rate per periode
+            cap_cur = cap_df[cap_df["period"] == "huidige"]["capture_rate"].mean()
+            cap_prev = cap_df[cap_df["period"] == "vorige"]["capture_rate"].mean()
+
+            cap_delta_txt = "-"
+            if pd.notna(cap_cur) and pd.notna(cap_prev) and cap_prev > 0:
+                cap_delta = (cap_cur - cap_prev) / cap_prev * 100
+                cap_delta_txt = f"{cap_delta:+.1f}%"
+
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.metric(
+                    "Gem. capture rate (huidige)",
+                    fmt_pct(cap_cur) if pd.notna(cap_cur) else "-",
+                )
+            with c2:
+                st.metric(
+                    "Gem. capture rate (vorige)",
+                    fmt_pct(cap_prev) if pd.notna(cap_prev) else "-",
+                )
+            with c3:
+                st.metric("Verschil capture rate", cap_delta_txt)
+
     # --- CBS context (data ophalen) ---
     cbs_stats = {}
     if postcode4:
@@ -549,15 +615,35 @@ def main():
 
     # --- Weer vs footfall (optioneel) ---
     if not weather_df.empty:
-        st.markdown("#### Weer vs footfall (indicatief)")
+        st.markdown("### Weer vs footfall (indicatief)")
+
         m = pd.merge(
             df_cur[["date", "footfall"]],
             weather_df[["date", "temp", "precip"]],
             on="date",
             how="left",
         ).set_index("date")
-        # toont 3 lijnen: footfall, temperatuur, neerslag
-        st.line_chart(m)
+
+        # Maak temperatuur + neerslag index, zodat ze zichtbaar zijn op dezelfde schaal als footfall
+        m_plot = m.copy()
+        max_foot = m_plot["footfall"].max() if "footfall" in m_plot.columns else None
+
+        if max_foot and not np.isnan(max_foot) and max_foot > 0:
+            if "temp" in m_plot.columns:
+                max_temp = m_plot["temp"].abs().max()
+                if max_temp and not np.isnan(max_temp) and max_temp > 0:
+                    m_plot["temp (index)"] = m_plot["temp"] / max_temp * max_foot
+            if "precip" in m_plot.columns:
+                max_precip = m_plot["precip"].abs().max()
+                if max_precip and not np.isnan(max_precip) and max_precip > 0:
+                    m_plot["precip (index)"] = m_plot["precip"] / max_precip * max_foot
+
+        cols = ["footfall"]
+        for c in ["temp (index)", "precip (index)"]:
+            if c in m_plot.columns:
+                cols.append(c)
+
+        st.line_chart(m_plot[cols])
 
     # --- Straatdrukte & capture rate (maandniveau) ---
     if not pathzz_monthly.empty and not cur_capture.empty and "street_footfall" in cur_capture.columns:
