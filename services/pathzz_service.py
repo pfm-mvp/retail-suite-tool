@@ -1,82 +1,87 @@
 # services/pathzz_service.py
-from __future__ import annotations
-
-from datetime import datetime
-from functools import lru_cache
-from pathlib import Path
-from typing import Optional
 
 import pandas as pd
-
-# Pad naar de demo-file (../data/pathzz_sample_weekly.csv)
-DATA_FILE = Path(__file__).resolve().parents[1] / "data" / "pathzz_sample_weekly.csv"
+from pathlib import Path
+from functools import lru_cache
 
 
 @lru_cache(maxsize=1)
 def _load_pathzz_weekly() -> pd.DataFrame:
     """
-    Laadt de demo Pathzz data uit pathzz_sample_weekly.csv.
+    Laadt de demo-Pathzz data uit data/pathzz_sample_weekly.csv.
 
-    Verwacht kolommen:
-      - Week: "YYYY-MM-DD To YYYY-MM-DD"
-      - Visits: string met punt als duizendtalscheiding, bijv "16.725"
+    Verwacht structuur:
+    - kolom 'Week': 'YYYY-MM-DD To YYYY-MM-DD'
+    - kolom 'Visits': waarden zoals 16.725 / 20.000 / 35.000
+
+    We interpreteren 'Visits' als duizendtallen (16.725 => 16.725 bezoekers).
+    Omdat het CSV met een punt werkt, leest pandas dit als 16.725 (float).
+    Daarom schalen we alles x 1000.
     """
-    if not DATA_FILE.exists():
-        return pd.DataFrame()
 
-    df = pd.read_csv(DATA_FILE, sep=";")
+    csv_path = Path("data") / "pathzz_sample_weekly.csv"
+    if not csv_path.exists():
+        # Geen bestand → lege DF terug
+        return pd.DataFrame(columns=["week_start", "Visits"])
 
-    if "Week" not in df.columns or "Visits" not in df.columns:
-        return pd.DataFrame()
+    df = pd.read_csv(csv_path, sep=";")
 
-    # Visits "16.725" => 16725
-    df["Visits"] = (
-        df["Visits"]
+    # Weekstart eruit trekken: eerste datum vóór " To "
+    df["week_start"] = (
+        df["Week"]
         .astype(str)
-        .str.replace(".", "", regex=False)
-        .astype("float")
+        .str.split(" To ")
+        .str[0]
     )
+    df["week_start"] = pd.to_datetime(df["week_start"], errors="coerce")
 
-    # Week "2025-10-26 To 2025-11-01" → week_start = 2025-10-26
-    def parse_week_start(s: str) -> datetime:
-        start_str = str(s).split(" To ")[0].strip()
-        return datetime.strptime(start_str, "%Y-%m-%d")
+    # Visits naar numeriek
+    df["Visits"] = pd.to_numeric(df["Visits"], errors="coerce")
 
-    df["week_start"] = df["Week"].apply(parse_week_start)
-    df["month"] = df["week_start"].dt.to_period("M").dt.to_timestamp()
+    # Demo-aanname: waarden zijn in duizendtallen (10–40)
+    # → schaal x 1000 naar "aantal passanten"
+    if df["Visits"].max() is not None and df["Visits"].max() < 1000:
+        df["Visits"] = df["Visits"] * 1000
 
-    df = df.rename(columns={"Visits": "street_footfall"})
-    return df[["month", "week_start", "street_footfall"]]
+    df = df.dropna(subset=["week_start", "Visits"])
+    return df[["week_start", "Visits"]]
 
 
 def fetch_monthly_street_traffic(
-    lat: Optional[float] = None,
-    lon: Optional[float] = None,
-    start_date: Optional[datetime] = None,
-    end_date: Optional[datetime] = None,
-    radius_m: int = 100,
+    start_date,
+    end_date,
 ) -> pd.DataFrame:
     """
-    Demo-implementatie van Pathzz.
+    Maakt van de wekelijkse Pathzz-sample data een maandelijkse time series:
 
-    - Gebruikt pathzz_sample_weekly.csv
-    - Negeert lat/lon/radius (maar laat ze in de signatuur zodat bestaande calls niet breken)
-    - Geeft maandtotalen 'street_footfall' terug tussen start_date en end_date
+    Input:
+    - start_date, end_date: datums (date/datetime/str)
+
+    Output:
+    - DataFrame met kolommen:
+      - 'month' (Timestamp, eerste dag van maand)
+      - 'street_footfall' (som van Visits in die maand)
     """
-    weekly = _load_pathzz_weekly()
-    if weekly.empty:
-        return weekly
 
-    if start_date is not None:
-        weekly = weekly[weekly["week_start"] >= pd.to_datetime(start_date)]
-    if end_date is not None:
-        weekly = weekly[weekly["week_start"] <= pd.to_datetime(end_date)]
-
-    if weekly.empty:
+    df = _load_pathzz_weekly()
+    if df.empty:
         return pd.DataFrame(columns=["month", "street_footfall"])
 
+    start = pd.to_datetime(start_date)
+    end = pd.to_datetime(end_date)
+
+    mask = (df["week_start"] >= start) & (df["week_start"] <= end)
+    df_sel = df.loc[mask].copy()
+    if df_sel.empty:
+        return pd.DataFrame(columns=["month", "street_footfall"])
+
+    df_sel["month"] = df_sel["week_start"].dt.to_period("M").dt.to_timestamp()
+
     monthly = (
-        weekly.groupby("month", as_index=False)["street_footfall"]
-        .sum(min_count=1)
+        df_sel
+        .groupby("month", as_index=False)["Visits"]
+        .sum()
+        .rename(columns={"Visits": "street_footfall"})
     )
+
     return monthly
