@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from helpers_clients import load_clients
 from helpers_normalize import normalize_vemcount_response
 from services.cbs_service import get_cbs_stats_for_postcode4
-from services.pathzz_service import fetch_weekly_street_traffic  # ← weekly import
+from services.pathzz_service import fetch_weekly_street_traffic  # weekly stub
 
 st.set_page_config(
     page_title="PFM Retail Performance Copilot",
@@ -164,6 +164,7 @@ def compute_daily_kpis(df: pd.DataFrame) -> pd.DataFrame:
 def aggregate_weekly(df: pd.DataFrame) -> pd.DataFrame:
     """
     Aggregeer store-data naar weekniveau (week_start = maandag).
+    Alleen kolommen die echt bestaan worden meegenomen.
     """
     if df is None or df.empty:
         return pd.DataFrame()
@@ -171,15 +172,21 @@ def aggregate_weekly(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["week_start"] = df["date"].dt.to_period("W").dt.start_time
 
-    agg = df.groupby("week_start").agg(
-        {
-            "footfall": "sum",
-            "turnover": "sum",
-            "sales_per_visitor": "mean",
-            "conversion_rate": "mean",
-        }
-    ).reset_index()
+    agg_dict: dict[str, str] = {}
 
+    if "footfall" in df.columns:
+        agg_dict["footfall"] = "sum"
+    if "turnover" in df.columns:
+        agg_dict["turnover"] = "sum"
+    if "sales_per_visitor" in df.columns:
+        agg_dict["sales_per_visitor"] = "mean"
+    if "conversion_rate" in df.columns:
+        agg_dict["conversion_rate"] = "mean"
+
+    if not agg_dict:
+        return df[["week_start"]].drop_duplicates().reset_index(drop=True)
+
+    agg = df.groupby("week_start", as_index=False).agg(agg_dict)
     return agg
 
 
@@ -411,8 +418,9 @@ def main():
         st.warning("Geen data gevonden voor dit jaar voor deze winkel.")
         return
 
-    # Zorg dat 'date' datetime is
+    # Zorg dat 'date' datetime is en bereken kpi's voor ALLE dagen
     df_all_raw["date"] = pd.to_datetime(df_all_raw["date"], errors="coerce")
+    df_all_raw = compute_daily_kpis(df_all_raw)
 
     # Slice naar huidige + vorige periode
     start_cur_ts = pd.Timestamp(start_cur)
@@ -434,11 +442,6 @@ def main():
         st.warning("Geen data gevonden in de gekozen periodes.")
         return
 
-    # KPI's berekenen
-    df_cur = compute_daily_kpis(df_cur)
-    if not df_prev.empty:
-        df_prev = compute_daily_kpis(df_prev)
-
     # --- Weerdata via Visual Crossing ---
     weather_df = pd.DataFrame()
     if weather_location and VISUALCROSSING_KEY:
@@ -451,11 +454,8 @@ def main():
     )
 
     cap_weekly = pd.DataFrame()
-    avg_capture_cur = None
-    avg_capture_prev = None  # nog niet gebruikt, maar placeholder voor toekomst
 
     if not pathzz_weekly.empty:
-        # Weekly store data over heel jaar, daarna gefilterd op geselecteerde weken
         store_weekly_all = aggregate_weekly(df_all_raw)
 
         cap_weekly = pd.merge(
@@ -529,7 +529,6 @@ def main():
             value = f"€ {spv_cur:.2f}".replace(".", ",") if pd.notna(spv_cur) else "-"
             st.metric("Gem. besteding/visitor", value, delta=spv_delta)
     with col4:
-        # Voor nu: altijd conversie tonen (capture rate komt later netjes met weekly logica)
         if "conversion_rate" in df_cur.columns:
             st.metric(
                 "Gem. conversie",
@@ -597,7 +596,7 @@ def main():
         insights.append(f"Omzet veranderde met {turn_delta} vs de vorige periode.")
     if spv_delta is not None:
         insights.append(f"Gemiddelde besteding per bezoeker veranderde met {spv_delta}.")
-    if conv_delta is not None:
+    if conv_delta is not None and not pd.isna(conv_cur):
         insights.append(f"Gemiddelde conversie veranderde met {conv_delta}.")
     if not insights:
         insights.append("Nog onvoldoende data om een goede vergelijking te maken met de vorige periode.")
