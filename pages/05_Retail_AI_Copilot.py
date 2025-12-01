@@ -29,7 +29,8 @@ except Exception:
         """
         csv_path = "data/pathzz_sample_weekly.csv"
         try:
-            df = pd.read_csv(csv_path, sep=";")
+            # Lees Visits expliciet als string, anders wordt 10.830 → 10.83 (float)
+            df = pd.read_csv(csv_path, sep=";", dtype={"Visits": "string"})
         except Exception:
             return pd.DataFrame()
 
@@ -41,7 +42,7 @@ except Exception:
             df["street_footfall"]
             .astype(str)
             .str.replace(".", "", regex=False)   # punt = duizendscheiding
-            .str.replace(",", ".", regex=False)  # just in case er komma's staan
+            .str.replace(",", ".", regex=False)  # safety, voor het geval er komma's staan
             .astype(float)
         )
 
