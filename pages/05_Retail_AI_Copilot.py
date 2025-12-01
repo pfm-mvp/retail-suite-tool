@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from helpers_clients import load_clients
 from helpers_normalize import normalize_vemcount_response
 from services.cbs_service import get_cbs_stats_for_postcode4
-from services.pathzz_service import fetch_monthly_street_traffic
+from services.pathzz_service import fetch_weekly_street_traffic  # ← weekly import
 
 st.set_page_config(
     page_title="PFM Retail Performance Copilot",
@@ -21,10 +21,6 @@ st.set_page_config(
 # API URL / secrets setup
 # ----------------------
 
-# In jouw setup wijst API_URL naar /get-report, omdat andere tools daar direct op praten.
-# Voor deze Copilot splitsen we 'm op:
-# - REPORT_URL = volledige /get-report URL (voor metrics)
-# - FASTAPI_BASE_URL = root zonder /get-report (voor /company/{company_id}/location)
 raw_api_url = st.secrets["API_URL"].rstrip("/")
 
 if raw_api_url.endswith("/get-report"):
@@ -92,9 +88,6 @@ def get_report(
 ):
     """
     Wrapper rond /get-report (POST) van de vemcount-agent, met querystring zonder [].
-
-    We gebruiken hier REPORT_URL, die in jouw setup gelijk is aan
-    https://vemcount-agent.onrender.com/get-report
     """
     params: list[tuple[str, str]] = []
 
@@ -107,8 +100,6 @@ def get_report(
     params.append(("period", period))
     params.append(("step", step))
     params.append(("source", source))
-
-    # LET OP: geen 'company' meesturen — Vemcount heeft genoeg aan data=shop_ids
 
     resp = requests.post(REPORT_URL, params=params, timeout=60)
     resp.raise_for_status()
@@ -123,10 +114,6 @@ def get_report(
 def fetch_visualcrossing_history(location_str: str, start_date, end_date) -> pd.DataFrame:
     """
     Haalt historische daily weather data op via Visual Crossing.
-
-    location_str:
-    - "52.3702,4.8952" (lat,lon) of
-    - "Amsterdam,NL"
     """
     if not VISUALCROSSING_KEY:
         return pd.DataFrame()
@@ -173,11 +160,32 @@ def compute_daily_kpis(df: pd.DataFrame) -> pd.DataFrame:
         )
     return df
 
+
+def aggregate_weekly(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Aggregeer store-data naar weekniveau (week_start = maandag).
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    df = df.copy()
+    df["week_start"] = df["date"].dt.to_period("W").dt.start_time
+
+    agg = df.groupby("week_start").agg(
+        {
+            "footfall": "sum",
+            "turnover": "sum",
+            "sales_per_visitor": "mean",
+            "conversion_rate": "mean",
+        }
+    ).reset_index()
+
+    return agg
+
+
 def aggregate_monthly(df: pd.DataFrame, sqm: float | None) -> pd.DataFrame:
     """
-    Aggregatie naar maandniveau.
-    - Neemt alleen kolommen mee die daadwerkelijk in df staan
-    - Voorkomt KeyErrors als bv. 'turnover' of 'sales_per_sqm' ontbreekt
+    Aggregatie naar maandniveau (voor eventuele andere analyses).
     """
     if df is None or df.empty:
         return pd.DataFrame()
@@ -196,13 +204,11 @@ def aggregate_monthly(df: pd.DataFrame, sqm: float | None) -> pd.DataFrame:
     if "sales_per_sqm" in df.columns:
         agg_dict["sales_per_sqm"] = "mean"
 
-    # Als er geen relevante kolommen zijn, return lege df met alleen month
     if not agg_dict:
         return df[["month"]].drop_duplicates().reset_index(drop=True)
 
     agg = df.groupby("month", as_index=False).agg(agg_dict)
 
-    # Optioneel: m²-afgeleiden als footfall/turnover aanwezig zijn
     if sqm and sqm > 0:
         if "turnover" in agg.columns:
             agg["turnover_per_sqm"] = agg["turnover"] / sqm
@@ -218,26 +224,6 @@ def aggregate_monthly(df: pd.DataFrame, sqm: float | None) -> pd.DataFrame:
         agg["footfall_per_sqm"] = np.nan
 
     return agg
-
-def compute_capture_rate(store_monthly: pd.DataFrame, street_monthly: pd.DataFrame) -> pd.DataFrame:
-    s = store_monthly.copy()
-    st_df = street_monthly.copy()
-
-    s["month"] = pd.to_datetime(s["month"])
-    st_df["month"] = pd.to_datetime(st_df["month"])
-
-    merged = pd.merge(s, st_df, on="month", how="left")
-
-    if "street_footfall" in merged.columns and "footfall" in merged.columns:
-        merged["capture_rate"] = np.where(
-            merged["street_footfall"] > 0,
-            merged["footfall"] / merged["street_footfall"] * 100,
-            np.nan,
-        )
-    else:
-        merged["capture_rate"] = np.nan
-
-    return merged
 
 
 # -------------
@@ -331,7 +317,6 @@ def main():
         start_prev, end_prev = start_cur - timedelta(days=7), start_cur - timedelta(days=1)
 
     elif period_choice == "Laatste week":
-        # Laatste volledige week vóór deze week
         this_week_start, _ = get_week_range(today)
         end_cur = this_week_start - timedelta(days=1)
         start_cur = end_cur - timedelta(days=6)
@@ -340,7 +325,6 @@ def main():
 
     elif period_choice == "Deze maand":
         start_cur, end_cur = get_month_range(today.year, today.month)
-        # vorige maand
         if today.month == 1:
             prev_y, prev_m = today.year - 1, 12
         else:
@@ -348,13 +332,11 @@ def main():
         start_prev, end_prev = get_month_range(prev_y, prev_m)
 
     elif period_choice == "Laatste maand":
-        # vorige maand = huidige periode
         if today.month == 1:
             cur_y, cur_m = today.year - 1, 12
         else:
             cur_y, cur_m = today.year, today.month - 1
         start_cur, end_cur = get_month_range(cur_y, cur_m)
-        # maand daar weer voor
         if cur_m == 1:
             prev_y, prev_m = cur_y - 1, 12
         else:
@@ -363,7 +345,6 @@ def main():
 
     elif period_choice == "Dit kwartaal":
         start_cur, end_cur = get_quarter_range(today.year, today.month)
-        # vorige kwartaal
         cur_q = (today.month - 1) // 3 + 1
         if cur_q == 1:
             prev_y, prev_q = today.year - 1, 4
@@ -374,7 +355,6 @@ def main():
 
     else:  # "Laatste kwartaal"
         cur_q = (today.month - 1) // 3 + 1
-        # huidige periode = vorige kwartaal
         if cur_q == 1:
             cur_y, cur_q_eff = today.year - 1, 4
         else:
@@ -382,7 +362,6 @@ def main():
         cur_start_month = 3 * (cur_q_eff - 1) + 1
         start_cur, end_cur = get_quarter_range(cur_y, cur_start_month)
 
-        # periode daar weer voor
         if cur_q_eff == 1:
             prev_y, prev_q = cur_y - 1, 4
         else:
@@ -415,7 +394,6 @@ def main():
             "sales_per_sqm": "sales_per_sqm",
         }
 
-        # Haal heel het jaar op, snij zelf de periodes eruit
         resp_all = get_report(
             [shop_id],
             list(metric_map.keys()),
@@ -466,49 +444,37 @@ def main():
     if weather_location and VISUALCROSSING_KEY:
         weather_df = fetch_visualcrossing_history(weather_location, start_cur, end_cur)
 
-    # --- Pathzz street traffic (maandniveau, demo) ---
-    # Voor de pilot gebruiken we altijd de sample CSV pathzz_sample_weekly.csv.
-    # lat/lon worden in de service genegeerd.
-    pathzz_monthly = fetch_monthly_street_traffic(
+    # --- Pathzz street traffic (weekly demo) ---
+    pathzz_weekly = fetch_weekly_street_traffic(
         start_date=start_cur,
         end_date=end_cur,
     )
 
-    # --- Straatdrukte & capture rate (Pathzz demo) ---
-    if not pathzz_monthly.empty:
-        st.markdown("### Straatdrukte vs winkeltraffic (Pathzz demo)")
+    cap_weekly = pd.DataFrame()
+    avg_capture_cur = None
+    avg_capture_prev = None  # nog niet gebruikt, maar placeholder voor toekomst
 
-        # Maandaggregatie voor de winkel (over alle data die we hebben voor dit jaar)
-        store_monthly_all = aggregate_monthly(df_all_raw, sqm)
+    if not pathzz_weekly.empty:
+        # Weekly store data over heel jaar, daarna gefilterd op geselecteerde weken
+        store_weekly_all = aggregate_weekly(df_all_raw)
 
-        # Filter op gecombineerde periode (vorige + huidige)
-        combined_start = min(start_prev, start_cur)
-        combined_end = end_cur
-        store_monthly = store_monthly_all[
-            (store_monthly_all["month"] >= pd.to_datetime(combined_start))
-            & (store_monthly_all["month"] <= pd.to_datetime(combined_end))
-        ].copy()
+        cap_weekly = pd.merge(
+            store_weekly_all,
+            pathzz_weekly,
+            on="week_start",
+            how="inner",
+        )
 
-        cap_df = compute_capture_rate(store_monthly, pathzz_monthly)
-
-        if not cap_df.empty:
-            cap_df = cap_df.sort_values("month")
-
-            # Markeer welke maanden bij welke periode horen
-            cap_df["period"] = np.where(
-                (cap_df["month"] >= pd.to_datetime(start_cur))
-                & (cap_df["month"] <= pd.to_datetime(end_cur)),
-                "huidige",
-                np.where(
-                    (cap_df["month"] >= pd.to_datetime(start_prev))
-                    & (cap_df["month"] <= pd.to_datetime(end_prev)),
-                    "vorige",
-                    "overig",
-                ),
+        if not cap_weekly.empty and "street_footfall" in cap_weekly.columns:
+            cap_weekly["capture_rate"] = np.where(
+                cap_weekly["street_footfall"] > 0,
+                cap_weekly["footfall"] / cap_weekly["street_footfall"] * 100,
+                np.nan,
             )
 
-            # Lijngrafiek: straat vs winkel
-            chart_df = cap_df.set_index("month")[["footfall", "street_footfall"]]
+            st.markdown("### Weekly straatdrukte vs winkeltraffic (Pathzz demo)")
+
+            chart_df = cap_weekly.set_index("week_start")[["footfall", "street_footfall"]]
             chart_df = chart_df.rename(
                 columns={
                     "footfall": "store_footfall",
@@ -517,57 +483,10 @@ def main():
             )
             st.line_chart(chart_df)
 
-            # Gemiddelde capture rate per periode
-            cap_cur = cap_df[cap_df["period"] == "huidige"]["capture_rate"].mean()
-            cap_prev = cap_df[cap_df["period"] == "vorige"]["capture_rate"].mean()
-
-            cap_delta_txt = "-"
-            if pd.notna(cap_cur) and pd.notna(cap_prev) and cap_prev > 0:
-                cap_delta = (cap_cur - cap_prev) / cap_prev * 100
-                cap_delta_txt = f"{cap_delta:+.1f}%"
-
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                st.metric(
-                    "Gem. capture rate (huidige)",
-                    fmt_pct(cap_cur) if pd.notna(cap_cur) else "-",
-                )
-            with c2:
-                st.metric(
-                    "Gem. capture rate (vorige)",
-                    fmt_pct(cap_prev) if pd.notna(cap_prev) else "-",
-                )
-            with c3:
-                st.metric("Verschil capture rate", cap_delta_txt)
-
     # --- CBS context (data ophalen) ---
     cbs_stats = {}
     if postcode4:
         cbs_stats = get_cbs_stats_for_postcode4(postcode4)
-
-    # --- Maandniveau + capture rate (voor KPI + tabel) ---
-    cur_monthly = pd.DataFrame()
-    prev_monthly = pd.DataFrame()
-    cur_capture = pd.DataFrame()
-    prev_capture = pd.DataFrame()
-    avg_capture_cur = None
-    avg_capture_prev = None
-
-    if not pathzz_monthly.empty:
-        if not df_cur.empty:
-            cur_monthly = aggregate_monthly(df_cur, sqm)
-        if not df_prev.empty:
-            prev_monthly = aggregate_monthly(df_prev, sqm)
-
-        if not cur_monthly.empty:
-            cur_capture = compute_capture_rate(cur_monthly, pathzz_monthly)
-            if "capture_rate" in cur_capture.columns:
-                avg_capture_cur = cur_capture["capture_rate"].mean()
-
-        if not prev_monthly.empty:
-            prev_capture = compute_capture_rate(prev_monthly, pathzz_monthly)
-            if "capture_rate" in prev_capture.columns:
-                avg_capture_prev = prev_capture["capture_rate"].mean()
 
     # --- KPI-cards met vergelijking vorige periode ---
     st.subheader(f"{selected_client['brand']} – {shop_row['name']}")
@@ -610,16 +529,8 @@ def main():
             value = f"€ {spv_cur:.2f}".replace(".", ",") if pd.notna(spv_cur) else "-"
             st.metric("Gem. besteding/visitor", value, delta=spv_delta)
     with col4:
-        # Als Pathzz beschikbaar is, laten we capture rate zien; anders conversie
-        if avg_capture_cur is not None and not pd.isna(avg_capture_cur) and avg_capture_prev not in (None, 0):
-            st.metric(
-                "Gem. capture rate",
-                fmt_pct(avg_capture_cur),
-                delta=f"{((avg_capture_cur - avg_capture_prev) / avg_capture_prev * 100):+.1f}%"
-                if avg_capture_prev not in (None, 0)
-                else None,
-            )
-        elif "conversion_rate" in df_cur.columns:
+        # Voor nu: altijd conversie tonen (capture rate komt later netjes met weekly logica)
+        if "conversion_rate" in df_cur.columns:
             st.metric(
                 "Gem. conversie",
                 fmt_pct(conv_cur) if pd.notna(conv_cur) else "-",
@@ -643,7 +554,6 @@ def main():
             how="left",
         ).set_index("date")
 
-        # Maak temperatuur + neerslag index, zodat ze zichtbaar zijn op dezelfde schaal als footfall
         m_plot = m.copy()
         max_foot = m_plot["footfall"].max() if "footfall" in m_plot.columns else None
 
@@ -664,11 +574,11 @@ def main():
 
         st.line_chart(m_plot[cols])
 
-    # --- Straatdrukte & capture rate (maandniveau) ---
-    if not pathzz_monthly.empty and not cur_capture.empty and "street_footfall" in cur_capture.columns:
-        st.markdown("### Straatdrukte & capture rate (maandniveau)")
-        cap_view = cur_capture[["month", "street_footfall", "footfall", "capture_rate"]].copy()
-        cap_view["month"] = pd.to_datetime(cap_view["month"]).dt.strftime("%Y-%m")
+    # --- Weekly capture tabel (optioneel) ---
+    if not cap_weekly.empty and "street_footfall" in cap_weekly.columns:
+        st.markdown("### Weekly straatdrukte & capture rate")
+        cap_view = cap_weekly[["week_start", "street_footfall", "footfall", "capture_rate"]].copy()
+        cap_view["week_start"] = pd.to_datetime(cap_view["week_start"]).dt.strftime("%Y-%m-%d")
         cap_view = cap_view.rename(
             columns={
                 "street_footfall": "Street footfall",
@@ -687,13 +597,8 @@ def main():
         insights.append(f"Omzet veranderde met {turn_delta} vs de vorige periode.")
     if spv_delta is not None:
         insights.append(f"Gemiddelde besteding per bezoeker veranderde met {spv_delta}.")
-    if conv_delta is not None and avg_capture_cur is None:
+    if conv_delta is not None:
         insights.append(f"Gemiddelde conversie veranderde met {conv_delta}.")
-    if avg_capture_cur is not None and avg_capture_prev not in (None, 0):
-        cap_delta_val = (avg_capture_cur - avg_capture_prev) / avg_capture_prev * 100
-        insights.append(
-            f"Capture rate veranderde met {cap_delta_val:+.1f}% vs de vorige periode."
-        )
     if not insights:
         insights.append("Nog onvoldoende data om een goede vergelijking te maken met de vorige periode.")
     for txt in insights:
@@ -719,8 +624,8 @@ def main():
         st.write("Dagdata ALL (head):", df_all_raw.head())
         st.write("Dagdata (cur):", df_cur.head())
         st.write("Dagdata (prev):", df_prev.head())
-        st.write("Pathzz monthly:", pathzz_monthly.head())
-        st.write("cur_capture:", cur_capture.head() if isinstance(cur_capture, pd.DataFrame) else cur_capture)
+        st.write("Pathzz weekly:", pathzz_weekly.head())
+        st.write("Capture weekly:", cap_weekly.head())
         st.write("CBS stats:", cbs_stats)
         st.write("Weather df:", weather_df.head())
 
