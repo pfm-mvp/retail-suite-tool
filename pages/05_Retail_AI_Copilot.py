@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from helpers_clients import load_clients
 from helpers_normalize import normalize_vemcount_response
 from services.cbs_service import get_cbs_stats_for_postcode4
-from services.pathzz_service import fetch_weekly_street_traffic  # weekly stub
+from services.pathzz_service import fetch_monthly_street_traffic  # gebruikt sample weekly CSV
 
 st.set_page_config(
     page_title="PFM Retail Performance Copilot",
@@ -163,17 +163,17 @@ def compute_daily_kpis(df: pd.DataFrame) -> pd.DataFrame:
 
 def aggregate_weekly(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Aggregeer store-data naar weekniveau (week_start = maandag).
-    Alleen kolommen die echt bestaan worden meegenomen.
+    Aggregatie naar weekniveau (zondag als week-start, passend bij Pathzz:
+    '2025-11-02 To 2025-11-08' etc.).
     """
     if df is None or df.empty:
         return pd.DataFrame()
 
     df = df.copy()
-    df["week_start"] = df["date"].dt.to_period("W").dt.start_time
+    # Week met einde op zaterdag ⇒ start = zondag
+    df["week_start"] = df["date"].dt.to_period("W-SAT").dt.start_time
 
     agg_dict: dict[str, str] = {}
-
     if "footfall" in df.columns:
         agg_dict["footfall"] = "sum"
     if "turnover" in df.columns:
@@ -186,13 +186,12 @@ def aggregate_weekly(df: pd.DataFrame) -> pd.DataFrame:
     if not agg_dict:
         return df[["week_start"]].drop_duplicates().reset_index(drop=True)
 
-    agg = df.groupby("week_start", as_index=False).agg(agg_dict)
-    return agg
+    return df.groupby("week_start", as_index=False).agg(agg_dict)
 
 
 def aggregate_monthly(df: pd.DataFrame, sqm: float | None) -> pd.DataFrame:
     """
-    Aggregatie naar maandniveau (voor eventuele andere analyses).
+    Aggregatie naar maandniveau.
     """
     if df is None or df.empty:
         return pd.DataFrame()
@@ -201,7 +200,6 @@ def aggregate_monthly(df: pd.DataFrame, sqm: float | None) -> pd.DataFrame:
     df["month"] = df["date"].dt.to_period("M").dt.to_timestamp()
 
     agg_dict: dict[str, str] = {}
-
     if "footfall" in df.columns:
         agg_dict["footfall"] = "sum"
     if "turnover" in df.columns:
@@ -418,9 +416,7 @@ def main():
         st.warning("Geen data gevonden voor dit jaar voor deze winkel.")
         return
 
-    # Zorg dat 'date' datetime is en bereken kpi's voor ALLE dagen
     df_all_raw["date"] = pd.to_datetime(df_all_raw["date"], errors="coerce")
-    df_all_raw = compute_daily_kpis(df_all_raw)
 
     # Slice naar huidige + vorige periode
     start_cur_ts = pd.Timestamp(start_cur)
@@ -442,46 +438,89 @@ def main():
         st.warning("Geen data gevonden in de gekozen periodes.")
         return
 
+    # KPI's berekenen op dag-niveau
+    df_cur = compute_daily_kpis(df_cur)
+    if not df_prev.empty:
+        df_prev = compute_daily_kpis(df_prev)
+
     # --- Weerdata via Visual Crossing ---
     weather_df = pd.DataFrame()
     if weather_location and VISUALCROSSING_KEY:
         weather_df = fetch_visualcrossing_history(weather_location, start_cur, end_cur)
 
-    # --- Pathzz street traffic (weekly demo) ---
-    pathzz_weekly = fetch_weekly_street_traffic(
-        start_date=start_cur,
+    # --- Pathzz street traffic (weekly, demo) ---
+    # Voor vergelijking gebruiken we vorige + huidige periode samen.
+    pathzz_weekly = fetch_monthly_street_traffic(
+        start_date=start_prev,
         end_date=end_cur,
     )
 
-    cap_weekly = pd.DataFrame()
+    capture_weekly = pd.DataFrame()
+    avg_capture_cur = None
+    avg_capture_prev = None
 
     if not pathzz_weekly.empty:
-        store_weekly_all = aggregate_weekly(df_all_raw)
+        # Store-data in dezelfde periode pakken en naar week aggregeren
+        df_range = df_all_raw[
+            (df_all_raw["date"] >= start_prev_ts)
+            & (df_all_raw["date"] <= end_cur_ts)
+        ].copy()
+        df_range = compute_daily_kpis(df_range)
+        store_weekly_all = aggregate_weekly(df_range)
 
-        cap_weekly = pd.merge(
+        pathzz_weekly["week_start"] = pd.to_datetime(pathzz_weekly["week_start"])
+        store_weekly_all["week_start"] = pd.to_datetime(store_weekly_all["week_start"])
+
+        capture_weekly = pd.merge(
             store_weekly_all,
             pathzz_weekly,
             on="week_start",
             how="inner",
         )
 
-        if not cap_weekly.empty and "street_footfall" in cap_weekly.columns:
-            cap_weekly["capture_rate"] = np.where(
-                cap_weekly["street_footfall"] > 0,
-                cap_weekly["footfall"] / cap_weekly["street_footfall"] * 100,
+        if not capture_weekly.empty:
+            capture_weekly["capture_rate"] = np.where(
+                capture_weekly["street_footfall"] > 0,
+                capture_weekly["footfall"] / capture_weekly["street_footfall"] * 100,
                 np.nan,
             )
 
-            st.markdown("### Weekly straatdrukte vs winkeltraffic (Pathzz demo)")
+            capture_weekly = capture_weekly.sort_values("week_start")
 
-            chart_df = cap_weekly.set_index("week_start")[["footfall", "street_footfall"]]
-            chart_df = chart_df.rename(
-                columns={
-                    "footfall": "store_footfall",
-                    "street_footfall": "street_footfall",
-                }
+            capture_weekly["period"] = np.where(
+                (capture_weekly["week_start"] >= start_cur_ts)
+                & (capture_weekly["week_start"] <= end_cur_ts),
+                "huidige",
+                "vorige",
             )
-            st.line_chart(chart_df)
+
+            avg_capture_cur = capture_weekly.loc[
+                capture_weekly["period"] == "huidige", "capture_rate"
+            ].mean()
+
+            avg_capture_prev = capture_weekly.loc[
+                capture_weekly["period"] == "vorige", "capture_rate"
+            ].mean()
+
+            # Grafiek: store vs street + capture index
+            chart_df = capture_weekly[
+                ["week_start", "footfall", "street_footfall", "capture_rate"]
+            ].copy()
+            max_foot = chart_df[["footfall", "street_footfall"]].max().max()
+            if max_foot and max_foot > 0:
+                max_cap = chart_df["capture_rate"].abs().max()
+                if pd.notna(max_cap) and max_cap > 0:
+                    chart_df["capture_rate_index"] = (
+                        chart_df["capture_rate"] / max_cap * max_foot
+                    )
+
+            chart_df = chart_df.set_index("week_start")
+            cols_for_chart = ["footfall", "street_footfall"]
+            if "capture_rate_index" in chart_df.columns:
+                cols_for_chart.append("capture_rate_index")
+
+            st.markdown("### Straatdrukte vs winkeltraffic (weekly demo)")
+            st.line_chart(chart_df[cols_for_chart])
 
     # --- CBS context (data ophalen) ---
     cbs_stats = {}
@@ -529,7 +568,16 @@ def main():
             value = f"€ {spv_cur:.2f}".replace(".", ",") if pd.notna(spv_cur) else "-"
             st.metric("Gem. besteding/visitor", value, delta=spv_delta)
     with col4:
-        if "conversion_rate" in df_cur.columns:
+        if avg_capture_cur is not None and not pd.isna(avg_capture_cur) and avg_capture_prev not in (None, 0):
+            delta_val = None
+            if avg_capture_prev and avg_capture_prev > 0:
+                delta_val = (avg_capture_cur - avg_capture_prev) / avg_capture_prev * 100
+            st.metric(
+                "Gem. capture rate",
+                fmt_pct(avg_capture_cur),
+                delta=f"{delta_val:+.1f}%" if delta_val is not None else None,
+            )
+        elif "conversion_rate" in df_cur.columns:
             st.metric(
                 "Gem. conversie",
                 fmt_pct(conv_cur) if pd.notna(conv_cur) else "-",
@@ -573,36 +621,6 @@ def main():
 
         st.line_chart(m_plot[cols])
 
-    # --- Weekly capture tabel (optioneel) ---
-    if not cap_weekly.empty and "street_footfall" in cap_weekly.columns:
-        st.markdown("### Weekly straatdrukte & capture rate")
-        cap_view = cap_weekly[["week_start", "street_footfall", "footfall", "capture_rate"]].copy()
-        cap_view["week_start"] = pd.to_datetime(cap_view["week_start"]).dt.strftime("%Y-%m-%d")
-        cap_view = cap_view.rename(
-            columns={
-                "street_footfall": "Street footfall",
-                "footfall": "Store footfall",
-                "capture_rate": "Capture rate (%)",
-            }
-        )
-        st.dataframe(cap_view, use_container_width=True)
-
-    # --- AI Insights (lichte interpretatie huidige vs vorige periode) ---
-    st.markdown("### AI Insights (huidige vs vorige periode)")
-    insights = []
-    if foot_delta is not None:
-        insights.append(f"Footfall veranderde met {foot_delta} vs de vorige periode.")
-    if turn_delta is not None:
-        insights.append(f"Omzet veranderde met {turn_delta} vs de vorige periode.")
-    if spv_delta is not None:
-        insights.append(f"Gemiddelde besteding per bezoeker veranderde met {spv_delta}.")
-    if conv_delta is not None and not pd.isna(conv_cur):
-        insights.append(f"Gemiddelde conversie veranderde met {conv_delta}.")
-    if not insights:
-        insights.append("Nog onvoldoende data om een goede vergelijking te maken met de vorige periode.")
-    for txt in insights:
-        st.markdown(f"- {txt}")
-
     # --- CBS context ---
     if cbs_stats:
         st.markdown("### CBS context (postcodegebied)")
@@ -624,7 +642,7 @@ def main():
         st.write("Dagdata (cur):", df_cur.head())
         st.write("Dagdata (prev):", df_prev.head())
         st.write("Pathzz weekly:", pathzz_weekly.head())
-        st.write("Capture weekly:", cap_weekly.head())
+        st.write("Capture weekly:", capture_weekly.head() if isinstance(capture_weekly, pd.DataFrame) else capture_weekly)
         st.write("CBS stats:", cbs_stats)
         st.write("Weather df:", weather_df.head())
 
