@@ -173,29 +173,51 @@ def compute_daily_kpis(df: pd.DataFrame) -> pd.DataFrame:
         )
     return df
 
-
 def aggregate_monthly(df: pd.DataFrame, sqm: float | None) -> pd.DataFrame:
+    """
+    Aggregatie naar maandniveau.
+    - Neemt alleen kolommen mee die daadwerkelijk in df staan
+    - Voorkomt KeyErrors als bv. 'turnover' of 'sales_per_sqm' ontbreekt
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+
     df = df.copy()
     df["month"] = df["date"].dt.to_period("M").dt.to_timestamp()
 
-    agg = df.groupby("month").agg(
-        {
-            "footfall": "sum",
-            "turnover": "sum",
-            "sales_per_visitor": "mean",
-            "sales_per_sqm": "mean" if "sales_per_sqm" in df.columns else "mean",
-        }
-    ).reset_index()
+    agg_dict: dict[str, str] = {}
 
+    if "footfall" in df.columns:
+        agg_dict["footfall"] = "sum"
+    if "turnover" in df.columns:
+        agg_dict["turnover"] = "sum"
+    if "sales_per_visitor" in df.columns:
+        agg_dict["sales_per_visitor"] = "mean"
+    if "sales_per_sqm" in df.columns:
+        agg_dict["sales_per_sqm"] = "mean"
+
+    # Als er geen relevante kolommen zijn, return lege df met alleen month
+    if not agg_dict:
+        return df[["month"]].drop_duplicates().reset_index(drop=True)
+
+    agg = df.groupby("month", as_index=False).agg(agg_dict)
+
+    # Optioneel: m²-afgeleiden als footfall/turnover aanwezig zijn
     if sqm and sqm > 0:
-        agg["turnover_per_sqm"] = agg["turnover"] / sqm
-        agg["footfall_per_sqm"] = agg["footfall"] / sqm
+        if "turnover" in agg.columns:
+            agg["turnover_per_sqm"] = agg["turnover"] / sqm
+        else:
+            agg["turnover_per_sqm"] = np.nan
+
+        if "footfall" in agg.columns:
+            agg["footfall_per_sqm"] = agg["footfall"] / sqm
+        else:
+            agg["footfall_per_sqm"] = np.nan
     else:
         agg["turnover_per_sqm"] = np.nan
         agg["footfall_per_sqm"] = np.nan
 
     return agg
-
 
 def compute_capture_rate(store_monthly: pd.DataFrame, street_monthly: pd.DataFrame) -> pd.DataFrame:
     s = store_monthly.copy()
