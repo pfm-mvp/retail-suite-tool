@@ -8,7 +8,7 @@ from typing import Optional
 
 import pandas as pd
 
-# Pad naar de demo-file
+# Pad naar de demo-file (../data/pathzz_sample_weekly.csv)
 DATA_FILE = Path(__file__).resolve().parents[1] / "data" / "pathzz_sample_weekly.csv"
 
 
@@ -60,7 +60,7 @@ def fetch_monthly_street_traffic(
     Demo-implementatie van Pathzz.
 
     - Gebruikt pathzz_sample_weekly.csv
-    - Negeert lat/lon/radius (maar laat ze in de signatuur zodat andere tools niet breken)
+    - Negeert lat/lon/radius (maar laat ze in de signatuur zodat bestaande calls niet breken)
     - Geeft maandtotalen 'street_footfall' terug tussen start_date en end_date
     """
     weekly = _load_pathzz_weekly()
