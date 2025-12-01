@@ -444,16 +444,13 @@ def main():
     if weather_location and VISUALCROSSING_KEY:
         weather_df = fetch_visualcrossing_history(weather_location, start_cur, end_cur)
 
-    # --- Pathzz street traffic (maandniveau) ---
-    pathzz_monthly = pd.DataFrame()
-    if lat and lon:
-        pathzz_monthly = fetch_monthly_street_traffic(
-            lat=lat,
-            lon=lon,
-            start_date=datetime.combine(start_cur, datetime.min.time()),
-            end_date=datetime.combine(end_cur, datetime.min.time()),
-            radius_m=100,
-        )
+    # --- Pathzz street traffic (maandniveau, demo) ---
+    # Voor de pilot gebruiken we altijd de sample CSV pathzz_sample_weekly.csv.
+    # lat/lon worden in de service genegeerd.
+    pathzz_monthly = fetch_monthly_street_traffic(
+        start_date=start_cur,
+        end_date=end_cur,
+    )
 
     # --- Straatdrukte & capture rate (Pathzz demo) ---
     if not pathzz_monthly.empty:
@@ -701,7 +698,7 @@ def main():
         st.write("Dagdata (cur):", df_cur.head())
         st.write("Dagdata (prev):", df_prev.head())
         st.write("Pathzz monthly:", pathzz_monthly.head())
-        st.write("cur_capture:", cur_capture.head())
+        st.write("cur_capture:", cur_capture.head() if isinstance(cur_capture, pd.DataFrame) else cur_capture)
         st.write("CBS stats:", cbs_stats)
         st.write("Weather df:", weather_df.head())
 
