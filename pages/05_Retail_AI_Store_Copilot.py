@@ -560,9 +560,13 @@ def main():
                 ["week_start", "footfall", "street_footfall", "capture_rate"]
             ].copy()
 
+            # Weeklabel als weeknummer: W01, W02, ...
+            iso_calendar = chart_df["week_start"].dt.isocalendar()
+            chart_df["week_label"] = "W" + iso_calendar.week.astype(str)
+
             # Data voor de staafgrafiek in long format
             counts_long = chart_df.melt(
-                id_vars="week_start",
+                id_vars=["week_label"],
                 value_vars=["footfall", "street_footfall"],
                 var_name="metric",
                 value_name="value",
@@ -570,9 +574,10 @@ def main():
 
             bar_chart = (
                 alt.Chart(counts_long)
-                .mark_bar(opacity=0.7)
+                .mark_bar(width=20, opacity=0.8)
                 .encode(
-                    x=alt.X("week_start:T", title="Week start"),
+                    x=alt.X("week_label:N", title="Week", sort=None),
+                    xOffset=alt.XOffset("metric:N"),
                     y=alt.Y(
                         "value:Q",
                         axis=alt.Axis(title="Footfall / street traffic"),
@@ -586,7 +591,7 @@ def main():
                         ),
                     ),
                     tooltip=[
-                        alt.Tooltip("week_start:T", title="Week"),
+                        alt.Tooltip("week_label:N", title="Week"),
                         alt.Tooltip("metric:N", title="Type"),
                         alt.Tooltip("value:Q", title="Aantal", format=",.0f"),
                     ],
@@ -595,17 +600,16 @@ def main():
 
             line_chart = (
                 alt.Chart(chart_df)
-                .mark_line(point=True, strokeWidth=2)
+                .mark_line(point=True, strokeWidth=2, color="#F04438")
                 .encode(
-                    x="week_start:T",
+                    x=alt.X("week_label:N", title="Week", sort=None),
                     y=alt.Y(
                         "capture_rate:Q",
                         axis=alt.Axis(title="Capture rate (%)"),
                         scale=alt.Scale(zero=True),
                     ),
-                    color=alt.value("#F04438"),
                     tooltip=[
-                        alt.Tooltip("week_start:T", title="Week"),
+                        alt.Tooltip("week_label:N", title="Week"),
                         alt.Tooltip(
                             "capture_rate:Q",
                             title="Capture rate",
