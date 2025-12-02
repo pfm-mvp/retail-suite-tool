@@ -126,7 +126,7 @@ def get_report(
     return resp.json()
 
 
-# --- Pathzz loader per regio (gefixte versie) ------------------------------
+# --- Pathzz loader per regio: simpele, bewezen werkwijze -------------------
 
 @st.cache_data(ttl=600)
 def load_pathzz_weekly_for_region(region_name: str, start_date, end_date) -> pd.DataFrame:
@@ -138,82 +138,68 @@ def load_pathzz_weekly_for_region(region_name: str, start_date, end_date) -> pd.
 
     - Region  : 'Noord', 'Oost', 'Zuid', 'West'
     - Week    : '2023-12-31 To 2024-01-06'
-    - Visits  : '54.085'  (duizendtallen met punt → 54085)
+    - Visits  : '54.085' (duizendtallen met punt → 54085)
     """
     csv_path = "data/pathzz_sample_weekly.csv"
     try:
-        # Alles als string inlezen, ; als delimiter
-        df = pd.read_csv(csv_path, sep=";", dtype=str, engine="python")
+        # Zelfde aanpak als in je winkel-script: alleen Visits als string afdwingen
+        df = pd.read_csv(csv_path, sep=";", dtype={"Visits": "string"})
     except Exception:
         return pd.DataFrame()
 
-    # Kolomnamen normaliseren (BOM + spaties + case)
-    clean_cols = [c.replace("\ufeff", "").strip().lower() for c in df.columns]
-    col_map: dict[str, str] = {}
-    for original, clean in zip(df.columns, clean_cols):
-        if clean == "region":
-            col_map[original] = "region"
-        elif clean == "week":
-            col_map[original] = "week"
-        elif clean == "visits":
-            col_map[original] = "street_footfall"
+    # Kolommen netjes hernoemen
+    df = df.rename(
+        columns={
+            "Region": "region",
+            "Week": "week",
+            "Visits": "street_footfall",
+        }
+    )
 
-    df = df.rename(columns=col_map)
-
-    required = {"region", "week", "street_footfall"}
-    if not required.issubset(df.columns):
-        # Header klopt niet → leeg terug
+    if not {"region", "week", "street_footfall"}.issubset(df.columns):
         return pd.DataFrame()
 
-    # Regio normaliseren + fuzzy match (contains) om rare tekens/spaties op te vangen
-    df["region_clean"] = (
+    # Regio opschonen + exact matchen
+    df["region"] = (
         df["region"]
         .astype(str)
         .str.replace("\ufeff", "")
         .str.strip()
-        .str.lower()
     )
-    region_norm = str(region_name).replace("\ufeff", "").strip().lower()
+    region_clean = str(region_name).replace("\ufeff", "").strip()
 
-    mask = df["region_clean"].str.contains(region_norm, na=False)
-    df_region = df[mask].copy()
-
-    if df_region.empty:
+    df = df[df["region"] == region_clean].copy()
+    if df.empty:
         return pd.DataFrame()
 
-    # Visits: "54.085" → "54085" → 54085.0
-    df_region["street_footfall"] = (
-        df_region["street_footfall"]
+    # Visits: "54.085" → "54085" → float
+    df["street_footfall"] = (
+        df["street_footfall"]
         .astype(str)
         .str.replace("\ufeff", "")
         .str.strip()
         .str.replace(".", "", regex=False)   # punt = duizendscheiding
         .str.replace(",", ".", regex=False)  # safety
     )
+    df = df[df["street_footfall"] != ""]
+    df["street_footfall"] = pd.to_numeric(df["street_footfall"], errors="coerce")
+    df = df.dropna(subset=["street_footfall"])
 
-    df_region = df_region[df_region["street_footfall"] != ""]
-    df_region["street_footfall"] = pd.to_numeric(
-        df_region["street_footfall"], errors="coerce"
-    )
-    df_region = df_region.dropna(subset=["street_footfall"])
-
-    # "2025-10-05 To 2025-10-11" → 2025-10-05
+    # "2023-12-31 To 2024-01-06" → 2023-12-31
     def _parse_week_start(s: str):
         if isinstance(s, str) and "To" in s:
             return pd.to_datetime(s.split("To")[0].strip(), errors="coerce")
         return pd.NaT
 
-    df_region["week_start"] = df_region["week"].apply(_parse_week_start)
-    df_region = df_region.dropna(subset=["week_start"])
+    df["week_start"] = df["week"].apply(_parse_week_start)
+    df = df.dropna(subset=["week_start"])
 
-    # Filter op aangevraagde periode
+    # Filter op periode
     start = pd.to_datetime(start_date)
     end = pd.to_datetime(end_date)
-    df_region = df_region[
-        (df_region["week_start"] >= start) & (df_region["week_start"] <= end)
-    ]
+    df = df[(df["week_start"] >= start) & (df["week_start"] <= end)]
 
-    return df_region[["week_start", "street_footfall"]].reset_index(drop=True)
+    return df[["week_start", "street_footfall"]].reset_index(drop=True)
 
 
 # -------------
@@ -400,7 +386,7 @@ def main():
     # --- Wekelijkse aggregatie voor de regio ---
     region_weekly = aggregate_weekly(df_period)
 
-    # --- Pathzz street traffic per regio (met nieuwe loader) ---
+    # --- Pathzz street traffic per regio ---
     pathzz_weekly = load_pathzz_weekly_for_region(
         region_name=region_choice,
         start_date=start_period,
@@ -520,20 +506,15 @@ def main():
         st.write("Pathzz weekly:", pathzz_weekly.head())
         st.write("Capture weekly:", capture_weekly.head())
 
-        # Extra ruwe Pathzz-debug
+        # Extra: ruwe Pathzz-head zodat je kunt zien wat er binnenkomt
         try:
             raw_pathzz = pd.read_csv(
                 "data/pathzz_sample_weekly.csv",
                 sep=";",
-                dtype=str,
-                engine="python",
+                dtype={"Visits": "string"},
             )
             st.write("Pathzz raw columns:", list(raw_pathzz.columns))
             st.write("Pathzz raw (head):", raw_pathzz.head())
-            st.write(
-                "Pathzz unieke Region-waarden:",
-                raw_pathzz.iloc[:, 0].dropna().unique()[:10],
-            )
         except Exception as e:
             st.write("Pathzz raw load error:", str(e))
 
