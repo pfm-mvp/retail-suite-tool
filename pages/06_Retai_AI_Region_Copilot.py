@@ -453,20 +453,73 @@ def main():
             ["week_start", "footfall", "street_footfall", "capture_rate"]
         ].copy()
 
-        max_foot = chart_df[["footfall", "street_footfall"]].max().max()
-        if max_foot and max_foot > 0:
-            max_cap = chart_df["capture_rate"].abs().max()
-            if pd.notna(max_cap) and max_cap > 0:
-                chart_df["capture_rate_index"] = (
-                    chart_df["capture_rate"] / max_cap * max_foot
-                )
+        counts_long = chart_df.melt(
+            id_vars="week_start",
+            value_vars=["footfall", "street_footfall"],
+            var_name="metric",
+            value_name="value",
+        )
 
-        chart_df = chart_df.set_index("week_start")
-        cols_for_chart = ["footfall", "street_footfall"]
-        if "capture_rate_index" in chart_df.columns:
-            cols_for_chart.append("capture_rate_index")
+        bar_chart = (
+            alt.Chart(counts_long)
+            .mark_bar(opacity=0.7)
+            .encode(
+                x=alt.X("week_start:T", title="Week start"),
+                y=alt.Y(
+                    "value:Q",
+                    axis=alt.Axis(title="Footfall / street traffic (regio)"),
+                ),
+                color=alt.Color(
+                    "metric:N",
+                    title="",
+                    scale=alt.Scale(
+                        domain=["footfall", "street_footfall"],
+                        range=["#1f77b4", "#ff7f0e"],
+                    ),
+                ),
+                tooltip=[
+                    alt.Tooltip("week_start:T", title="Week"),
+                    alt.Tooltip("metric:N", title="Type"),
+                    alt.Tooltip("value:Q", title="Aantal", format=",.0f"),
+                ],
+            )
+        )
 
-        st.line_chart(chart_df[cols_for_chart])
+        line_chart = (
+            alt.Chart(chart_df)
+            .mark_line(point=True, strokeWidth=2)
+            .encode(
+                x="week_start:T",
+                y=alt.Y(
+                    "capture_rate:Q",
+                    axis=alt.Axis(title="Capture rate regio (%)"),
+                    scale=alt.Scale(zero=True),
+                ),
+                color=alt.value("#F04438"),
+                tooltip=[
+                    alt.Tooltip("week_start:T", title="Week"),
+                    alt.Tooltip(
+                        "capture_rate:Q",
+                        title="Capture rate",
+                        format=".1f",
+                    ),
+                ],
+            )
+        )
+
+        combined = (
+            alt.layer(bar_chart, line_chart)
+            .resolve_scale(y="independent")
+            .properties(height=350)
+        )
+
+        st.altair_chart(combined, use_container_width=True)
+
+        # Tabel met ruwe waarden
+        table_df = capture_weekly[
+            ["week_start", "footfall", "street_footfall", "capture_rate"]
+        ].copy()
+        ...
 
         # Tabel met ruwe waarden
         st.markdown("### Weekly tabel – regio-footfall, straattraffic & capture rate")
