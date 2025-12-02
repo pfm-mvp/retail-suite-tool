@@ -82,10 +82,12 @@ def load_region_mapping(path: str = "data/regions.csv") -> pd.DataFrame:
 def get_locations_by_company(company_id: int) -> pd.DataFrame:
     """
     Wrapper rond /company/{company_id}/location van de vemcount-agent.
+    Extra ruime timeout + nette foutmelding wordt in main() afgehandeld.
     """
     url = f"{FASTAPI_BASE_URL.rstrip('/')}/company/{company_id}/location"
 
-    resp = requests.get(url, timeout=30)
+    # Iets ruimere timeout, API kan soms traag zijn
+    resp = requests.get(url, timeout=60)
     resp.raise_for_status()
     data = resp.json()
 
@@ -262,14 +264,20 @@ def main():
     company_id = int(selected_client["company_id"])
 
     # --- Locations & regions inladen ---
-    locations_df = get_locations_by_company(company_id)
-    if locations_df.empty:
-        st.error("Geen winkels gevonden voor deze retailer.")
+    try:
+        locations_df = get_locations_by_company(company_id)
+    except requests.exceptions.ReadTimeout:
+        st.error(
+            "De verbinding met de FastAPI-server duurde te lang bij het ophalen van de winkels "
+            "(timeout). Probeer het nog eens of kies voorlopig een andere retailer."
+        )
+        return
+    except requests.exceptions.RequestException as e:
+        st.error(f"Fout bij ophalen van winkels uit FastAPI: {e}")
         return
 
-    region_map = load_region_mapping()
-    if region_map.empty:
-        st.error("Geen regions.csv gevonden of ongeldig formaat.")
+    if locations_df.empty:
+        st.error("Geen winkels gevonden voor deze retailer.")
         return
 
     # Koppel regions.csv aan locations op shop_id = id
