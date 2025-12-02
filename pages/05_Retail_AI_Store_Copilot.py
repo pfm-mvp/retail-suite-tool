@@ -43,7 +43,7 @@ except Exception:
             df["street_footfall"]
             .astype(str)
             .str.replace(".", "", regex=False)   # punt = duizendscheiding
-            .str.replace(",", ".", regex=False)  # safety, voor het geval er komma's staan
+            .str.replace(",", ".", regex=False)  # safety
             .astype(float)
         )
 
@@ -553,16 +553,21 @@ def main():
                 capture_weekly["period"] == "vorige", "capture_rate"
             ].mean()
 
-            # Grafiek: store vs street (bars) + capture rate (line, 2e as)
+            # -------------------------------
+            # Grafiek: store vs street + capture rate
+            # -------------------------------
             st.markdown("### Straatdrukte vs winkeltraffic (weekly demo)")
 
             chart_df = capture_weekly[
                 ["week_start", "footfall", "street_footfall", "capture_rate"]
             ].copy()
 
-            # Weeklabel als weeknummer: W01, W02, ...
-            iso_calendar = chart_df["week_start"].dt.isocalendar()
-            chart_df["week_label"] = "W" + iso_calendar.week.astype(str)
+            # Weeklabel als nette weeknummers, bv. W01, W02, ...
+            iso_cal = chart_df["week_start"].dt.isocalendar()
+            chart_df["week_label"] = iso_cal.week.apply(lambda w: f"W{int(w):02d}")
+
+            # Sorteervolgorde op basis van werkelijke datum
+            week_order = chart_df.sort_values("week_start")["week_label"].unique().tolist()
 
             # Data voor de staafgrafiek in long format
             counts_long = chart_df.melt(
@@ -574,9 +579,13 @@ def main():
 
             bar_chart = (
                 alt.Chart(counts_long)
-                .mark_bar(width=20, opacity=0.8)
+                .mark_bar(width=28, opacity=0.85)
                 .encode(
-                    x=alt.X("week_label:N", title="Week", sort=None),
+                    x=alt.X(
+                        "week_label:N",
+                        title="Week",
+                        sort=week_order,
+                    ),
                     xOffset=alt.XOffset("metric:N"),
                     y=alt.Y(
                         "value:Q",
@@ -602,7 +611,11 @@ def main():
                 alt.Chart(chart_df)
                 .mark_line(point=True, strokeWidth=2, color="#F04438")
                 .encode(
-                    x=alt.X("week_label:N", title="Week", sort=None),
+                    x=alt.X(
+                        "week_label:N",
+                        title="Week",
+                        sort=week_order,
+                    ),
                     y=alt.Y(
                         "capture_rate:Q",
                         axis=alt.Axis(title="Capture rate (%)"),
