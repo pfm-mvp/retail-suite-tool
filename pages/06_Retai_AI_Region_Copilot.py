@@ -131,35 +131,40 @@ def fetch_region_street_traffic(region: str, start_date, end_date) -> pd.DataFra
     """
     Leest demo-straattraffic per regio uit data/pathzz_sample_weekly.csv
 
-    CSV-structuur:
+    CSV-structuur (zoals jouw bestand):
     Region;Week;Visits;...
 
     Visits zijn waardes als 45.654 (→ 45654 bezoekers).
     Return:
-    - region (str)
     - week_start (datetime)
     - street_footfall (float)
     """
     csv_path = "data/pathzz_sample_weekly.csv"
     try:
-        df = pd.read_csv(csv_path, sep=";", dtype={"Visits": "string"})
+        # lees alles als string, met ; als scheidingsteken
+        df = pd.read_csv(csv_path, sep=";", dtype=str, engine="python")
     except Exception:
         return pd.DataFrame()
 
-    # Kolommen normaliseren / hernoemen
-    df = df.rename(
-        columns={
-            "Region": "region",
-            "Week": "week",
-            "Visits": "street_footfall",
-        }
-    )
+    # Kolommen robuust hernoemen (ongeacht BOM/spaties/case)
+    col_map = {}
+    for c in df.columns:
+        cl = c.strip().lower()
+        if cl == "region":
+            col_map[c] = "region"
+        elif cl == "week":
+            col_map[c] = "week"
+        elif cl == "visits":
+            col_map[c] = "street_footfall"
+
+    df = df.rename(columns=col_map)
 
     required_cols = {"region", "week", "street_footfall"}
     if not required_cols.issubset(df.columns):
+        # Header niet goed herkend
         return pd.DataFrame()
 
-    # Filter op regio (case-insensitive)
+    # Filter op regio (case-insensitive, trims)
     df["region"] = df["region"].astype(str).str.strip()
     region_norm = str(region).strip().lower()
     df = df[df["region"].str.lower() == region_norm].copy()
@@ -171,12 +176,16 @@ def fetch_region_street_traffic(region: str, start_date, end_date) -> pd.DataFra
     df["street_footfall"] = (
         df["street_footfall"]
         .astype(str)
+        .str.strip()
         .str.replace(".", "", regex=False)   # punt = duizendscheiding
         .str.replace(",", ".", regex=False)  # safety
-        .astype(float)
     )
+    # lege strings naar NaN voordat we casten
+    df = df[df["street_footfall"] != ""]
+    df["street_footfall"] = pd.to_numeric(df["street_footfall"], errors="coerce")
+    df = df.dropna(subset=["street_footfall"])
 
-    # "2025-10-26 To 2025-11-01" → 2025-10-26
+    # "2025-10-05 To 2025-10-11" → 2025-10-05
     def _parse_week_start(s):
         if isinstance(s, str) and "To" in s:
             return pd.to_datetime(s.split("To")[0].strip(), errors="coerce")
@@ -185,9 +194,9 @@ def fetch_region_street_traffic(region: str, start_date, end_date) -> pd.DataFra
     df["week_start"] = df["week"].apply(_parse_week_start)
     df = df.dropna(subset=["week_start"])
 
+    # Filter op aangevraagde periode
     start = pd.to_datetime(start_date)
     end = pd.to_datetime(end_date)
-
     df = df[(df["week_start"] >= start) & (df["week_start"] <= end)]
 
     return df[["week_start", "street_footfall"]].reset_index(drop=True)
