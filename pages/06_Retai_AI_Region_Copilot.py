@@ -126,18 +126,16 @@ def get_report(
 
 
 @st.cache_data(ttl=600)
-def fetch_region_street_traffic(region: str, start_date, end_date) -> pd.DataFrame:
+def load_pathzz_weekly_for_region(region_name: str, start_date, end_date) -> pd.DataFrame:
     """
-    Leest demo-straattraffic per regio uit data/pathzz_sample_weekly.csv
+    Leest demo-Pathzz data uit data/pathzz_sample_weekly.csv en filtert op regio + periode.
 
-    CSV-structuur (zoals je nu hebt):
+    CSV-structuur:
     Region;Week;Visits;...
 
-    Visits zijn waardes als 45.654 (→ 45654 bezoekers).
-    Return:
-    - region (str)
-    - week_start (datetime)
-    - street_footfall (float)
+    - Region  : 'Noord', 'Oost', 'Zuid', 'West'
+    - Week    : '2025-10-05 To 2025-10-11'
+    - Visits  : '54.085' (duizendtal met punt)
     """
     csv_path = "data/pathzz_sample_weekly.csv"
     try:
@@ -145,51 +143,53 @@ def fetch_region_street_traffic(region: str, start_date, end_date) -> pd.DataFra
     except Exception:
         return pd.DataFrame()
 
-    # Pak alleen de relevante kolommen en hernoem
-    col_map = {}
-    for c in df.columns:
-        cl = c.strip()
-        if cl.lower() == "region":
-            col_map[c] = "region"
-        elif cl.lower() == "week":
-            col_map[c] = "week"
-        elif cl.lower() == "visits":
-            col_map[c] = "street_footfall"
-    df = df.rename(columns=col_map)
+    # Kolommen normaliseren
+    df = df.rename(
+        columns={
+            "Region": "region",
+            "Week": "week",
+            "Visits": "street_footfall",
+        }
+    )
 
     required_cols = {"region", "week", "street_footfall"}
     if not required_cols.issubset(df.columns):
         return pd.DataFrame()
 
-    # Filter op regio
-    df = df[df["region"] == region].copy()
-    if df.empty:
+    # Regio’s schoonmaken en filteren op de gevraagde regio
+    df["region"] = df["region"].astype(str).str.strip()
+    region_norm = str(region_name).strip().lower()
+    df_region = df[df["region"].str.lower() == region_norm].copy()
+
+    if df_region.empty:
         return pd.DataFrame()
 
-    # Visits: "45.654" → "45654" → 45654.0
-    df["street_footfall"] = (
-        df["street_footfall"]
+    # Visits: "54.085" → "54085" → 54085.0
+    df_region["street_footfall"] = (
+        df_region["street_footfall"]
         .astype(str)
         .str.replace(".", "", regex=False)   # punt = duizendscheiding
         .str.replace(",", ".", regex=False)  # safety
         .astype(float)
     )
 
-    # "2025-10-26 To 2025-11-01" → 2025-10-26
+    # "2025-10-05 To 2025-10-11" → 2025-10-05
     def _parse_week_start(s):
         if isinstance(s, str) and "To" in s:
             return pd.to_datetime(s.split("To")[0].strip(), errors="coerce")
         return pd.NaT
 
-    df["week_start"] = df["week"].apply(_parse_week_start)
-    df = df.dropna(subset=["week_start"])
+    df_region["week_start"] = df_region["week"].apply(_parse_week_start)
+    df_region = df_region.dropna(subset=["week_start"])
 
+    # Filter op aangevraagde periode
     start = pd.to_datetime(start_date)
     end = pd.to_datetime(end_date)
+    df_region = df_region[
+        (df_region["week_start"] >= start) & (df_region["week_start"] <= end)
+    ]
 
-    df = df[(df["week_start"] >= start) & (df["week_start"] <= end)]
-
-    return df[["region", "week_start", "street_footfall"]].reset_index(drop=True)
+    return df_region[["week_start", "street_footfall"]].reset_index(drop=True)
 
 
 # -------------
@@ -238,68 +238,6 @@ def aggregate_weekly(df: pd.DataFrame) -> pd.DataFrame:
         return df[["week_start"]].drop_duplicates().reset_index(drop=True)
 
     return df.groupby("week_start", as_index=False).agg(agg_dict)
-
-@st.cache_data(ttl=600)
-def load_pathzz_weekly_for_region(region_name: str, start_date, end_date) -> pd.DataFrame:
-    """
-    Leest demo-Pathzz data uit data/pathzz_sample_weekly.csv en filtert op regio + periode.
-
-    CSV-structuur (jouw bestand):
-    Region;Week;Visits;...
-
-    - Region  : 'Noord', 'Oost', 'Zuid', 'West'
-    - Week    : '2025-10-05 To 2025-10-11'
-    - Visits  : '54.085' (duizendtal met punt)
-    """
-    csv_path = "data/pathzz_sample_weekly.csv"
-    try:
-        df = pd.read_csv(csv_path, sep=";", dtype={"Visits": "string"})
-    except Exception:
-        return pd.DataFrame()
-
-    # Kolommen normaliseren
-    df = df.rename(
-        columns={
-            "Region": "region",
-            "Week": "week",
-            "Visits": "street_footfall",
-        }
-    )
-
-    # Regio’s schoonmaken en filteren op de gevraagde regio
-    df["region"] = df["region"].astype(str).str.strip()
-    region_norm = str(region_name).strip().lower()
-    df_region = df[df["region"].str.lower() == region_norm].copy()
-
-    if df_region.empty:
-        return pd.DataFrame()
-
-    # Visits: "54.085" → "54085" → 54085.0
-    df_region["street_footfall"] = (
-        df_region["street_footfall"]
-        .astype(str)
-        .str.replace(".", "", regex=False)   # punt = duizendscheiding
-        .str.replace(",", ".", regex=False)  # safety
-        .astype(float)
-    )
-
-    # "2025-10-05 To 2025-10-11" → 2025-10-05
-    def _parse_week_start(s):
-        if isinstance(s, str) and "To" in s:
-            return pd.to_datetime(s.split("To")[0].strip(), errors="coerce")
-        return pd.NaT
-
-    df_region["week_start"] = df_region["week"].apply(_parse_week_start)
-    df_region = df_region.dropna(subset=["week_start"])
-
-    # Filter op aangevraagde periode
-    start = pd.to_datetime(start_date)
-    end = pd.to_datetime(end_date)
-    df_region = df_region[
-        (df_region["week_start"] >= start) & (df_region["week_start"] <= end)
-    ]
-
-    return df_region[["week_start", "street_footfall"]].reset_index(drop=True)
 
 
 # -------------
@@ -427,8 +365,8 @@ def main():
     region_weekly = aggregate_weekly(df_period)
 
     # --- Pathzz street traffic per regio ---
-    pathzz_weekly = fetch_region_street_traffic(
-        region=region_choice,
+    pathzz_weekly = load_pathzz_weekly_for_region(
+        region_name=region_choice,
         start_date=start_period,
         end_date=end_period,
     )
@@ -543,6 +481,7 @@ def main():
         st.write("Region weekly:", region_weekly.head())
         st.write("Pathzz weekly:", pathzz_weekly.head())
         st.write("Capture weekly:", capture_weekly.head())
+
 
 if __name__ == "__main__":
     main()
