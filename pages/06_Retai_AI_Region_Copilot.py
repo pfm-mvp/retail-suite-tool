@@ -239,6 +239,68 @@ def aggregate_weekly(df: pd.DataFrame) -> pd.DataFrame:
 
     return df.groupby("week_start", as_index=False).agg(agg_dict)
 
+@st.cache_data(ttl=600)
+def load_pathzz_weekly_for_region(region_name: str, start_date, end_date) -> pd.DataFrame:
+    """
+    Leest demo-Pathzz data uit data/pathzz_sample_weekly.csv en filtert op regio + periode.
+
+    CSV-structuur (jouw bestand):
+    Region;Week;Visits;...
+
+    - Region  : 'Noord', 'Oost', 'Zuid', 'West'
+    - Week    : '2025-10-05 To 2025-10-11'
+    - Visits  : '54.085' (duizendtal met punt)
+    """
+    csv_path = "data/pathzz_sample_weekly.csv"
+    try:
+        df = pd.read_csv(csv_path, sep=";", dtype={"Visits": "string"})
+    except Exception:
+        return pd.DataFrame()
+
+    # Kolommen normaliseren
+    df = df.rename(
+        columns={
+            "Region": "region",
+            "Week": "week",
+            "Visits": "street_footfall",
+        }
+    )
+
+    # Regio’s schoonmaken en filteren op de gevraagde regio
+    df["region"] = df["region"].astype(str).str.strip()
+    region_norm = str(region_name).strip().lower()
+    df_region = df[df["region"].str.lower() == region_norm].copy()
+
+    if df_region.empty:
+        return pd.DataFrame()
+
+    # Visits: "54.085" → "54085" → 54085.0
+    df_region["street_footfall"] = (
+        df_region["street_footfall"]
+        .astype(str)
+        .str.replace(".", "", regex=False)   # punt = duizendscheiding
+        .str.replace(",", ".", regex=False)  # safety
+        .astype(float)
+    )
+
+    # "2025-10-05 To 2025-10-11" → 2025-10-05
+    def _parse_week_start(s):
+        if isinstance(s, str) and "To" in s:
+            return pd.to_datetime(s.split("To")[0].strip(), errors="coerce")
+        return pd.NaT
+
+    df_region["week_start"] = df_region["week"].apply(_parse_week_start)
+    df_region = df_region.dropna(subset=["week_start"])
+
+    # Filter op aangevraagde periode
+    start = pd.to_datetime(start_date)
+    end = pd.to_datetime(end_date)
+    df_region = df_region[
+        (df_region["week_start"] >= start) & (df_region["week_start"] <= end)
+    ]
+
+    return df_region[["week_start", "street_footfall"]].reset_index(drop=True)
+
 
 # -------------
 # MAIN UI (Region view)
