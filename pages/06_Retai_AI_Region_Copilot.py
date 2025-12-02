@@ -126,7 +126,7 @@ def get_report(
     return resp.json()
 
 
-# --- Pathzz loader per regio (nieuw & robuust) ------------------------------
+# --- Pathzz loader per regio (gefixte versie) ------------------------------
 
 @st.cache_data(ttl=600)
 def load_pathzz_weekly_for_region(region_name: str, start_date, end_date) -> pd.DataFrame:
@@ -137,7 +137,7 @@ def load_pathzz_weekly_for_region(region_name: str, start_date, end_date) -> pd.
     Region;Week;Visits;...
 
     - Region  : 'Noord', 'Oost', 'Zuid', 'West'
-    - Week    : '2025-10-05 To 2025-10-11'
+    - Week    : '2023-12-31 To 2024-01-06'
     - Visits  : '54.085'  (duizendtallen met punt → 54085)
     """
     csv_path = "data/pathzz_sample_weekly.csv"
@@ -165,10 +165,18 @@ def load_pathzz_weekly_for_region(region_name: str, start_date, end_date) -> pd.
         # Header klopt niet → leeg terug
         return pd.DataFrame()
 
-    # Regio’s schoonmaken en filteren op de gevraagde regio
-    df["region"] = df["region"].astype(str).str.replace("\ufeff", "").str.strip()
+    # Regio normaliseren + fuzzy match (contains) om rare tekens/spaties op te vangen
+    df["region_clean"] = (
+        df["region"]
+        .astype(str)
+        .str.replace("\ufeff", "")
+        .str.strip()
+        .str.lower()
+    )
     region_norm = str(region_name).replace("\ufeff", "").strip().lower()
-    df_region = df[df["region"].str.lower() == region_norm].copy()
+
+    mask = df["region_clean"].str.contains(region_norm, na=False)
+    df_region = df[mask].copy()
 
     if df_region.empty:
         return pd.DataFrame()
@@ -392,7 +400,7 @@ def main():
     # --- Wekelijkse aggregatie voor de regio ---
     region_weekly = aggregate_weekly(df_period)
 
-    # --- Pathzz street traffic per regio (nieuw: load_pathzz_weekly_for_region) ---
+    # --- Pathzz street traffic per regio (met nieuwe loader) ---
     pathzz_weekly = load_pathzz_weekly_for_region(
         region_name=region_choice,
         start_date=start_period,
