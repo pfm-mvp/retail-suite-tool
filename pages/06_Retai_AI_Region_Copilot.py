@@ -126,60 +126,56 @@ def get_report(
     return resp.json()
 
 
-@st.cache_data(ttl=600)
-def fetch_region_street_traffic(region: str, start_date, end_date) -> pd.DataFrame:
-    """
-    Leest demo-straattraffic per regio uit data/pathzz_sample_weekly.csv
+# --- Pathzz loader per regio (nieuw & robuust) ------------------------------
 
-    CSV-structuur (zoals jouw bestand):
+@st.cache_data(ttl=600)
+def load_pathzz_weekly_for_region(region_name: str, start_date, end_date) -> pd.DataFrame:
+    """
+    Leest demo-Pathzz data uit data/pathzz_sample_weekly.csv en filtert op regio + periode.
+
+    CSV-structuur (jouw bestand):
     Region;Week;Visits;...
 
-    Visits zijn waardes als 45.654 (→ 45654 bezoekers).
-    Return:
-    - week_start (datetime)
-    - street_footfall (float)
+    - Region  : 'Noord', 'Oost', 'Zuid', 'West'
+    - Week    : '2025-10-05 To 2025-10-11'
+    - Visits  : '54.085'  (duizendtallen met punt → 54085)
     """
     csv_path = "data/pathzz_sample_weekly.csv"
     try:
-        # Lees alles als string, met ; als delimiter
+        # Alles als string inlezen, ; als delimiter
         df = pd.read_csv(csv_path, sep=";", dtype=str, engine="python")
     except Exception:
         return pd.DataFrame()
 
     # Kolomnamen normaliseren (BOM + spaties + case)
-    norm_cols = []
-    for c in df.columns:
-        # verwijder BOM / rare onzichtbare tekens
-        clean = c.replace("\ufeff", "").strip().lower()
-        norm_cols.append(clean)
-
-    # Bouw mapping op basis van de genormaliseerde namen
-    col_map = {}
-    for original, norm in zip(df.columns, norm_cols):
-        if norm == "region":
+    clean_cols = [c.replace("\ufeff", "").strip().lower() for c in df.columns]
+    col_map: dict[str, str] = {}
+    for original, clean in zip(df.columns, clean_cols):
+        if clean == "region":
             col_map[original] = "region"
-        elif norm == "week":
+        elif clean == "week":
             col_map[original] = "week"
-        elif norm == "visits":
+        elif clean == "visits":
             col_map[original] = "street_footfall"
 
     df = df.rename(columns=col_map)
 
-    required_cols = {"region", "week", "street_footfall"}
-    if not required_cols.issubset(df.columns):
-        # Header nog steeds niet zoals verwacht → geen data
+    required = {"region", "week", "street_footfall"}
+    if not required.issubset(df.columns):
+        # Header klopt niet → leeg terug
         return pd.DataFrame()
 
-    # Regio filteren (case-insensitive, trims)
+    # Regio’s schoonmaken en filteren op de gevraagde regio
     df["region"] = df["region"].astype(str).str.replace("\ufeff", "").str.strip()
-    region_norm = str(region).replace("\ufeff", "").strip().lower()
-    df = df[df["region"].str.lower() == region_norm].copy()
-    if df.empty:
+    region_norm = str(region_name).replace("\ufeff", "").strip().lower()
+    df_region = df[df["region"].str.lower() == region_norm].copy()
+
+    if df_region.empty:
         return pd.DataFrame()
 
-    # Visits: "45.654" → "45654" → 45654.0
-    df["street_footfall"] = (
-        df["street_footfall"]
+    # Visits: "54.085" → "54085" → 54085.0
+    df_region["street_footfall"] = (
+        df_region["street_footfall"]
         .astype(str)
         .str.replace("\ufeff", "")
         .str.strip()
@@ -187,9 +183,11 @@ def fetch_region_street_traffic(region: str, start_date, end_date) -> pd.DataFra
         .str.replace(",", ".", regex=False)  # safety
     )
 
-    df = df[df["street_footfall"] != ""]
-    df["street_footfall"] = pd.to_numeric(df["street_footfall"], errors="coerce")
-    df = df.dropna(subset=["street_footfall"])
+    df_region = df_region[df_region["street_footfall"] != ""]
+    df_region["street_footfall"] = pd.to_numeric(
+        df_region["street_footfall"], errors="coerce"
+    )
+    df_region = df_region.dropna(subset=["street_footfall"])
 
     # "2025-10-05 To 2025-10-11" → 2025-10-05
     def _parse_week_start(s: str):
@@ -197,15 +195,18 @@ def fetch_region_street_traffic(region: str, start_date, end_date) -> pd.DataFra
             return pd.to_datetime(s.split("To")[0].strip(), errors="coerce")
         return pd.NaT
 
-    df["week_start"] = df["week"].apply(_parse_week_start)
-    df = df.dropna(subset=["week_start"])
+    df_region["week_start"] = df_region["week"].apply(_parse_week_start)
+    df_region = df_region.dropna(subset=["week_start"])
 
     # Filter op aangevraagde periode
     start = pd.to_datetime(start_date)
     end = pd.to_datetime(end_date)
-    df = df[(df["week_start"] >= start) & (df["week_start"] <= end)]
+    df_region = df_region[
+        (df_region["week_start"] >= start) & (df_region["week_start"] <= end)
+    ]
 
-    return df[["week_start", "street_footfall"]].reset_index(drop=True)
+    return df_region[["week_start", "street_footfall"]].reset_index(drop=True)
+
 
 # -------------
 # KPI helpers
@@ -391,9 +392,9 @@ def main():
     # --- Wekelijkse aggregatie voor de regio ---
     region_weekly = aggregate_weekly(df_period)
 
-    # --- Pathzz street traffic per regio ---
-    pathzz_weekly = fetch_region_street_traffic(
-        region=region_choice,
+    # --- Pathzz street traffic per regio (nieuw: load_pathzz_weekly_for_region) ---
+    pathzz_weekly = load_pathzz_weekly_for_region(
+        region_name=region_choice,
         start_date=start_period,
         end_date=end_period,
     )
@@ -510,6 +511,23 @@ def main():
         st.write("Region weekly:", region_weekly.head())
         st.write("Pathzz weekly:", pathzz_weekly.head())
         st.write("Capture weekly:", capture_weekly.head())
+
+        # Extra ruwe Pathzz-debug
+        try:
+            raw_pathzz = pd.read_csv(
+                "data/pathzz_sample_weekly.csv",
+                sep=";",
+                dtype=str,
+                engine="python",
+            )
+            st.write("Pathzz raw columns:", list(raw_pathzz.columns))
+            st.write("Pathzz raw (head):", raw_pathzz.head())
+            st.write(
+                "Pathzz unieke Region-waarden:",
+                raw_pathzz.iloc[:, 0].dropna().unique()[:10],
+            )
+        except Exception as e:
+            st.write("Pathzz raw load error:", str(e))
 
 
 if __name__ == "__main__":
