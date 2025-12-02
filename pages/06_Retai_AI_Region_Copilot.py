@@ -141,34 +141,39 @@ def fetch_region_street_traffic(region: str, start_date, end_date) -> pd.DataFra
     """
     csv_path = "data/pathzz_sample_weekly.csv"
     try:
-        # lees alles als string, met ; als scheidingsteken
+        # Lees alles als string, met ; als delimiter
         df = pd.read_csv(csv_path, sep=";", dtype=str, engine="python")
     except Exception:
         return pd.DataFrame()
 
-    # Kolommen robuust hernoemen (ongeacht BOM/spaties/case)
-    col_map = {}
+    # Kolomnamen normaliseren (BOM + spaties + case)
+    norm_cols = []
     for c in df.columns:
-        cl = c.strip().lower()
-        if cl == "region":
-            col_map[c] = "region"
-        elif cl == "week":
-            col_map[c] = "week"
-        elif cl == "visits":
-            col_map[c] = "street_footfall"
+        # verwijder BOM / rare onzichtbare tekens
+        clean = c.replace("\ufeff", "").strip().lower()
+        norm_cols.append(clean)
+
+    # Bouw mapping op basis van de genormaliseerde namen
+    col_map = {}
+    for original, norm in zip(df.columns, norm_cols):
+        if norm == "region":
+            col_map[original] = "region"
+        elif norm == "week":
+            col_map[original] = "week"
+        elif norm == "visits":
+            col_map[original] = "street_footfall"
 
     df = df.rename(columns=col_map)
 
     required_cols = {"region", "week", "street_footfall"}
     if not required_cols.issubset(df.columns):
-        # Header niet goed herkend
+        # Header nog steeds niet zoals verwacht → geen data
         return pd.DataFrame()
 
-    # Filter op regio (case-insensitive, trims)
-    df["region"] = df["region"].astype(str).str.strip()
-    region_norm = str(region).strip().lower()
+    # Regio filteren (case-insensitive, trims)
+    df["region"] = df["region"].astype(str).str.replace("\ufeff", "").str.strip()
+    region_norm = str(region).replace("\ufeff", "").strip().lower()
     df = df[df["region"].str.lower() == region_norm].copy()
-
     if df.empty:
         return pd.DataFrame()
 
@@ -176,17 +181,18 @@ def fetch_region_street_traffic(region: str, start_date, end_date) -> pd.DataFra
     df["street_footfall"] = (
         df["street_footfall"]
         .astype(str)
+        .str.replace("\ufeff", "")
         .str.strip()
         .str.replace(".", "", regex=False)   # punt = duizendscheiding
         .str.replace(",", ".", regex=False)  # safety
     )
-    # lege strings naar NaN voordat we casten
+
     df = df[df["street_footfall"] != ""]
     df["street_footfall"] = pd.to_numeric(df["street_footfall"], errors="coerce")
     df = df.dropna(subset=["street_footfall"])
 
     # "2025-10-05 To 2025-10-11" → 2025-10-05
-    def _parse_week_start(s):
+    def _parse_week_start(s: str):
         if isinstance(s, str) and "To" in s:
             return pd.to_datetime(s.split("To")[0].strip(), errors="coerce")
         return pd.NaT
@@ -200,7 +206,6 @@ def fetch_region_street_traffic(region: str, start_date, end_date) -> pd.DataFra
     df = df[(df["week_start"] >= start) & (df["week_start"] <= end)]
 
     return df[["week_start", "street_footfall"]].reset_index(drop=True)
-
 
 # -------------
 # KPI helpers
