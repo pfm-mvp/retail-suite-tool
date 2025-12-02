@@ -1,4 +1,4 @@
-# pages/06_Retail_Region_Copilot.py
+# pages/06_Retai_AI_Region_Copilot.py
 
 import numpy as np
 import pandas as pd
@@ -82,11 +82,10 @@ def load_region_mapping(path: str = "data/regions.csv") -> pd.DataFrame:
 def get_locations_by_company(company_id: int) -> pd.DataFrame:
     """
     Wrapper rond /company/{company_id}/location van de vemcount-agent.
-    Extra ruime timeout + nette foutmelding wordt in main() afgehandeld.
+    Extra ruime timeout, fouten worden in main() afgehandeld.
     """
     url = f"{FASTAPI_BASE_URL.rstrip('/')}/company/{company_id}/location"
 
-    # Iets ruimere timeout, API kan soms traag zijn
     resp = requests.get(url, timeout=60)
     resp.raise_for_status()
     data = resp.json()
@@ -128,16 +127,18 @@ def get_report(
 
 
 @st.cache_data(ttl=600)
-def load_pathzz_weekly_for_region(region_name: str, start_date, end_date) -> pd.DataFrame:
+def fetch_region_street_traffic(region: str, start_date, end_date) -> pd.DataFrame:
     """
-    Leest demo-Pathzz data uit data/pathzz_sample_weekly.csv en filtert op regio + periode.
+    Leest demo-straattraffic per regio uit data/pathzz_sample_weekly.csv
 
     CSV-structuur:
     Region;Week;Visits;...
 
-    - Region  : 'Noord', 'Oost', 'Zuid', 'West'
-    - Week    : '2025-10-05 To 2025-10-11'
-    - Visits  : '54.085' (duizendtal met punt)
+    Visits zijn waardes als 45.654 (→ 45654 bezoekers).
+    Return:
+    - region (str)
+    - week_start (datetime)
+    - street_footfall (float)
     """
     csv_path = "data/pathzz_sample_weekly.csv"
     try:
@@ -145,7 +146,7 @@ def load_pathzz_weekly_for_region(region_name: str, start_date, end_date) -> pd.
     except Exception:
         return pd.DataFrame()
 
-    # Kolommen normaliseren
+    # Kolommen normaliseren / hernoemen
     df = df.rename(
         columns={
             "Region": "region",
@@ -158,40 +159,38 @@ def load_pathzz_weekly_for_region(region_name: str, start_date, end_date) -> pd.
     if not required_cols.issubset(df.columns):
         return pd.DataFrame()
 
-    # Regio’s schoonmaken en filteren op de gevraagde regio
+    # Filter op regio (case-insensitive)
     df["region"] = df["region"].astype(str).str.strip()
-    region_norm = str(region_name).strip().lower()
-    df_region = df[df["region"].str.lower() == region_norm].copy()
+    region_norm = str(region).strip().lower()
+    df = df[df["region"].str.lower() == region_norm].copy()
 
-    if df_region.empty:
+    if df.empty:
         return pd.DataFrame()
 
-    # Visits: "54.085" → "54085" → 54085.0
-    df_region["street_footfall"] = (
-        df_region["street_footfall"]
+    # Visits: "45.654" → "45654" → 45654.0
+    df["street_footfall"] = (
+        df["street_footfall"]
         .astype(str)
         .str.replace(".", "", regex=False)   # punt = duizendscheiding
         .str.replace(",", ".", regex=False)  # safety
         .astype(float)
     )
 
-    # "2025-10-05 To 2025-10-11" → 2025-10-05
+    # "2025-10-26 To 2025-11-01" → 2025-10-26
     def _parse_week_start(s):
         if isinstance(s, str) and "To" in s:
             return pd.to_datetime(s.split("To")[0].strip(), errors="coerce")
         return pd.NaT
 
-    df_region["week_start"] = df_region["week"].apply(_parse_week_start)
-    df_region = df_region.dropna(subset=["week_start"])
+    df["week_start"] = df["week"].apply(_parse_week_start)
+    df = df.dropna(subset=["week_start"])
 
-    # Filter op aangevraagde periode
     start = pd.to_datetime(start_date)
     end = pd.to_datetime(end_date)
-    df_region = df_region[
-        (df_region["week_start"] >= start) & (df_region["week_start"] <= end)
-    ]
 
-    return df_region[["week_start", "street_footfall"]].reset_index(drop=True)
+    df = df[(df["week_start"] >= start) & (df["week_start"] <= end)]
+
+    return df[["week_start", "street_footfall"]].reset_index(drop=True)
 
 
 # -------------
@@ -278,6 +277,12 @@ def main():
 
     if locations_df.empty:
         st.error("Geen winkels gevonden voor deze retailer.")
+        return
+
+    # Region mapping inladen
+    region_map = load_region_mapping()
+    if region_map.empty:
+        st.error("Geen geldige regions.csv gevonden (verwacht kolommen: shop_id;region).")
         return
 
     # Koppel regions.csv aan locations op shop_id = id
@@ -373,8 +378,8 @@ def main():
     region_weekly = aggregate_weekly(df_period)
 
     # --- Pathzz street traffic per regio ---
-    pathzz_weekly = load_pathzz_weekly_for_region(
-        region_name=region_choice,
+    pathzz_weekly = fetch_region_street_traffic(
+        region=region_choice,
         start_date=start_period,
         end_date=end_period,
     )
@@ -458,7 +463,9 @@ def main():
 
         # Tabel met ruwe waarden
         st.markdown("### Weekly tabel – regio-footfall, straattraffic & capture rate")
-        table_df = capture_weekly[["week_start", "footfall", "street_footfall", "capture_rate"]].copy()
+        table_df = capture_weekly[
+            ["week_start", "footfall", "street_footfall", "capture_rate"]
+        ].copy()
         table_df["week_start"] = table_df["week_start"].dt.strftime("%Y-%m-%d")
         table_df["capture_rate"] = table_df["capture_rate"].map(
             lambda x: fmt_pct(x) if not pd.isna(x) else "-"
