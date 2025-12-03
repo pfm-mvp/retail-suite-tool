@@ -529,11 +529,11 @@ def main():
         df_range = compute_daily_kpis(df_range)
         store_weekly = aggregate_weekly(df_range).rename(columns={"footfall": "store_footfall"})
 
-        # 2) Street weekly totals
+        # 2) Street weekly – gemiddelde per week (i.p.v. som over alle regio's)
         street_weekly = (
             pathzz_weekly
             .groupby("week_start", as_index=False)["street_footfall"]
-            .sum()
+            .mean()
         )
 
         # 3) Merge totals 1-op-1 per week
