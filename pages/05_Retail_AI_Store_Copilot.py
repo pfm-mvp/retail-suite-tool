@@ -577,92 +577,91 @@ def main():
             ].mean()
 
             # -------------------------------
-            # Grafiek: store footfall & turnover (bars) + capture rate (line)
-            # Alleen winkel, geen regio
+            # Grafiek: store vs street + turnover + capture rate
             # -------------------------------
             st.markdown("### Straatdrukte vs winkeltraffic (weekly demo)")
 
-            # 1 rij per week forceren (voor de zekerheid)
-            agg_cols = {
-                "footfall": "sum",
-                "capture_rate": "mean",
-            }
-            if "turnover" in capture_weekly.columns:
-                agg_cols["turnover"] = "sum"
+            chart_df = capture_weekly[
+                ["week_start", "footfall", "turnover", "street_footfall", "capture_rate"]
+            ].copy()
 
-            weekly_agg = (
-                capture_weekly.groupby("week_start", as_index=False)
-                .agg(agg_cols)
-                .sort_values("week_start")
+            # Weeklabel als nette weeknummers, bv. W40, W41, ...
+            iso_cal = chart_df["week_start"].dt.isocalendar()
+            chart_df["week_label"] = iso_cal.week.apply(lambda w: f"W{int(w):02d}")
+
+            # Sorteren op week_start zodat x-as netjes oploopt
+            chart_df = chart_df.sort_values("week_start")
+
+            fig = make_subplots(
+                rows=1,
+                cols=1,
+                specs=[[{"secondary_y": True}]],
             )
 
-            # Weeklabels als W01, W02, ...
-            iso_week = weekly_agg["week_start"].dt.isocalendar().week.astype(int)
-            weekly_agg["week_label"] = iso_week.apply(lambda w: f"W{w:02d}")
-
-            fig_capture_store = make_subplots(specs=[[{"secondary_y": True}]])
-
-            # Footfall bar
-            fig_capture_store.add_trace(
-                go.Bar(
-                    x=weekly_agg["week_label"],
-                    y=weekly_agg["footfall"],
-                    name="Footfall (store)",
-                    hovertemplate="Week %{x}<br>Footfall: %{y:,.0f}<extra></extra>",
-                ),
-                secondary_y=False,
+            # Bar 1: footfall (store)
+            fig.add_bar(
+                x=chart_df["week_label"],
+                y=chart_df["footfall"],
+                name="Footfall (store)",
+                marker_color=PFM_PURPLE,
+                opacity=0.9,
             )
 
-            # Turnover bar (als aanwezig)
-            if "turnover" in weekly_agg.columns:
-                fig_capture_store.add_trace(
-                    go.Bar(
-                        x=weekly_agg["week_label"],
-                        y=weekly_agg["turnover"],
-                        name="Turnover (€)",
-                        opacity=0.6,
-                        hovertemplate="Week %{x}<br>Turnover: €%{y:,.0f}<extra></extra>",
-                    ),
-                    secondary_y=False,
-                )
+            # Bar 2: street traffic (Pathzz)
+            fig.add_bar(
+                x=chart_df["week_label"],
+                y=chart_df["street_footfall"],
+                name="Street traffic",
+                marker_color=PFM_ORANGE,
+                opacity=0.8,
+            )
 
-            # Capture rate line (winkel)
-            fig_capture_store.add_trace(
+            # Bar 3: turnover
+            fig.add_bar(
+                x=chart_df["week_label"],
+                y=chart_df["turnover"],
+                name="Turnover (€)",
+                marker_color=PFM_PINK,
+                opacity=0.6,
+            )
+
+            # Line: capture rate op tweede Y-as
+            fig.add_trace(
                 go.Scatter(
-                    x=weekly_agg["week_label"],
-                    y=weekly_agg["capture_rate"],
-                    mode="lines+markers",
+                    x=chart_df["week_label"],
+                    y=chart_df["capture_rate"],
                     name="Capture rate (%)",
+                    mode="lines+markers",
+                    line=dict(color=PFM_RED, width=2),
+                    marker=dict(size=6),
                     hovertemplate="Week %{x}<br>Capture rate: %{y:.1f}%<extra></extra>",
                 ),
                 secondary_y=True,
             )
 
-            fig_capture_store.update_layout(
-                title="Straatdrukte vs winkeltraffic (weekly demo)",
+            fig.update_layout(
                 barmode="group",
-                legend=dict(
-                    orientation="h",
-                    yanchor="bottom",
-                    y=1.02,
-                    xanchor="left",
-                    x=0,
+                height=380,
+                margin=dict(l=40, r=40, t=10, b=40),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+                xaxis=dict(title="Week"),
+                yaxis=dict(
+                    title="Footfall / street traffic / turnover",
+                    rangemode="tozero",
                 ),
-                margin=dict(t=80, l=40, r=40, b=40),
+                yaxis2=dict(
+                    title="Capture rate (%)",
+                    rangemode="tozero",
+                ),
             )
 
-            fig_capture_store.update_xaxes(title_text="Week")
-
-            fig_capture_store.update_yaxes(
-                title_text="Footfall / Turnover",
-                secondary_y=False,
-            )
-            fig_capture_store.update_yaxes(
-                title_text="Capture rate (%)",
-                secondary_y=True,
+            # Nettere hoverformat voor de bars
+            fig.update_traces(
+                selector=dict(type="bar"),
+                hovertemplate="%{x}<br>%{y:,.0f}<extra>%{fullData.name}</extra>",
             )
 
-            st.plotly_chart(fig_capture_store, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True)
 
     # --- CBS context (data ophalen) ---
     cbs_stats = {}
