@@ -5,6 +5,8 @@ import pandas as pd
 import requests
 import streamlit as st
 import altair as alt
+from plotly.subplots import make_subplots
+import plotly.graph_objects as go
 
 from datetime import datetime, timedelta
 
@@ -554,91 +556,92 @@ def main():
             ].mean()
 
             # -------------------------------
-            # Grafiek: store vs street + capture rate
+            # Grafiek: store footfall & turnover (bars) + capture rate (line)
+            # Alleen winkel, geen regio
             # -------------------------------
             st.markdown("### Straatdrukte vs winkeltraffic (weekly demo)")
 
-            chart_df = capture_weekly[
-                ["week_start", "footfall", "street_footfall", "capture_rate"]
-            ].copy()
+            # 1 rij per week forceren (voor de zekerheid)
+            agg_cols = {
+                "footfall": "sum",
+                "capture_rate": "mean",
+            }
+            if "turnover" in capture_weekly.columns:
+                agg_cols["turnover"] = "sum"
 
-            # Weeklabel als nette weeknummers, bv. W01, W02, ...
-            iso_cal = chart_df["week_start"].dt.isocalendar()
-            chart_df["week_label"] = iso_cal.week.apply(lambda w: f"W{int(w):02d}")
-
-            # Sorteervolgorde op basis van werkelijke datum
-            week_order = chart_df.sort_values("week_start")["week_label"].unique().tolist()
-
-            # Data voor de staafgrafiek in long format
-            counts_long = chart_df.melt(
-                id_vars=["week_label"],
-                value_vars=["footfall", "street_footfall"],
-                var_name="metric",
-                value_name="value",
+            weekly_agg = (
+                capture_weekly.groupby("week_start", as_index=False)
+                .agg(agg_cols)
+                .sort_values("week_start")
             )
 
-            bar_chart = (
-                alt.Chart(counts_long)
-                .mark_bar(width=28, opacity=0.85)
-                .encode(
-                    x=alt.X(
-                        "week_label:N",
-                        title="Week",
-                        sort=week_order,
+            # Weeklabels als W01, W02, ...
+            iso_week = weekly_agg["week_start"].dt.isocalendar().week.astype(int)
+            weekly_agg["week_label"] = iso_week.apply(lambda w: f"W{w:02d}")
+
+            fig_capture_store = make_subplots(specs=[[{"secondary_y": True}]])
+
+            # Footfall bar
+            fig_capture_store.add_trace(
+                go.Bar(
+                    x=weekly_agg["week_label"],
+                    y=weekly_agg["footfall"],
+                    name="Footfall (store)",
+                    hovertemplate="Week %{x}<br>Footfall: %{y:,.0f}<extra></extra>",
+                ),
+                secondary_y=False,
+            )
+
+            # Turnover bar (als aanwezig)
+            if "turnover" in weekly_agg.columns:
+                fig_capture_store.add_trace(
+                    go.Bar(
+                        x=weekly_agg["week_label"],
+                        y=weekly_agg["turnover"],
+                        name="Turnover (€)",
+                        opacity=0.6,
+                        hovertemplate="Week %{x}<br>Turnover: €%{y:,.0f}<extra></extra>",
                     ),
-                    xOffset=alt.XOffset("metric:N"),
-                    y=alt.Y(
-                        "value:Q",
-                        axis=alt.Axis(title="Footfall / street traffic"),
-                    ),
-                    color=alt.Color(
-                        "metric:N",
-                        title="",
-                        scale=alt.Scale(
-                            domain=["footfall", "street_footfall"],
-                            range=["#1f77b4", "#ff7f0e"],  # blauw / oranje
-                        ),
-                    ),
-                    tooltip=[
-                        alt.Tooltip("week_label:N", title="Week"),
-                        alt.Tooltip("metric:N", title="Type"),
-                        alt.Tooltip("value:Q", title="Aantal", format=",.0f"),
-                    ],
+                    secondary_y=False,
                 )
+
+            # Capture rate line (winkel)
+            fig_capture_store.add_trace(
+                go.Scatter(
+                    x=weekly_agg["week_label"],
+                    y=weekly_agg["capture_rate"],
+                    mode="lines+markers",
+                    name="Capture rate (%)",
+                    hovertemplate="Week %{x}<br>Capture rate: %{y:.1f}%<extra></extra>",
+                ),
+                secondary_y=True,
             )
 
-            line_chart = (
-                alt.Chart(chart_df)
-                .mark_line(point=True, strokeWidth=2, color="#F04438")
-                .encode(
-                    x=alt.X(
-                        "week_label:N",
-                        title="Week",
-                        sort=week_order,
-                    ),
-                    y=alt.Y(
-                        "capture_rate:Q",
-                        axis=alt.Axis(title="Capture rate (%)"),
-                        scale=alt.Scale(zero=True),
-                    ),
-                    tooltip=[
-                        alt.Tooltip("week_label:N", title="Week"),
-                        alt.Tooltip(
-                            "capture_rate:Q",
-                            title="Capture rate",
-                            format=".1f",
-                        ),
-                    ],
-                )
+            fig_capture_store.update_layout(
+                title="Straatdrukte vs winkeltraffic (weekly demo)",
+                barmode="group",
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="left",
+                    x=0,
+                ),
+                margin=dict(t=80, l=40, r=40, b=40),
             )
 
-            combined = (
-                alt.layer(bar_chart, line_chart)
-                .resolve_scale(y="independent")
-                .properties(height=350)
+            fig_capture_store.update_xaxes(title_text="Week")
+
+            fig_capture_store.update_yaxes(
+                title_text="Footfall / Turnover",
+                secondary_y=False,
+            )
+            fig_capture_store.update_yaxes(
+                title_text="Capture rate (%)",
+                secondary_y=True,
             )
 
-            st.altair_chart(combined, use_container_width=True)
+            st.plotly_chart(fig_capture_store, use_container_width=True)
 
     # --- CBS context (data ophalen) ---
     cbs_stats = {}
