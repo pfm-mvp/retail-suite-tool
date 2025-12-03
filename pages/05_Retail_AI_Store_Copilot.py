@@ -510,148 +510,148 @@ def main():
     if weather_location and VISUALCROSSING_KEY:
         weather_df = fetch_visualcrossing_history(weather_location, start_cur, end_cur)
 
-# --- Pathzz street traffic (weekly, demo) ---
-pathzz_weekly = fetch_monthly_street_traffic(
-    start_date=start_prev,
-    end_date=end_cur,
-)
-
-capture_weekly = pd.DataFrame()
-avg_capture_cur = None
-avg_capture_prev = None
-
-if not pathzz_weekly.empty:
-    # 1) Store weekly totals
-    df_range = df_all_raw[
-        (df_all_raw["date"] >= start_prev_ts) &
-        (df_all_raw["date"] <= end_cur_ts)
-    ].copy()
-    df_range = compute_daily_kpis(df_range)
-    store_weekly = aggregate_weekly(df_range).rename(columns={"footfall": "store_footfall"})
-
-    # 2) Street weekly totals
-    street_weekly = (
-        pathzz_weekly
-        .groupby("week_start", as_index=False)["street_footfall"]
-        .sum()
+    # --- Pathzz street traffic (weekly, demo) ---
+    pathzz_weekly = fetch_monthly_street_traffic(
+        start_date=start_prev,
+        end_date=end_cur,
     )
 
-    # 3) Merge totals 1-on-1 per week
-    capture_weekly = pd.merge(
-        store_weekly,
-        street_weekly,
-        on="week_start",
-        how="inner"
-    )
+    capture_weekly = pd.DataFrame()
+    avg_capture_cur = None
+    avg_capture_prev = None
 
-    # 4) Compute capture rate (single value per week)
-    capture_weekly["capture_rate"] = np.where(
-        capture_weekly["street_footfall"] > 0,
-        capture_weekly["store_footfall"] / capture_weekly["street_footfall"] * 100,
-        np.nan
-    )
+    if not pathzz_weekly.empty:
+        # 1) Store weekly totals (footfall + turnover)
+        df_range = df_all_raw[
+            (df_all_raw["date"] >= start_prev_ts) &
+            (df_all_raw["date"] <= end_cur_ts)
+        ].copy()
+        df_range = compute_daily_kpis(df_range)
+        store_weekly = aggregate_weekly(df_range).rename(columns={"footfall": "store_footfall"})
 
-    # 5) Mark current vs previous period
-    capture_weekly = capture_weekly.sort_values("week_start")
-    capture_weekly["period"] = np.where(
-        (capture_weekly["week_start"] >= start_cur_ts) &
-        (capture_weekly["week_start"] <= end_cur_ts),
-        "huidige",
-        "vorige"
-    )
+        # 2) Street weekly totals
+        street_weekly = (
+            pathzz_weekly
+            .groupby("week_start", as_index=False)["street_footfall"]
+            .sum()
+        )
 
-    # 6) Avg capture per period
-    avg_capture_cur = capture_weekly.loc[
-        capture_weekly["period"] == "huidige", "capture_rate"
-    ].mean()
+        # 3) Merge totals 1-op-1 per week
+        capture_weekly = pd.merge(
+            store_weekly,
+            street_weekly,
+            on="week_start",
+            how="inner",
+        )
 
-    avg_capture_prev = capture_weekly.loc[
-        capture_weekly["period"] == "vorige", "capture_rate"
-    ].mean()
+        # 4) Capture rate per week
+        capture_weekly["capture_rate"] = np.where(
+            capture_weekly["street_footfall"] > 0,
+            capture_weekly["store_footfall"] / capture_weekly["street_footfall"] * 100,
+            np.nan,
+        )
 
-            # -------------------------------
-            # Grafiek: store vs street + omzet + capture rate
-            # -------------------------------
-            st.markdown("### Straatdrukte vs winkeltraffic (weekly demo)")
+        # Voor grafiek: kolomnaam terug naar 'footfall'
+        capture_weekly = capture_weekly.rename(columns={"store_footfall": "footfall"})
 
-            chart_df = capture_weekly[
-                ["week_start", "footfall", "street_footfall", "turnover", "capture_rate"]
-            ].copy()
+        # 5) Periode-label
+        capture_weekly = capture_weekly.sort_values("week_start")
+        capture_weekly["period"] = np.where(
+            (capture_weekly["week_start"] >= start_cur_ts)
+            & (capture_weekly["week_start"] <= end_cur_ts),
+            "huidige",
+            "vorige",
+        )
 
-            # Weeklabel als nette weeknummers, bv. W01, W02, ...
-            iso_cal = chart_df["week_start"].dt.isocalendar()
-            chart_df["week_label"] = iso_cal.week.apply(lambda w: f"W{int(w):02d}")
+        # 6) Gemiddelde capture per periode
+        avg_capture_cur = capture_weekly.loc[
+            capture_weekly["period"] == "huidige", "capture_rate"
+        ].mean()
+        avg_capture_prev = capture_weekly.loc[
+            capture_weekly["period"] == "vorige", "capture_rate"
+        ].mean()
 
-            week_order = chart_df.sort_values("week_start")["week_label"].unique().tolist()
+        # -------------------------------
+        # Grafiek: store vs street + omzet + capture rate
+        # -------------------------------
+        st.markdown("### Straatdrukte vs winkeltraffic (weekly demo)")
 
-            fig_week = make_subplots(specs=[[{"secondary_y": True}]])
+        chart_df = capture_weekly[
+            ["week_start", "footfall", "street_footfall", "turnover", "capture_rate"]
+        ].copy()
 
-            # Footfall bar
-            fig_week.add_bar(
+        iso_cal = chart_df["week_start"].dt.isocalendar()
+        chart_df["week_label"] = iso_cal.week.apply(lambda w: f"W{int(w):02d}")
+        week_order = chart_df.sort_values("week_start")["week_label"].unique().tolist()
+
+        fig_week = make_subplots(specs=[[{"secondary_y": True}]])
+
+        # Footfall bar
+        fig_week.add_bar(
+            x=chart_df["week_label"],
+            y=chart_df["footfall"],
+            name="Footfall (store)",
+            marker_color=PFM_PURPLE,
+            offsetgroup=0,
+            yaxis="y1",
+        )
+
+        # Street traffic bar
+        fig_week.add_bar(
+            x=chart_df["week_label"],
+            y=chart_df["street_footfall"],
+            name="Street traffic",
+            marker_color=PFM_PEACH,
+            opacity=0.7,
+            offsetgroup=1,
+            yaxis="y1",
+        )
+
+        # Turnover bar
+        fig_week.add_bar(
+            x=chart_df["week_label"],
+            y=chart_df["turnover"],
+            name="Turnover (€)",
+            marker_color=PFM_PINK,
+            opacity=0.7,
+            offsetgroup=2,
+            yaxis="y1",
+        )
+
+        # Capture rate line
+        fig_week.add_trace(
+            go.Scatter(
                 x=chart_df["week_label"],
-                y=chart_df["footfall"],
-                name="Footfall (store)",
-                marker_color=PFM_PURPLE,
-                offsetgroup=0,
-                yaxis="y1",
-            )
+                y=chart_df["capture_rate"],
+                name="Capture rate (%)",
+                mode="lines+markers",
+                line=dict(color=PFM_RED, width=2),
+            ),
+            secondary_y=True,
+        )
 
-            # Street traffic bar
-            fig_week.add_bar(
-                x=chart_df["week_label"],
-                y=chart_df["street_footfall"],
-                name="Street traffic",
-                marker_color=PFM_PEACH,
-                opacity=0.7,
-                offsetgroup=1,
-                yaxis="y1",
-            )
+        fig_week.update_xaxes(
+            title_text="Week",
+            categoryorder="array",
+            categoryarray=week_order,
+        )
+        fig_week.update_yaxes(
+            title_text="Footfall / street traffic / omzet (€)",
+            secondary_y=False,
+        )
+        fig_week.update_yaxes(
+            title_text="Capture rate (%)",
+            secondary_y=True,
+        )
 
-            # Turnover bar
-            fig_week.add_bar(
-                x=chart_df["week_label"],
-                y=chart_df["turnover"],
-                name="Turnover (€)",
-                marker_color=PFM_PINK,
-                opacity=0.7,
-                offsetgroup=2,
-                yaxis="y1",
-            )
+        fig_week.update_layout(
+            barmode="group",
+            height=350,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+            margin=dict(l=40, r=40, t=40, b=40),
+        )
 
-            # Capture rate line (store)
-            fig_week.add_trace(
-                go.Scatter(
-                    x=chart_df["week_label"],
-                    y=chart_df["capture_rate"],
-                    name="Capture rate (%)",
-                    mode="lines+markers",
-                    line=dict(color=PFM_RED, width=2),
-                ),
-                secondary_y=True,
-            )
-
-            fig_week.update_xaxes(
-                title_text="Week",
-                categoryorder="array",
-                categoryarray=week_order,
-            )
-            fig_week.update_yaxes(
-                title_text="Footfall / street traffic / omzet (€)",
-                secondary_y=False,
-            )
-            fig_week.update_yaxes(
-                title_text="Capture rate (%)",
-                secondary_y=True,
-            )
-
-            fig_week.update_layout(
-                barmode="group",
-                height=350,
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-                margin=dict(l=40, r=40, t=40, b=40),
-            )
-
-            st.plotly_chart(fig_week, use_container_width=True)
+        st.plotly_chart(fig_week, use_container_width=True)
 
     # --- CBS context (data ophalen) ---
     cbs_stats = {}
@@ -836,6 +836,7 @@ if not pathzz_weekly.empty:
         st.write("Capture weekly:", capture_weekly.head() if isinstance(capture_weekly, pd.DataFrame) else capture_weekly)
         st.write("CBS stats:", cbs_stats)
         st.write("Weather df:", weather_df.head())
+
 
 if __name__ == "__main__":
     main()
