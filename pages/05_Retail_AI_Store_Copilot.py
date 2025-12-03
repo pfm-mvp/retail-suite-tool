@@ -13,8 +13,10 @@ from datetime import datetime, timedelta
 from helpers_clients import load_clients
 from helpers_normalize import normalize_vemcount_response
 from services.cbs_service import get_cbs_stats_for_postcode4
-from services.forecast_service import build_simple_footfall_turnover_forecast
-from services.forecast_service import build_pro_footfall_turnover_forecast
+from services.forecast_service import (
+    build_simple_footfall_turnover_forecast,
+    build_pro_footfall_turnover_forecast,
+)
 
 # Probeer de service-import; als die er niet is, gebruik een lokale CSV-loader
 try:
