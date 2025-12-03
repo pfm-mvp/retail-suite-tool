@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
-import altair as alt
+import altair as alt  # eventueel later nog voor andere grafieken
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 
@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from helpers_clients import load_clients
 from helpers_normalize import normalize_vemcount_response
 from services.cbs_service import get_cbs_stats_for_postcode4
+
 # Probeer de service-import; als die er niet is, gebruik een lokale CSV-loader
 try:
     from services.pathzz_service import fetch_monthly_street_traffic  # gebruikt sample weekly CSV
@@ -521,7 +522,7 @@ def main():
     avg_capture_prev = None
 
     if not pathzz_weekly.empty:
-        # 1) Store weekly totals (footfall + turnover)
+        # 1) Store weekly totals
         df_range = df_all_raw[
             (df_all_raw["date"] >= start_prev_ts) &
             (df_all_raw["date"] <= end_cur_ts)
@@ -529,44 +530,45 @@ def main():
         df_range = compute_daily_kpis(df_range)
         store_weekly = aggregate_weekly(df_range).rename(columns={"footfall": "store_footfall"})
 
-        # 2) Street weekly – gemiddelde per week (i.p.v. som over alle regio's)
+        # 2) Street weekly totals
         street_weekly = (
             pathzz_weekly
             .groupby("week_start", as_index=False)["street_footfall"]
-            .mean()
+            .sum()
         )
 
-        # 3) Merge totals 1-op-1 per week
+        # 3) Merge totals 1-on-1 per week
         capture_weekly = pd.merge(
             store_weekly,
             street_weekly,
             on="week_start",
-            how="inner",
+            how="inner"
         )
 
-        # 4) Capture rate per week
+        # 4) Compute capture rate (single value per week)
         capture_weekly["capture_rate"] = np.where(
             capture_weekly["street_footfall"] > 0,
             capture_weekly["store_footfall"] / capture_weekly["street_footfall"] * 100,
-            np.nan,
+            np.nan
         )
 
-        # Voor grafiek: kolomnaam terug naar 'footfall'
+        # Hernoem voor grafieken
         capture_weekly = capture_weekly.rename(columns={"store_footfall": "footfall"})
 
-        # 5) Periode-label
+        # 5) Mark current vs previous period
         capture_weekly = capture_weekly.sort_values("week_start")
         capture_weekly["period"] = np.where(
-            (capture_weekly["week_start"] >= start_cur_ts)
-            & (capture_weekly["week_start"] <= end_cur_ts),
+            (capture_weekly["week_start"] >= start_cur_ts) &
+            (capture_weekly["week_start"] <= end_cur_ts),
             "huidige",
-            "vorige",
+            "vorige"
         )
 
-        # 6) Gemiddelde capture per periode
+        # 6) Avg capture per period
         avg_capture_cur = capture_weekly.loc[
             capture_weekly["period"] == "huidige", "capture_rate"
         ].mean()
+
         avg_capture_prev = capture_weekly.loc[
             capture_weekly["period"] == "vorige", "capture_rate"
         ].mean()
@@ -580,8 +582,10 @@ def main():
             ["week_start", "footfall", "street_footfall", "turnover", "capture_rate"]
         ].copy()
 
+        # Weeklabel als nette weeknummers, bv. W01, W02, ...
         iso_cal = chart_df["week_start"].dt.isocalendar()
         chart_df["week_label"] = iso_cal.week.apply(lambda w: f"W{int(w):02d}")
+
         week_order = chart_df.sort_values("week_start")["week_label"].unique().tolist()
 
         fig_week = make_subplots(specs=[[{"secondary_y": True}]])
@@ -618,7 +622,7 @@ def main():
             yaxis="y1",
         )
 
-        # Capture rate line
+        # Capture rate line (store)
         fig_week.add_trace(
             go.Scatter(
                 x=chart_df["week_label"],
@@ -812,16 +816,123 @@ def main():
 
         st.plotly_chart(fig_weather, use_container_width=True)
 
-    # --- CBS context ---
-    if cbs_stats:
-        st.markdown("### CBS context (postcodegebied)")
-        c1, c2 = st.columns(2)
-        if "avg_income_index" in cbs_stats:
-            c1.metric("Inkomensindex (NL = 100)", cbs_stats["avg_income_index"])
-        if "population_density_index" in cbs_stats:
-            c2.metric("Bevolkingsdichtheid-index", cbs_stats["population_density_index"])
-        if "note" in cbs_stats:
-            st.caption(cbs_stats["note"])
+    # --- Forecast: footfall & omzet (dag niveau, 14 dagen) ---
+    st.markdown("### Forecast: footfall & omzet (volgende 14 dagen)")
+
+    try:
+        hist = df_all_raw.copy()
+        hist = compute_daily_kpis(hist)
+        hist = hist.dropna(subset=["footfall"])
+
+        if hist.shape[0] < 30:
+            st.info("Te weinig historische data om een betrouwbare forecast te tonen.")
+        else:
+            hist["dow"] = hist["date"].dt.weekday
+            grp = hist.groupby("dow")
+
+            dow_stats = grp["footfall"].agg(["mean", "std"]).rename(
+                columns={"mean": "footfall_mean", "std": "footfall_std"}
+            )
+
+            if "sales_per_visitor" in hist.columns:
+                dow_spv = grp["sales_per_visitor"].mean().rename("spv_mean")
+                dow_stats = dow_stats.join(dow_spv)
+            else:
+                dow_stats["spv_mean"] = np.nan
+
+            last_date = hist["date"].max()
+            horizon = 14
+            future_dates = pd.date_range(last_date + pd.Timedelta(days=1), periods=horizon, freq="D")
+
+            fc = pd.DataFrame({"date": future_dates})
+            fc["dow"] = fc["date"].dt.weekday
+            fc = fc.merge(dow_stats.reset_index(), on="dow", how="left")
+
+            global_spv = hist["sales_per_visitor"].mean() if "sales_per_visitor" in hist.columns else np.nan
+            fc["spv_mean"] = fc["spv_mean"].fillna(global_spv)
+
+            fc["footfall_forecast"] = fc["footfall_mean"].clip(lower=0)
+            fc["turnover_forecast"] = fc["footfall_forecast"] * fc["spv_mean"]
+
+            # Vergelijk met afgelopen 14 dagen
+            last_14_start = last_date - pd.Timedelta(days=13)
+            recent = hist[(hist["date"] >= last_14_start) & (hist["date"] <= last_date)]
+
+            recent_foot = recent["footfall"].sum()
+            recent_turn = recent["turnover"].sum() if "turnover" in recent.columns else np.nan
+
+            fut_foot = fc["footfall_forecast"].sum()
+            fut_turn = fc["turnover_forecast"].sum()
+
+            c1, c2 = st.columns(2)
+            with c1:
+                delta_foot = None
+                if recent_foot > 0:
+                    delta_foot = f"{(fut_foot - recent_foot) / recent_foot * 100:+.1f}%"
+                st.metric("Verwachte bezoekers (14 dagen)", fmt_int(fut_foot), delta=delta_foot)
+
+            with c2:
+                delta_turn = None
+                if not pd.isna(recent_turn) and recent_turn > 0:
+                    delta_turn = f"{(fut_turn - recent_turn) / recent_turn * 100:+.1f}%"
+                st.metric("Verwachte omzet (14 dagen)", fmt_eur(fut_turn), delta=delta_turn)
+
+            # Grafiek: laatste 28 dagen historisch + 14 dagen forecast
+            hist_recent = hist[hist["date"] >= (last_date - pd.Timedelta(days=27))]
+
+            fig_fc = make_subplots(specs=[[{"secondary_y": True}]])
+
+            fig_fc.add_bar(
+                x=hist_recent["date"],
+                y=hist_recent["footfall"],
+                name="Footfall (historisch)",
+                marker_color=PFM_PURPLE,
+            )
+
+            fig_fc.add_bar(
+                x=fc["date"],
+                y=fc["footfall_forecast"],
+                name="Footfall forecast",
+                marker_color=PFM_PEACH,
+            )
+
+            if "turnover" in hist.columns:
+                fig_fc.add_trace(
+                    go.Scatter(
+                        x=hist_recent["date"],
+                        y=hist_recent["turnover"],
+                        name="Omzet historisch",
+                        mode="lines",
+                        line=dict(color=PFM_PINK, width=2),
+                    ),
+                    secondary_y=True,
+                )
+
+            fig_fc.add_trace(
+                go.Scatter(
+                    x=fc["date"],
+                    y=fc["turnover_forecast"],
+                    name="Omzet forecast",
+                    mode="lines+markers",
+                    line=dict(color=PFM_RED, width=2, dash="dash"),
+                ),
+                secondary_y=True,
+            )
+
+            fig_fc.update_xaxes(title_text="")
+            fig_fc.update_yaxes(title_text="Footfall", secondary_y=False)
+            fig_fc.update_yaxes(title_text="Omzet (€)", secondary_y=True)
+
+            fig_fc.update_layout(
+                height=350,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+                margin=dict(l=40, r=40, t=20, b=40),
+            )
+
+            st.plotly_chart(fig_fc, use_container_width=True)
+
+    except Exception:
+        st.info("Forecast kon niet worden berekend (te weinig data of ontbrekende kolommen).")
 
     # --- Debug ---
     with st.expander("🔧 Debug"):
@@ -836,7 +947,6 @@ def main():
         st.write("Capture weekly:", capture_weekly.head() if isinstance(capture_weekly, pd.DataFrame) else capture_weekly)
         st.write("CBS stats:", cbs_stats)
         st.write("Weather df:", weather_df.head())
-
 
 if __name__ == "__main__":
     main()
