@@ -152,9 +152,14 @@ def get_report(
     step: str = "day",
     source: str = "shops",
     company_id: int | None = None,  # voor toekomst, nu niet gebruikt
+    form_date_from: str | None = None,
+    form_date_to: str | None = None,
 ):
     """
     Wrapper rond /get-report (POST) van de vemcount-agent, met querystring zonder [].
+
+    Als period="date" wordt gebruikt en form_date_from / form_date_to zijn gezet
+    (YYYY-MM-DD), dan stuurt hij die als extra parameters mee.
     """
     params: list[tuple[str, str]] = []
 
@@ -167,6 +172,11 @@ def get_report(
     params.append(("period", period))
     params.append(("step", step))
     params.append(("source", source))
+
+    # Vrij datumbereik bij period="date"
+    if period == "date" and form_date_from and form_date_to:
+        params.append(("form_date_from", form_date_from))
+        params.append(("form_date_to", form_date_to))
 
     resp = requests.post(REPORT_URL, params=params, timeout=60)
     resp.raise_for_status()
