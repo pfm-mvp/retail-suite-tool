@@ -887,9 +887,9 @@ def main():
 
     try:
         if forecast_mode == "Pro (LightGBM beta)":
-            fc_res = build_pro_footfall_turnover_forecast(df_all_raw)
+            fc_res = build_pro_footfall_turnover_forecast(df_hist_raw)
         else:
-            fc_res = build_simple_footfall_turnover_forecast(df_all_raw)
+            fc_res = build_simple_footfall_turnover_forecast(df_hist_raw)
 
         if not fc_res.get("enough_history", False):
             st.info("Te weinig historische data om een betrouwbare forecast te tonen.")
