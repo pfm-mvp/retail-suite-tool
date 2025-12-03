@@ -510,60 +510,64 @@ def main():
     if weather_location and VISUALCROSSING_KEY:
         weather_df = fetch_visualcrossing_history(weather_location, start_cur, end_cur)
 
-    # --- Pathzz street traffic (weekly, demo) ---
-    # Voor vergelijking gebruiken we vorige + huidige periode samen.
-    pathzz_weekly = fetch_monthly_street_traffic(
-        start_date=start_prev,
-        end_date=end_cur,
+# --- Pathzz street traffic (weekly, demo) ---
+pathzz_weekly = fetch_monthly_street_traffic(
+    start_date=start_prev,
+    end_date=end_cur,
+)
+
+capture_weekly = pd.DataFrame()
+avg_capture_cur = None
+avg_capture_prev = None
+
+if not pathzz_weekly.empty:
+    # 1) Store weekly totals
+    df_range = df_all_raw[
+        (df_all_raw["date"] >= start_prev_ts) &
+        (df_all_raw["date"] <= end_cur_ts)
+    ].copy()
+    df_range = compute_daily_kpis(df_range)
+    store_weekly = aggregate_weekly(df_range).rename(columns={"footfall": "store_footfall"})
+
+    # 2) Street weekly totals
+    street_weekly = (
+        pathzz_weekly
+        .groupby("week_start", as_index=False)["street_footfall"]
+        .sum()
     )
 
-    capture_weekly = pd.DataFrame()
-    avg_capture_cur = None
-    avg_capture_prev = None
+    # 3) Merge totals 1-on-1 per week
+    capture_weekly = pd.merge(
+        store_weekly,
+        street_weekly,
+        on="week_start",
+        how="inner"
+    )
 
-    if not pathzz_weekly.empty:
-        # Store-data in dezelfde periode pakken en naar week aggregeren
-        df_range = df_all_raw[
-            (df_all_raw["date"] >= start_prev_ts)
-            & (df_all_raw["date"] <= end_cur_ts)
-        ].copy()
-        df_range = compute_daily_kpis(df_range)
-        store_weekly_all = aggregate_weekly(df_range)
+    # 4) Compute capture rate (single value per week)
+    capture_weekly["capture_rate"] = np.where(
+        capture_weekly["street_footfall"] > 0,
+        capture_weekly["store_footfall"] / capture_weekly["street_footfall"] * 100,
+        np.nan
+    )
 
-        pathzz_weekly["week_start"] = pd.to_datetime(pathzz_weekly["week_start"])
-        store_weekly_all["week_start"] = pd.to_datetime(store_weekly_all["week_start"])
+    # 5) Mark current vs previous period
+    capture_weekly = capture_weekly.sort_values("week_start")
+    capture_weekly["period"] = np.where(
+        (capture_weekly["week_start"] >= start_cur_ts) &
+        (capture_weekly["week_start"] <= end_cur_ts),
+        "huidige",
+        "vorige"
+    )
 
-        capture_weekly = pd.merge(
-            store_weekly_all,
-            pathzz_weekly,
-            on="week_start",
-            how="inner",
-        )
+    # 6) Avg capture per period
+    avg_capture_cur = capture_weekly.loc[
+        capture_weekly["period"] == "huidige", "capture_rate"
+    ].mean()
 
-        if not capture_weekly.empty:
-            # Store capture rate – single winkel
-            capture_weekly["capture_rate"] = np.where(
-                capture_weekly["street_footfall"] > 0,
-                capture_weekly["footfall"] / capture_weekly["street_footfall"] * 100,
-                np.nan,
-            )
-
-            capture_weekly = capture_weekly.sort_values("week_start")
-
-            capture_weekly["period"] = np.where(
-                (capture_weekly["week_start"] >= start_cur_ts)
-                & (capture_weekly["week_start"] <= end_cur_ts),
-                "huidige",
-                "vorige",
-            )
-
-            avg_capture_cur = capture_weekly.loc[
-                capture_weekly["period"] == "huidige", "capture_rate"
-            ].mean()
-
-            avg_capture_prev = capture_weekly.loc[
-                capture_weekly["period"] == "vorige", "capture_rate"
-            ].mean()
+    avg_capture_prev = capture_weekly.loc[
+        capture_weekly["period"] == "vorige", "capture_rate"
+    ].mean()
 
             # -------------------------------
             # Grafiek: store vs street + omzet + capture rate
