@@ -85,6 +85,15 @@ else:
 
 VISUALCROSSING_KEY = st.secrets.get("visualcrossing_key", None)
 
+# ----------------------
+# PFM brand palette (graphs)
+# ----------------------
+PFM_RED = "#F04438"      # core red (buttons, key lines)
+PFM_PURPLE = "#762181"   # graph purple
+PFM_PINK = "#D8456C"     # graph pink
+PFM_ORANGE = "#FEAC76"   # graph orange
+PFM_BLACK = "#0C111D"    # core black
+
 # -------------
 # Format helpers
 # -------------
