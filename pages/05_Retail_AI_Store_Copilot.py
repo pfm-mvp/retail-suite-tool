@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from helpers_clients import load_clients
 from helpers_normalize import normalize_vemcount_response
 from services.cbs_service import get_cbs_stats_for_postcode4
+from services.forecast_service import build_simple_footfall_turnover_forecast
 
 # Probeer de service-import; als die er niet is, gebruik een lokale CSV-loader
 try:
@@ -828,68 +829,48 @@ def main():
     st.markdown("### Forecast: footfall & omzet (volgende 14 dagen)")
 
     try:
-        hist = df_all_raw.copy()
-        hist = compute_daily_kpis(hist)
-        hist = hist.dropna(subset=["footfall"])
+        fc_result = build_simple_footfall_turnover_forecast(
+            df_all_raw,
+            horizon=14,
+            min_history_days=30,
+        )
 
-        if hist.shape[0] < 30:
+        if not fc_result.get("enough_history", False):
             st.info("Te weinig historische data om een betrouwbare forecast te tonen.")
         else:
-            hist["dow"] = hist["date"].dt.weekday
-            grp = hist.groupby("dow")
+            hist_recent = fc_result["hist_recent"]
+            fc = fc_result["forecast"]
+            recent_foot = fc_result["recent_footfall_sum"]
+            recent_turn = fc_result["recent_turnover_sum"]
+            fut_foot = fc_result["forecast_footfall_sum"]
+            fut_turn = fc_result["forecast_turnover_sum"]
 
-            dow_stats = grp["footfall"].agg(["mean", "std"]).rename(
-                columns={"mean": "footfall_mean", "std": "footfall_std"}
-            )
-
-            if "sales_per_visitor" in hist.columns:
-                dow_spv = grp["sales_per_visitor"].mean().rename("spv_mean")
-                dow_stats = dow_stats.join(dow_spv)
-            else:
-                dow_stats["spv_mean"] = np.nan
-
-            last_date = hist["date"].max()
-            horizon = 14
-            future_dates = pd.date_range(last_date + pd.Timedelta(days=1), periods=horizon, freq="D")
-
-            fc = pd.DataFrame({"date": future_dates})
-            fc["dow"] = fc["date"].dt.weekday
-            fc = fc.merge(dow_stats.reset_index(), on="dow", how="left")
-
-            global_spv = hist["sales_per_visitor"].mean() if "sales_per_visitor" in hist.columns else np.nan
-            fc["spv_mean"] = fc["spv_mean"].fillna(global_spv)
-
-            fc["footfall_forecast"] = fc["footfall_mean"].clip(lower=0)
-            fc["turnover_forecast"] = fc["footfall_forecast"] * fc["spv_mean"]
-
-            # Vergelijk met afgelopen 14 dagen
-            last_14_start = last_date - pd.Timedelta(days=13)
-            recent = hist[(hist["date"] >= last_14_start) & (hist["date"] <= last_date)]
-
-            recent_foot = recent["footfall"].sum()
-            recent_turn = recent["turnover"].sum() if "turnover" in recent.columns else np.nan
-
-            fut_foot = fc["footfall_forecast"].sum()
-            fut_turn = fc["turnover_forecast"].sum()
-
+            # KPI-cards
             c1, c2 = st.columns(2)
             with c1:
                 delta_foot = None
                 if recent_foot > 0:
                     delta_foot = f"{(fut_foot - recent_foot) / recent_foot * 100:+.1f}%"
-                st.metric("Verwachte bezoekers (14 dagen)", fmt_int(fut_foot), delta=delta_foot)
+                st.metric(
+                    "Verwachte bezoekers (14 dagen)",
+                    fmt_int(fut_foot),
+                    delta=delta_foot,
+                )
 
             with c2:
                 delta_turn = None
                 if not pd.isna(recent_turn) and recent_turn > 0:
                     delta_turn = f"{(fut_turn - recent_turn) / recent_turn * 100:+.1f}%"
-                st.metric("Verwachte omzet (14 dagen)", fmt_eur(fut_turn), delta=delta_turn)
+                st.metric(
+                    "Verwachte omzet (14 dagen)",
+                    fmt_eur(fut_turn),
+                    delta=delta_turn,
+                )
 
             # Grafiek: laatste 28 dagen historisch + 14 dagen forecast
-            hist_recent = hist[hist["date"] >= (last_date - pd.Timedelta(days=27))]
-
             fig_fc = make_subplots(specs=[[{"secondary_y": True}]])
 
+            # Historische footfall (bars)
             fig_fc.add_bar(
                 x=hist_recent["date"],
                 y=hist_recent["footfall"],
@@ -897,6 +878,7 @@ def main():
                 marker_color=PFM_PURPLE,
             )
 
+            # Forecast footfall (bars)
             fig_fc.add_bar(
                 x=fc["date"],
                 y=fc["footfall_forecast"],
@@ -904,7 +886,8 @@ def main():
                 marker_color=PFM_PEACH,
             )
 
-            if "turnover" in hist.columns:
+            # Historische omzet (lijn)
+            if "turnover" in hist_recent.columns:
                 fig_fc.add_trace(
                     go.Scatter(
                         x=hist_recent["date"],
@@ -916,6 +899,7 @@ def main():
                     secondary_y=True,
                 )
 
+            # Forecast omzet (lijn)
             fig_fc.add_trace(
                 go.Scatter(
                     x=fc["date"],
@@ -933,7 +917,13 @@ def main():
 
             fig_fc.update_layout(
                 height=350,
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="left",
+                    x=0,
+                ),
                 margin=dict(l=40, r=40, t=20, b=40),
             )
 
