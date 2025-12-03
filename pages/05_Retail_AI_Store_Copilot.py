@@ -501,6 +501,44 @@ def main():
         return
 
     df_all_raw["date"] = pd.to_datetime(df_all_raw["date"], errors="coerce")
+    df_all_raw = df_all_raw.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
+
+    # ------------------------------
+    # Extra history voor forecast (laatste 365 dagen via period=date)
+    # ------------------------------
+    hist_end = datetime.today().date()
+    hist_start = hist_end - timedelta(days=365)
+
+    try:
+        resp_hist = get_report(
+            [shop_id],
+            list(metric_map.keys()),
+            period="date",
+            step="day",
+            source="shops",
+            form_date_from=hist_start.strftime("%Y-%m-%d"),
+            form_date_to=hist_end.strftime("%Y-%m-%d"),
+        )
+        df_hist_raw = normalize_vemcount_response(
+            resp_hist,
+            kpi_keys=metric_map.keys(),
+        ).rename(columns=metric_map)
+
+        df_hist_raw["date"] = pd.to_datetime(df_hist_raw["date"], errors="coerce")
+        df_hist_raw = (
+            df_hist_raw
+            .dropna(subset=["date"])
+            .sort_values("date")
+            .reset_index(drop=True)
+        )
+
+        # safety fallback: als er om wat voor reden dan ook niks in zit
+        if df_hist_raw.empty:
+            df_hist_raw = df_all_raw.copy()
+
+    except Exception:
+        # Bij API-issue gewoon terugvallen op dit jaar
+        df_hist_raw = df_all_raw.copy()
 
     # Slice naar huidige + vorige periode
     start_cur_ts = pd.Timestamp(start_cur)
