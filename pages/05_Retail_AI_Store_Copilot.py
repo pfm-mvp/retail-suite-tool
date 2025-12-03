@@ -1,4 +1,4 @@
-# pages/05_Retail_AI_Copilot.py
+# pages/05_Retail_AI_Store_Copilot.py
 
 import numpy as np
 import pandas as pd
@@ -115,10 +115,11 @@ def fmt_int(x: float) -> str:
 def get_locations_by_company(company_id: int) -> pd.DataFrame:
     """
     Wrapper rond /company/{company_id}/location van de vemcount-agent.
+    Extra ruime timeout.
     """
     url = f"{FASTAPI_BASE_URL.rstrip('/')}/company/{company_id}/location"
 
-    resp = requests.get(url, timeout=30)
+    resp = requests.get(url, timeout=60)
     resp.raise_for_status()
     data = resp.json()
 
@@ -306,7 +307,18 @@ def main():
     company_id = int(selected_client["company_id"])
 
     # --- Winkels ophalen via FastAPI ---
-    locations_df = get_locations_by_company(company_id)
+    try:
+        locations_df = get_locations_by_company(company_id)
+    except requests.exceptions.ReadTimeout:
+        st.error(
+            "De verbinding met de FastAPI-server duurde te lang bij het ophalen van de winkels "
+            "(timeout). Probeer het nog eens of kies tijdelijk een andere retailer."
+        )
+        return
+    except requests.exceptions.RequestException as e:
+        st.error(f"Fout bij ophalen van winkels uit FastAPI: {e}")
+        return
+
     if locations_df.empty:
         st.error("Geen winkels gevonden voor deze retailer.")
         return
