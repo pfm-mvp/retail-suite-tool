@@ -86,13 +86,13 @@ else:
 VISUALCROSSING_KEY = st.secrets.get("visualcrossing_key", None)
 
 # ----------------------
-# PFM brand palette (graphs)
+# PFM brand colors
 # ----------------------
-PFM_RED = "#F04438"      # core red (buttons, key lines)
-PFM_PURPLE = "#762181"   # graph purple
-PFM_PINK = "#D8456C"     # graph pink
-PFM_ORANGE = "#FEAC76"   # graph orange
-PFM_BLACK = "#0C111D"    # core black
+PFM_PURPLE = "#762181"
+PFM_RED = "#F04438"
+PFM_PEACH = "#FDBA8C"
+PFM_PINK = "#F973A6"
+PFM_BLUE = "#38BDF8"
 
 # -------------
 # Format helpers
@@ -124,11 +124,10 @@ def fmt_int(x: float) -> str:
 def get_locations_by_company(company_id: int) -> pd.DataFrame:
     """
     Wrapper rond /company/{company_id}/location van de vemcount-agent.
-    Extra ruime timeout.
     """
     url = f"{FASTAPI_BASE_URL.rstrip('/')}/company/{company_id}/location"
 
-    resp = requests.get(url, timeout=60)
+    resp = requests.get(url, timeout=30)
     resp.raise_for_status()
     data = resp.json()
 
@@ -316,18 +315,7 @@ def main():
     company_id = int(selected_client["company_id"])
 
     # --- Winkels ophalen via FastAPI ---
-    try:
-        locations_df = get_locations_by_company(company_id)
-    except requests.exceptions.ReadTimeout:
-        st.error(
-            "De verbinding met de FastAPI-server duurde te lang bij het ophalen van de winkels "
-            "(timeout). Probeer het nog eens of kies tijdelijk een andere retailer."
-        )
-        return
-    except requests.exceptions.RequestException as e:
-        st.error(f"Fout bij ophalen van winkels uit FastAPI: {e}")
-        return
-
+    locations_df = get_locations_by_company(company_id)
     if locations_df.empty:
         st.error("Geen winkels gevonden voor deze retailer.")
         return
@@ -553,6 +541,7 @@ def main():
         )
 
         if not capture_weekly.empty:
+            # Store capture rate – single winkel
             capture_weekly["capture_rate"] = np.where(
                 capture_weekly["street_footfall"] > 0,
                 capture_weekly["footfall"] / capture_weekly["street_footfall"] * 100,
@@ -577,91 +566,88 @@ def main():
             ].mean()
 
             # -------------------------------
-            # Grafiek: store vs street + turnover + capture rate
+            # Grafiek: store vs street + omzet + capture rate
             # -------------------------------
             st.markdown("### Straatdrukte vs winkeltraffic (weekly demo)")
 
             chart_df = capture_weekly[
-                ["week_start", "footfall", "turnover", "street_footfall", "capture_rate"]
+                ["week_start", "footfall", "street_footfall", "turnover", "capture_rate"]
             ].copy()
 
-            # Weeklabel als nette weeknummers, bv. W40, W41, ...
+            # Weeklabel als nette weeknummers, bv. W01, W02, ...
             iso_cal = chart_df["week_start"].dt.isocalendar()
             chart_df["week_label"] = iso_cal.week.apply(lambda w: f"W{int(w):02d}")
 
-            # Sorteren op week_start zodat x-as netjes oploopt
-            chart_df = chart_df.sort_values("week_start")
+            week_order = chart_df.sort_values("week_start")["week_label"].unique().tolist()
 
-            fig = make_subplots(
-                rows=1,
-                cols=1,
-                specs=[[{"secondary_y": True}]],
-            )
+            fig_week = make_subplots(specs=[[{"secondary_y": True}]])
 
-            # Bar 1: footfall (store)
-            fig.add_bar(
+            # Footfall bar
+            fig_week.add_bar(
                 x=chart_df["week_label"],
                 y=chart_df["footfall"],
                 name="Footfall (store)",
                 marker_color=PFM_PURPLE,
-                opacity=0.9,
+                offsetgroup=0,
+                yaxis="y1",
             )
 
-            # Bar 2: street traffic (Pathzz)
-            fig.add_bar(
+            # Street traffic bar
+            fig_week.add_bar(
                 x=chart_df["week_label"],
                 y=chart_df["street_footfall"],
                 name="Street traffic",
-                marker_color=PFM_ORANGE,
-                opacity=0.8,
+                marker_color=PFM_PEACH,
+                opacity=0.7,
+                offsetgroup=1,
+                yaxis="y1",
             )
 
-            # Bar 3: turnover
-            fig.add_bar(
+            # Turnover bar
+            fig_week.add_bar(
                 x=chart_df["week_label"],
                 y=chart_df["turnover"],
                 name="Turnover (€)",
                 marker_color=PFM_PINK,
-                opacity=0.6,
+                opacity=0.7,
+                offsetgroup=2,
+                yaxis="y1",
             )
 
-            # Line: capture rate op tweede Y-as
-            fig.add_trace(
+            # Capture rate line (store)
+            fig_week.add_trace(
                 go.Scatter(
                     x=chart_df["week_label"],
                     y=chart_df["capture_rate"],
                     name="Capture rate (%)",
                     mode="lines+markers",
                     line=dict(color=PFM_RED, width=2),
-                    marker=dict(size=6),
-                    hovertemplate="Week %{x}<br>Capture rate: %{y:.1f}%<extra></extra>",
                 ),
                 secondary_y=True,
             )
 
-            fig.update_layout(
+            fig_week.update_xaxes(
+                title_text="Week",
+                categoryorder="array",
+                categoryarray=week_order,
+            )
+            fig_week.update_yaxes(
+                title_text="Footfall / street traffic / omzet (€)",
+                secondary_y=False,
+            )
+            fig_week.update_yaxes(
+                title_text="Capture rate (%)",
+                secondary_y=True,
+            )
+
+            fig_week.update_layout(
                 barmode="group",
-                height=380,
-                margin=dict(l=40, r=40, t=10, b=40),
+                height=350,
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-                xaxis=dict(title="Week"),
-                yaxis=dict(
-                    title="Footfall / street traffic / turnover",
-                    rangemode="tozero",
-                ),
-                yaxis2=dict(
-                    title="Capture rate (%)",
-                    rangemode="tozero",
-                ),
+                margin=dict(l=40, r=40, t=40, b=40),
             )
 
-            # Nettere hoverformat voor de bars
-            fig.update_traces(
-                selector=dict(type="bar"),
-                hovertemplate="%{x}<br>%{y:,.0f}<extra>%{fullData.name}</extra>",
-            )
-
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig_week, use_container_width=True)
 
     # --- CBS context (data ophalen) ---
     cbs_stats = {}
@@ -728,39 +714,99 @@ def main():
     # --- Dagelijkse grafiek ---
     st.markdown("### Dagelijkse footfall & omzet")
     if "footfall" in df_cur.columns and "turnover" in df_cur.columns:
-        daily_chart = df_cur.set_index("date")[["footfall", "turnover"]]
-        st.line_chart(daily_chart)
+        daily_df = df_cur[["date", "footfall", "turnover"]].copy()
+
+        fig_daily = make_subplots(specs=[[{"secondary_y": True}]])
+
+        fig_daily.add_bar(
+            x=daily_df["date"],
+            y=daily_df["footfall"],
+            name="Footfall",
+            marker_color=PFM_PURPLE,
+        )
+
+        fig_daily.add_trace(
+            go.Scatter(
+                x=daily_df["date"],
+                y=daily_df["turnover"],
+                name="Turnover (€)",
+                mode="lines+markers",
+                line=dict(color=PFM_PEACH, width=2),
+            ),
+            secondary_y=True,
+        )
+
+        fig_daily.update_xaxes(title_text="")
+        fig_daily.update_yaxes(title_text="Footfall", secondary_y=False)
+        fig_daily.update_yaxes(title_text="Omzet (€)", secondary_y=True)
+
+        fig_daily.update_layout(
+            height=350,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+            margin=dict(l=40, r=40, t=20, b=40),
+        )
+
+        st.plotly_chart(fig_daily, use_container_width=True)
 
     # --- Weer vs footfall (optioneel) ---
     if not weather_df.empty:
         st.markdown("### Weer vs footfall (indicatief)")
 
-        m = pd.merge(
+        weather_merge = pd.merge(
             df_cur[["date", "footfall"]],
             weather_df[["date", "temp", "precip"]],
             on="date",
             how="left",
-        ).set_index("date")
+        )
 
-        m_plot = m.copy()
-        max_foot = m_plot["footfall"].max() if "footfall" in m_plot.columns else None
+        fig_weather = make_subplots(specs=[[{"secondary_y": True}]])
 
-        if max_foot and not np.isnan(max_foot) and max_foot > 0:
-            if "temp" in m_plot.columns:
-                max_temp = m_plot["temp"].abs().max()
-                if max_temp and not np.isnan(max_temp) and max_temp > 0:
-                    m_plot["temp (index)"] = m_plot["temp"] / max_temp * max_foot
-            if "precip" in m_plot.columns:
-                max_precip = m_plot["precip"].abs().max()
-                if max_precip and not np.isnan(max_precip) and max_precip > 0:
-                    m_plot["precip (index)"] = m_plot["precip"] / max_precip * max_foot
+        # Footfall bars
+        fig_weather.add_bar(
+            x=weather_merge["date"],
+            y=weather_merge["footfall"],
+            name="Footfall",
+            marker_color=PFM_PURPLE,
+        )
 
-        cols = ["footfall"]
-        for c in ["temp (index)", "precip (index)"]:
-            if c in m_plot.columns:
-                cols.append(c)
+        # Temperature line
+        fig_weather.add_trace(
+            go.Scatter(
+                x=weather_merge["date"],
+                y=weather_merge["temp"],
+                name="Temperatuur (°C)",
+                mode="lines+markers",
+                line=dict(color=PFM_RED, width=2),
+            ),
+            secondary_y=True,
+        )
 
-        st.line_chart(m_plot[cols])
+        # Precipitation line (mm)
+        fig_weather.add_trace(
+            go.Scatter(
+                x=weather_merge["date"],
+                y=weather_merge["precip"],
+                name="Neerslag (mm)",
+                mode="lines+markers",
+                line=dict(color=PFM_BLUE, width=2, dash="dot"),
+            ),
+            secondary_y=True,
+        )
+
+        fig_weather.update_xaxes(title_text="")
+        fig_weather.update_yaxes(title_text="Footfall", secondary_y=False)
+        fig_weather.update_yaxes(
+            title_text="Temperatuur (°C) / neerslag (mm)",
+            secondary_y=True,
+        )
+
+        fig_weather.update_layout(
+            height=350,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+            margin=dict(l=40, r=40, t=20, b=40),
+        )
+
+        st.plotly_chart(fig_weather, use_container_width=True)
 
     # --- CBS context ---
     if cbs_stats:
