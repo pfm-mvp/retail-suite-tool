@@ -834,100 +834,116 @@ def main():
 
         st.plotly_chart(fig_weather, use_container_width=True)
 
-# --- Forecast: footfall & omzet (dag niveau, 14 dagen) ---
-st.markdown("### Forecast: footfall & omzet (volgende 14 dagen)")
+    # --- Forecast: footfall & omzet (dag niveau, 14 dagen) ---
+    st.markdown("### Forecast: footfall & omzet (volgende 14 dagen)")
 
-try:
-    if forecast_mode == "Pro (LightGBM beta)":
-        fc_res = build_pro_footfall_turnover_forecast(df_all_raw)
-    else:
-        fc_res = build_simple_footfall_turnover_forecast(df_all_raw)
+    try:
+        if forecast_mode == "Pro (LightGBM beta)":
+            fc_res = build_pro_footfall_turnover_forecast(df_all_raw)
+        else:
+            fc_res = build_simple_footfall_turnover_forecast(df_all_raw)
 
-    if not fc_res.get("enough_history", False):
-        st.info("Te weinig historische data om een betrouwbare forecast te tonen.")
-    else:
-        hist_recent = fc_res["hist_recent"]
-        fc = fc_res["forecast"]
+        if not fc_res.get("enough_history", False):
+            st.info("Te weinig historische data om een betrouwbare forecast te tonen.")
+        else:
+            hist_recent = fc_res["hist_recent"]
+            fc = fc_res["forecast"]
 
-        recent_foot = fc_res["recent_footfall_sum"]
-        recent_turn = fc_res["recent_turnover_sum"]
-        fut_foot = fc_res["forecast_footfall_sum"]
-        fut_turn = fc_res["forecast_turnover_sum"]
+            recent_foot = fc_res["recent_footfall_sum"]
+            recent_turn = fc_res["recent_turnover_sum"]
+            fut_foot = fc_res["forecast_footfall_sum"]
+            fut_turn = fc_res["forecast_turnover_sum"]
 
-        c_sm, c_model = st.columns([3,1])
-        with c_model:
-            st.caption(f"Model: **{fc_res['model_type']}**")
-            if fc_res.get("used_simple_fallback", False):
-                st.caption("Fallback → Simple DoW")
+            c_sm, c_model = st.columns([3, 1])
+            with c_model:
+                st.caption(f"Model: **{fc_res['model_type']}**")
+                if fc_res.get("used_simple_fallback", False):
+                    st.caption("Fallback → Simple DoW")
 
-        c1, c2 = st.columns(2)
-        with c1:
-            delta_foot = None
-            if recent_foot > 0:
-                delta_foot = f"{(fut_foot - recent_foot) / recent_foot * 100:+.1f}%"
-            st.metric("Verwachte bezoekers (14 dagen)", fmt_int(fut_foot), delta=delta_foot)
+            c1, c2 = st.columns(2)
+            with c1:
+                delta_foot = None
+                if recent_foot > 0:
+                    delta_foot = f"{(fut_foot - recent_foot) / recent_foot * 100:+.1f}%"
+                st.metric(
+                    "Verwachte bezoekers (14 dagen)",
+                    fmt_int(fut_foot),
+                    delta=delta_foot,
+                )
 
-        with c2:
-            delta_turn = None
-            if not pd.isna(recent_turn) and recent_turn > 0:
-                delta_turn = f"{(fut_turn - recent_turn) / recent_turn * 100:+.1f}%"
-            st.metric("Verwachte omzet (14 dagen)", fmt_eur(fut_turn), delta=delta_turn)
+            with c2:
+                delta_turn = None
+                if not pd.isna(recent_turn) and recent_turn > 0:
+                    delta_turn = f"{(fut_turn - recent_turn) / recent_turn * 100:+.1f}%"
+                st.metric(
+                    "Verwachte omzet (14 dagen)",
+                    fmt_eur(fut_turn),
+                    delta=delta_turn,
+                )
 
-        # Grafiek: laatste 28 dagen historisch + forecast
-        fig_fc = make_subplots(specs=[[{"secondary_y": True}]])
+            # Grafiek: laatste 28 dagen historisch + forecast
+            fig_fc = make_subplots(specs=[[{"secondary_y": True}]])
 
-        fig_fc.add_bar(
-            x=hist_recent["date"],
-            y=hist_recent["footfall"],
-            name="Footfall (historisch)",
-            marker_color=PFM_PURPLE,
-        )
+            fig_fc.add_bar(
+                x=hist_recent["date"],
+                y=hist_recent["footfall"],
+                name="Footfall (historisch)",
+                marker_color=PFM_PURPLE,
+            )
 
-        fig_fc.add_bar(
-            x=fc["date"],
-            y=fc["footfall_forecast"],
-            name="Footfall forecast",
-            marker_color=PFM_PEACH,
-        )
+            fig_fc.add_bar(
+                x=fc["date"],
+                y=fc["footfall_forecast"],
+                name="Footfall forecast",
+                marker_color=PFM_PEACH,
+            )
 
-        if "turnover" in hist_recent.columns:
+            if "turnover" in hist_recent.columns:
+                fig_fc.add_trace(
+                    go.Scatter(
+                        x=hist_recent["date"],
+                        y=hist_recent["turnover"],
+                        name="Omzet historisch",
+                        mode="lines",
+                        line=dict(color=PFM_PINK, width=2),
+                    ),
+                    secondary_y=True,
+                )
+
             fig_fc.add_trace(
                 go.Scatter(
-                    x=hist_recent["date"],
-                    y=hist_recent["turnover"],
-                    name="Omzet historisch",
-                    mode="lines",
-                    line=dict(color=PFM_PINK, width=2),
+                    x=fc["date"],
+                    y=fc["turnover_forecast"],
+                    name="Omzet forecast",
+                    mode="lines+markers",
+                    line=dict(color=PFM_RED, width=2, dash="dash"),
                 ),
                 secondary_y=True,
             )
 
-        fig_fc.add_trace(
-            go.Scatter(
-                x=fc["date"],
-                y=fc["turnover_forecast"],
-                name="Omzet forecast",
-                mode="lines+markers",
-                line=dict(color=PFM_RED, width=2, dash="dash"),
-            ),
-            secondary_y=True,
+            fig_fc.update_xaxes(title_text="")
+            fig_fc.update_yaxes(title_text="Footfall", secondary_y=False)
+            fig_fc.update_yaxes(title_text="Omzet (€)", secondary_y=True)
+
+            fig_fc.update_layout(
+                height=350,
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="left",
+                    x=0,
+                ),
+                margin=dict(l=40, r=40, t=20, b=40),
+            )
+
+            st.plotly_chart(fig_fc, use_container_width=True)
+
+    except Exception as e:
+        st.info(
+            "Forecast kon niet worden berekend (te weinig data of ontbrekende kolommen)."
         )
-
-        fig_fc.update_xaxes(title_text="")
-        fig_fc.update_yaxes(title_text="Footfall", secondary_y=False)
-        fig_fc.update_yaxes(title_text="Omzet (€)", secondary_y=True)
-
-        fig_fc.update_layout(
-            height=350,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-            margin=dict(l=40, r=40, t=20, b=40),
-        )
-
-        st.plotly_chart(fig_fc, use_container_width=True)
-
-except Exception as e:
-    st.info("Forecast kon niet worden berekend (te weinig data of ontbrekende kolommen).")
-    st.exception(e)
+        st.exception(e)
 
     # --- Debug ---
     with st.expander("🔧 Debug"):
@@ -939,9 +955,15 @@ except Exception as e:
         st.write("Dagdata (cur):", df_cur.head())
         st.write("Dagdata (prev):", df_prev.head())
         st.write("Pathzz weekly:", pathzz_weekly.head())
-        st.write("Capture weekly:", capture_weekly.head() if isinstance(capture_weekly, pd.DataFrame) else capture_weekly)
+        st.write(
+            "Capture weekly:",
+            capture_weekly.head()
+            if isinstance(capture_weekly, pd.DataFrame)
+            else capture_weekly,
+        )
         st.write("CBS stats:", cbs_stats)
         st.write("Weather df:", weather_df.head())
+
 
 if __name__ == "__main__":
     main()
