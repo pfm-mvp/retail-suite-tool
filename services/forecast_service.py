@@ -11,14 +11,6 @@ try:
 except Exception:
     HAS_LIGHTGBM = False
 
-# Optionele weather integratie
-try:
-    # Verwacht dat weather_service een helper heeft om historische weerfeatures op te halen
-    from services.weather_service import get_historical_weather_feature_frame  # type: ignore
-    HAS_WEATHER_SERVICE = True
-except Exception:
-    HAS_WEATHER_SERVICE = False
-
 
 def _ensure_sales_per_visitor(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -36,62 +28,6 @@ def _ensure_sales_per_visitor(df: pd.DataFrame) -> pd.DataFrame:
         else:
             df["sales_per_visitor"] = np.nan
     return df
-
-
-def _attach_weather_features(df: pd.DataFrame, weather_cfg: dict | None) -> pd.DataFrame:
-    """
-    Optioneel: plak weerfeatures op de daily timeseries.
-
-    Verwacht:
-    - df met kolom 'date'
-    - weather_cfg zoals aangemaakt in de Store Copilot:
-      {"mode": "city_country", "city": "...", "country": "..."}
-
-    Retourneert df met extra kolommen (bijv. temp, precip_mm, wind_kmh, is_rain, ...),
-    of de originele df als er iets misgaat.
-    """
-    if not HAS_WEATHER_SERVICE or weather_cfg is None:
-        return df
-
-    if "date" not in df.columns or df.empty:
-        return df
-
-    try:
-        start = df["date"].min().date()
-        end = df["date"].max().date()
-
-        mode = weather_cfg.get("mode", "city_country")
-        city = weather_cfg.get("city")
-        country = weather_cfg.get("country")
-
-        wdf = get_historical_weather_feature_frame(
-            start_date=start,
-            end_date=end,
-            mode=mode,
-            city=city,
-            country=country,
-        )
-    except Exception:
-        # We willen NOOIT het hele forecast-proces laten crashen op weerdata
-        return df
-
-    if wdf is None or wdf.empty:
-        return df
-
-    if "date" not in wdf.columns:
-        return df
-
-    wdf = wdf.copy()
-    wdf["date"] = pd.to_datetime(wdf["date"], errors="coerce")
-    wdf = wdf.dropna(subset=["date"])
-
-    if wdf.empty:
-        return df
-
-    # Merge op date
-    out = df.merge(wdf, on="date", how="left")
-
-    return out
 
 
 # -----------------------------------------------------------
@@ -205,28 +141,30 @@ def build_simple_footfall_turnover_forecast(
 
 
 # -----------------------------------------------------------
-# PRO FORECAST (LightGBM + lags/rolling stats + optioneel weer)
+# PRO FORECAST (LightGBM + lags/rolling stats + events)
 # -----------------------------------------------------------
 
 def build_pro_footfall_turnover_forecast(
     df_all_raw: pd.DataFrame,
     horizon: int = 14,
     min_history_days: int = 60,
-    weather_cfg: dict | None = None,
-    use_weather: bool = False,
+    weather_cfg: dict | None = None,      # placeholder voor toekomstige weather features
+    use_weather: bool = False,            # momenteel niet actief gebruikt
+    event_flags_hist: pd.DataFrame | None = None,
+    event_flags_future: pd.DataFrame | None = None,
 ) -> dict:
     """
     Pro-forecast met:
     - LightGBM (als beschikbaar)
     - Features: dow, maand, dag, weekend, lags & rolling means
-    - Optioneel: weerfeatures via Visual Crossing (via weather_service)
+    - Optioneel: event-flags (bijv. feestdagen, vakanties, sale-periodes)
 
     Als LightGBM niet beschikbaar is of er te weinig historie is:
     -> automatische fallback naar build_simple_footfall_turnover_forecast(...),
        met 'used_simple_fallback' = True.
 
     Return: zelfde structuur als simple-forecast-result, plus:
-        - "model_type": "lightgbm_dow_lags" of "lightgbm_dow_lags_weather" of "simple_dow"
+        - "model_type": "lightgbm_dow_lags_events" of "simple_dow"
         - "used_simple_fallback": bool
     """
 
@@ -280,29 +218,6 @@ def build_pro_footfall_turnover_forecast(
         simple["used_simple_fallback"] = True
         return simple
 
-    # --- Optioneel: weerfeatures aanplakken ---
-    actually_used_weather = False
-    if use_weather and weather_cfg is not None and HAS_WEATHER_SERVICE:
-        try:
-            df = _attach_weather_features(df, weather_cfg)
-            # We beschouwen weer als gebruikt als er na merge ten minste één 'temp'-achtige kolom is
-            weather_cols_candidates = [
-                "temp",
-                "temp_avg",
-                "temp_max",
-                "temp_min",
-                "precip_mm",
-                "wind_kmh",
-                "is_rain",
-                "is_snow",
-            ]
-            present = [c for c in weather_cols_candidates if c in df.columns]
-            if present:
-                actually_used_weather = True
-        except Exception:
-            # veiligheid: we negeren errors in weerlaag
-            pass
-
     # Sorteren op datum
     df = df.sort_values("date").reset_index(drop=True)
     df["seq"] = np.arange(len(df))
@@ -311,7 +226,24 @@ def build_pro_footfall_turnover_forecast(
     df["dow"] = df["date"].dt.weekday
     df["month"] = df["date"].dt.month
     df["day_of_month"] = df["date"].dt.day
-    df["is_weekend"] = df["dow"].isin([5, 6]).astype(int)
+    df["is_weekend_cal"] = df["dow"].isin([5, 6]).astype(int)
+
+    # --- Event flags in historiek mergen (optioneel) ---
+    event_feature_cols: list[str] = []
+    if event_flags_hist is not None and not event_flags_hist.empty:
+        ev = event_flags_hist.copy()
+        ev["date"] = pd.to_datetime(ev["date"], errors="coerce").dt.normalize()
+        ev = ev.dropna(subset=["date"]).drop_duplicates(subset=["date"])
+        # neem alle kolommen behalve 'date'
+        for c in ev.columns:
+            if c == "date":
+                continue
+            # forceer naar 0/1
+            ev[c] = ev[c].fillna(0).astype(int)
+            event_feature_cols.append(c)
+        df = df.merge(ev, on="date", how="left")
+        for c in event_feature_cols:
+            df[c] = df[c].fillna(0).astype(int)
 
     # Lags & rolling stats op footfall
     for lag in [1, 7, 14]:
@@ -320,11 +252,12 @@ def build_pro_footfall_turnover_forecast(
     df["footfall_roll_7"] = df["footfall"].rolling(window=7, min_periods=3).mean()
     df["footfall_roll_28"] = df["footfall"].rolling(window=28, min_periods=7).mean()
 
-    feature_cols = [
+    # Eerste rijen met NaN in lags/rollings droppen
+    base_feature_cols = [
         "dow",
         "month",
         "day_of_month",
-        "is_weekend",
+        "is_weekend_cal",
         "footfall_lag_1",
         "footfall_lag_7",
         "footfall_lag_14",
@@ -332,22 +265,8 @@ def build_pro_footfall_turnover_forecast(
         "footfall_roll_28",
     ]
 
-    # Eventuele weerfeatures toevoegen als ze aanwezig zijn
-    weather_feature_candidates = [
-        "temp",
-        "temp_avg",
-        "temp_max",
-        "temp_min",
-        "precip_mm",
-        "wind_kmh",
-        "is_rain",
-        "is_snow",
-    ]
-    for col in weather_feature_candidates:
-        if col in df.columns:
-            feature_cols.append(col)
+    feature_cols = base_feature_cols + event_feature_cols
 
-    # Eerste rijen met NaN in lags/rollings droppen
     df_model = df.dropna(subset=feature_cols + ["footfall"]).copy()
     if df_model.shape[0] < 30:
         # Te weinig data na feature engineering → fallback
@@ -379,13 +298,17 @@ def build_pro_footfall_turnover_forecast(
     last_date = df["date"].max()
     global_spv = df["sales_per_visitor"].mean()
 
-    # Voorweerfeatures tijdens forecast:
-    # simpele aanpak: we gebruiken de laatst bekende weersfeatures als constante voor de horizon.
-    last_row = df.iloc[-1]
-    last_weather_vals = {}
-    for col in weather_feature_candidates:
-        if col in df.columns:
-            last_weather_vals[col] = float(last_row[col]) if not pd.isna(last_row[col]) else 0.0
+    # Voor events in de toekomst: map date → dict(feature:0/1)
+    future_event_map: dict[pd.Timestamp, dict[str, int]] = {}
+    if event_flags_future is not None and not event_flags_future.empty and event_feature_cols:
+        evf = event_flags_future.copy()
+        evf["date"] = pd.to_datetime(evf["date"], errors="coerce").dt.normalize()
+        evf = evf.dropna(subset=["date"])
+        for _, row in evf.iterrows():
+            d = row["date"]
+            future_event_map[d] = {}
+            for c in event_feature_cols:
+                future_event_map[d][c] = int(row.get(c, 0))
 
     # Iteratieve forecast voor horizon dagen
     future_dates = pd.date_range(last_date + pd.Timedelta(days=1), periods=horizon, freq="D")
@@ -399,11 +322,11 @@ def build_pro_footfall_turnover_forecast(
         dow = target_date.weekday()
         month = target_date.month
         day_of_month = target_date.day
-        is_weekend = 1 if dow in [5, 6] else 0
+        is_weekend_cal = 1 if dow in [5, 6] else 0
 
         def _lag_or_last(idx_offset: int) -> float:
             idx = new_idx - idx_offset
-            if idx >= 0 and idx < len(foot_hist):
+            if 0 <= idx < len(foot_hist):
                 return foot_hist[idx]
             else:
                 return foot_hist[0] if len(foot_hist) > 0 else 0.0
@@ -420,22 +343,25 @@ def build_pro_footfall_turnover_forecast(
             roll_7 = 0.0
             roll_28 = 0.0
 
+        # Event features voor deze datum
+        event_vals = []
+        if event_feature_cols:
+            key = pd.to_datetime(target_date).normalize()
+            flags = future_event_map.get(key, {})
+            for c in event_feature_cols:
+                event_vals.append(int(flags.get(c, 0)))
+
         x_new = [
             dow,
             month,
             day_of_month,
-            is_weekend,
+            is_weekend_cal,
             lag_1,
             lag_7,
             lag_14,
             roll_7,
             roll_28,
-        ]
-
-        # Eventueel weerfeatures (constant gehouden) toevoegen in dezelfde volgorde als in feature_cols
-        for col in weather_feature_candidates:
-            if col in feature_cols:
-                x_new.append(last_weather_vals.get(col, 0.0))
+        ] + event_vals
 
         y_pred = float(model.predict(np.array([x_new]))[0])
         y_pred = max(y_pred, 0.0)  # geen negatieve footfall
@@ -467,8 +393,6 @@ def build_pro_footfall_turnover_forecast(
     # Historiek voor grafiek: laatste 28 dagen
     hist_recent = df[df["date"] >= (last_date - pd.Timedelta(days=27))].copy()
 
-    model_type = "lightgbm_dow_lags_weather" if actually_used_weather else "lightgbm_dow_lags"
-
     return {
         "enough_history": True,
         "hist_recent": hist_recent,
@@ -478,6 +402,6 @@ def build_pro_footfall_turnover_forecast(
         "forecast_footfall_sum": float(fut_foot),
         "forecast_turnover_sum": float(fut_turn),
         "last_date": last_date,
-        "model_type": model_type,
+        "model_type": "lightgbm_dow_lags_events",
         "used_simple_fallback": False,
     }
