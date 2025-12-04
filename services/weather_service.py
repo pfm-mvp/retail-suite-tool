@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
+import requests
 
 # Pro-model support (LightGBM). Als dit niet geïnstalleerd is,
 # valt de pro-forecast automatisch terug op de simpele variant.
@@ -16,15 +17,12 @@ try:
 except Exception:
     HAS_LIGHTGBM = False
 
-import requests
-import streamlit as st
-
-# Visual Crossing API key uit Streamlit secrets
-VISUALCROSSING_KEY = st.secrets.get("visualcrossing_key", None)
+# Retail-kalenderfeatures (feestdagen, Black Friday, kerstperiode, zomer, etc.)
+from services.event_service import add_retail_calendar_features
 
 
 # -----------------------------------------------------------
-# HELPER: sales_per_visitor
+# Helpers
 # -----------------------------------------------------------
 
 def _ensure_sales_per_visitor(df: pd.DataFrame) -> pd.DataFrame:
@@ -45,181 +43,118 @@ def _ensure_sales_per_visitor(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# -----------------------------------------------------------
-# HELPER: NL-feestdagen & kalenderfeatures
-# -----------------------------------------------------------
-
-def _easter_date(year: int) -> dt.date:
-    """
-    Berekent paaszondag (Gregoriaanse kalender).
-    Standaard algoritme (Meeus/Jones/Butcher).
-    """
-    a = year % 19
-    b = year // 100
-    c = year % 100
-    d = b // 4
-    e = b % 4
-    f = (b + 8) // 25
-    g = (b - f + 1) // 3
-    h = (19 * a + b - d - g + 15) % 30
-    i = c // 4
-    k = c % 4
-    l = (32 + 2 * e + 2 * i - h - k) % 7
-    m = (a + 11 * h + 22 * l) // 451
-    month = (h + l - 7 * m + 114) // 31
-    day = ((h + l - 7 * m + 114) % 31) + 1
-    return dt.date(year, month, day)
-
-
-def _nl_holidays_for_year(year: int) -> set[dt.date]:
-    """
-    Basis-set met NL-feestdagen voor retail (indicatief).
-    Dit zijn 'signaal'-dagen die als feature in het model komen.
-    """
-    holidays: set[dt.date] = set()
-
-    # Vaste dagen
-    holidays.add(dt.date(year, 1, 1))   # Nieuwjaarsdag
-    holidays.add(dt.date(year, 4, 27))  # Koningsdag
-    holidays.add(dt.date(year, 5, 5))   # Bevrijdingsdag (we nemen hem elk jaar mee)
-    holidays.add(dt.date(year, 12, 25))  # 1e Kerstdag
-    holidays.add(dt.date(year, 12, 26))  # 2e Kerstdag
-
-    # Paas- en pinkster-reeks
-    easter = _easter_date(year)
-    good_friday = easter - dt.timedelta(days=2)
-    easter_monday = easter + dt.timedelta(days=1)
-    ascension = easter + dt.timedelta(days=39)
-    pentecost = easter + dt.timedelta(days=49)      # Pinksterzondag
-    pentecost_monday = easter + dt.timedelta(days=50)
-
-    holidays.update(
-        {
-            good_friday,
-            easter,             # Paaszondag
-            easter_monday,      # Paasmaandag
-            ascension,          # Hemelvaart
-            pentecost,          # Pinksterzondag
-            pentecost_monday,   # Pinkstermaandag
-        }
-    )
-
-    return holidays
-
-
-def _black_friday_date(year: int) -> dt.date:
-    """
-    Black Friday = laatste vrijdag van november.
-    """
-    last_nov = dt.date(year, 11, 30)
-    while last_nov.weekday() != 4:  # 0=maandag, 4=vrijdag
-        last_nov -= dt.timedelta(days=1)
-    return last_nov
-
-
-def _add_calendar_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Kalenderfeatures voor elke rij op basis van 'date':
-
-    - dow, month, day_of_month, is_weekend
-    - is_q4
-    - is_december_peak
-    - is_summer_holiday (juli/aug)
-    - is_nl_holiday (NL kalender)
-    - is_christmas_period (15 dec – 31 dec)
-    - is_black_friday_weekend (vr/za/zo Black Friday-weekend)
-    """
-    if df is None or df.empty or "date" not in df.columns:
-        return df
-
-    out = df.copy()
-    out["date"] = pd.to_datetime(out["date"], errors="coerce")
-    out = out.dropna(subset=["date"])
-
-    if out.empty:
-        return out
-
-    out["dow"] = out["date"].dt.weekday
-    out["month"] = out["date"].dt.month
-    out["day_of_month"] = out["date"].dt.day
-    out["is_weekend"] = out["dow"].isin([5, 6]).astype(int)
-
-    out["is_q4"] = out["month"].isin([10, 11, 12]).astype(int)
-    out["is_december_peak"] = (out["month"] == 12).astype(int)
-    out["is_summer_holiday"] = out["month"].isin([7, 8]).astype(int)
-
-    years = out["date"].dt.year.unique().tolist()
-
-    # NL-holidays
-    holiday_dates: set[dt.date] = set()
-    for y in years:
-        holiday_dates |= _nl_holidays_for_year(int(y))
-
-    out["is_nl_holiday"] = out["date"].dt.date.isin(holiday_dates).astype(int)
-
-    # Kerst- / eindejaarsperiode (15–31 dec)
-    out["is_christmas_period"] = (
-        (out["month"] == 12) & (out["day_of_month"] >= 15)
-    ).astype(int)
-
-    # Black Friday weekend (vr-zo)
-    bf_weekend_dates: set[dt.date] = set()
-    for y in years:
-        bf = _black_friday_date(int(y))
-        for offset in range(0, 3):  # vr, za, zo
-            bf_weekend_dates.add(bf + dt.timedelta(days=offset))
-
-    out["is_black_friday_weekend"] = out["date"].dt.date.isin(bf_weekend_dates).astype(int)
-
-    return out
-
-
-# -----------------------------------------------------------
-# HELPER: Visual Crossing weather
-# -----------------------------------------------------------
-
-def _fetch_visualcrossing_history_and_forecast(
+def _fetch_weather_daily_visualcrossing(
     location_str: str,
     start_date: dt.date,
     end_date: dt.date,
+    api_key: str,
 ) -> pd.DataFrame:
     """
-    Haalt weerdata (historisch + forecast) op bij Visual Crossing
-    voor een gegeven locatie en datumbereik.
+    Haalt dagelijkse weerdata op via Visual Crossing (history/forecast in één endpoint).
 
-    Return DataFrame met kolommen: date, temp, precip, windspeed
-    of een lege DataFrame bij fout.
+    Return DataFrame: kolommen ['date', 'temp', 'precip', 'windspeed']
     """
-    if not VISUALCROSSING_KEY:
+    if not api_key:
         return pd.DataFrame()
 
-    start = start_date.strftime("%Y-%m-%d")
-    end = end_date.strftime("%Y-%m-%d")
-
-    url = (
-        "https://weather.visualcrossing.com/VisualCrossingWebServices/"
-        f"rest/services/timeline/{location_str}/{start}/{end}"
+    base_url = (
+        "https://weather.visualcrossing.com/"
+        "VisualCrossingWebServices/rest/services/timeline"
     )
+
+    url = f"{base_url}/{location_str}/{start_date.isoformat()}/{end_date.isoformat()}"
     params = {
         "unitGroup": "metric",
-        "key": VISUALCROSSING_KEY,
+        "key": api_key,
         "include": "days",
     }
 
+    resp = requests.get(url, params=params, timeout=40)
+    resp.raise_for_status()
+    data = resp.json()
+
+    days = data.get("days", [])
+    if not days:
+        return pd.DataFrame()
+
+    wdf = pd.DataFrame(days)
+    wdf["date"] = pd.to_datetime(wdf["datetime"], errors="coerce")
+    wdf = wdf.dropna(subset=["date"])
+    wdf = wdf[["date", "temp", "precip", "windspeed"]].copy()
+    return wdf
+
+
+def _prepare_weather_for_training_and_forecast(
+    df: pd.DataFrame,
+    weather_cfg: Optional[Dict[str, Any]],
+    use_weather: bool,
+    horizon: int,
+) -> tuple[pd.DataFrame, Optional[pd.DataFrame]]:
+    """
+    - Voegt weerdata toe aan de historische df (voor training).
+    - Haalt ook weerdata op voor de forecast-periode (voor features in de toekomst).
+
+    Return: (df_with_weather, future_weather_df or None)
+    """
+    if not use_weather or not weather_cfg:
+        return df, None
+
+    api_key = weather_cfg.get("api_key") or ""
+    mode = weather_cfg.get("mode", "city_country")
+    if not api_key:
+        return df, None
+
+    if mode == "city_country":
+        city = weather_cfg.get("city", "Amsterdam")
+        country = weather_cfg.get("country", "Netherlands")
+        location_str = f"{city},{country}"
+    else:
+        # Onbekende mode → geen weer
+        return df, None
+
+    df = df.copy()
+    if df.empty or "date" not in df.columns:
+        return df, None
+
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df.dropna(subset=["date"])
+    if df.empty:
+        return df, None
+
+    hist_start = df["date"].min().date()
+    hist_end = df["date"].max().date()
+
     try:
-        resp = requests.get(url, params=params, timeout=60)
-        resp.raise_for_status()
-        data = resp.json()
+        w_hist = _fetch_weather_daily_visualcrossing(
+            location_str=location_str,
+            start_date=hist_start,
+            end_date=hist_end,
+            api_key=api_key,
+        )
+        if not w_hist.empty:
+            df = df.merge(w_hist, on="date", how="left")
     except Exception:
-        return pd.DataFrame()
+        # Als weer faalt: geen crash, gewoon zonder weer verder
+        return df, None
 
-    if "days" not in data:
-        return pd.DataFrame()
+    # Weer voor forecast-periode
+    last_date = df["date"].max().date()
+    fut_start = last_date + dt.timedelta(days=1)
+    fut_end = last_date + dt.timedelta(days=horizon)
 
-    df = pd.DataFrame(data["days"])
-    df["date"] = pd.to_datetime(df["datetime"])
-    # temp: gemiddelde dagtemp; precip: mm; windspeed: km/u (VC)
-    return df[["date", "temp", "precip", "windspeed"]]
+    try:
+        w_future = _fetch_weather_daily_visualcrossing(
+            location_str=location_str,
+            start_date=fut_start,
+            end_date=fut_end,
+            api_key=api_key,
+        )
+        if w_future.empty:
+            w_future = None
+    except Exception:
+        w_future = None
+
+    return df, w_future
 
 
 # -----------------------------------------------------------
@@ -259,18 +194,22 @@ def build_simple_footfall_turnover_forecast(
     if df.empty or "date" not in df.columns or "footfall" not in df.columns:
         return {"enough_history": False}
 
+    # Zorg dat date datetime is
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df = df.dropna(subset=["date"])
 
     if df.empty:
         return {"enough_history": False}
 
+    # Sales per visitor berekenen als dat nog niet bestaat
     df = _ensure_sales_per_visitor(df)
 
+    # Minimaal aantal dagen historie
     unique_days = df["date"].dt.normalize().nunique()
     if unique_days < min_history_days:
         return {"enough_history": False}
 
+    # Day-of-week statistieken
     df["dow"] = df["date"].dt.weekday  # 0=maandag
     grp = df.groupby("dow")
 
@@ -293,12 +232,15 @@ def build_simple_footfall_turnover_forecast(
 
     fc = fc.merge(dow_stats.reset_index(), on="dow", how="left")
 
+    # Fallback SPV: globaal gemiddelde
     global_spv = df["sales_per_visitor"].mean()
     fc["spv_mean"] = fc["spv_mean"].fillna(global_spv)
 
+    # Footfall & omzet forecast
     fc["footfall_forecast"] = fc["footfall_mean"].clip(lower=0)
     fc["turnover_forecast"] = fc["footfall_forecast"] * fc["spv_mean"]
 
+    # Vergelijk met afgelopen 14 dagen
     last_14_start = last_date - pd.Timedelta(days=13)
     recent = df[(df["date"] >= last_14_start) & (df["date"] <= last_date)].copy()
 
@@ -308,6 +250,7 @@ def build_simple_footfall_turnover_forecast(
     fut_foot = fc["footfall_forecast"].sum()
     fut_turn = fc["turnover_forecast"].sum()
 
+    # Historiek voor grafiek: laatste 28 dagen
     hist_recent = df[df["date"] >= (last_date - pd.Timedelta(days=27))].copy()
 
     return {
@@ -325,7 +268,7 @@ def build_simple_footfall_turnover_forecast(
 
 
 # -----------------------------------------------------------
-# PRO FORECAST (LightGBM + lags/rolling + kalender + weer)
+# PRO FORECAST (LightGBM + lags/rolling stats + calendar/events + weer)
 # -----------------------------------------------------------
 
 def build_pro_footfall_turnover_forecast(
@@ -334,25 +277,20 @@ def build_pro_footfall_turnover_forecast(
     min_history_days: int = 60,
     weather_cfg: Optional[Dict[str, Any]] = None,
     use_weather: bool = False,
-    **_: Any,
 ) -> dict:
     """
     Pro-forecast met:
     - LightGBM (als beschikbaar)
-    - Features: dow, maand, dag, weekend, kalenderflags (NL-holidays, kerst, BF, zomer),
-      lags & rolling means
-    - Optioneel: weerfeatures via Visual Crossing (temp, neerslag, wind)
+    - Retail-kalenderfeatures (dow, maand, Q4, kerstperiode, Black Friday, feestdagen, zomer)
+    - Lags & rolling means
+    - Optioneel: weerfeatures (temp, precip, windspeed) via Visual Crossing
 
     Als LightGBM niet beschikbaar is of er te weinig historie is:
     -> automatische fallback naar build_simple_footfall_turnover_forecast(...),
        met 'used_simple_fallback' = True.
-
-    Return: zelfde structuur als simple-forecast-result, plus:
-        - "model_type": "lightgbm_dow_lags_calendar_weather" of "simple_dow"
-        - "used_simple_fallback": bool
     """
 
-    # Geen LightGBM? → fallback
+    # Als LightGBM ontbreekt → fallback
     if not HAS_LIGHTGBM:
         simple = build_simple_footfall_turnover_forecast(
             df_all_raw,
@@ -366,6 +304,7 @@ def build_pro_footfall_turnover_forecast(
     df = df_all_raw.copy()
 
     if df.empty or "date" not in df.columns or "footfall" not in df.columns:
+        # directe fallback
         simple = build_simple_footfall_turnover_forecast(
             df_all_raw,
             horizon=horizon,
@@ -374,8 +313,10 @@ def build_pro_footfall_turnover_forecast(
         simple["used_simple_fallback"] = True
         return simple
 
+    # Date normaliseren
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df = df.dropna(subset=["date"])
+
     if df.empty:
         simple = build_simple_footfall_turnover_forecast(
             df_all_raw,
@@ -385,8 +326,10 @@ def build_pro_footfall_turnover_forecast(
         simple["used_simple_fallback"] = True
         return simple
 
+    # Sales per visitor
     df = _ensure_sales_per_visitor(df)
 
+    # Minimaal aantal dagen historie
     unique_days = df["date"].dt.normalize().nunique()
     if unique_days < min_history_days:
         simple = build_simple_footfall_turnover_forecast(
@@ -397,10 +340,11 @@ def build_pro_footfall_turnover_forecast(
         simple["used_simple_fallback"] = True
         return simple
 
-    # Sorteren en kalenderfeatures toevoegen
+    # Sorteren op datum
     df = df.sort_values("date").reset_index(drop=True)
-    df["seq"] = np.arange(len(df))
-    df = _add_calendar_features(df)
+
+    # Retail-kalenderfeatures (dow, maand, Q4, kerstperiode, Black Friday, zomer, etc.)
+    df = add_retail_calendar_features(df, date_col="date")
 
     # Lags & rolling stats op footfall
     for lag in [1, 7, 14]:
@@ -409,52 +353,16 @@ def build_pro_footfall_turnover_forecast(
     df["footfall_roll_7"] = df["footfall"].rolling(window=7, min_periods=3).mean()
     df["footfall_roll_28"] = df["footfall"].rolling(window=28, min_periods=7).mean()
 
-    # Optioneel: weerfeatures ophalen & mergen
-    weather_df = pd.DataFrame()
-    if use_weather and weather_cfg and VISUALCROSSING_KEY:
-        try:
-            location = (
-                weather_cfg.get("location")
-                or f"{weather_cfg.get('city', '')},{weather_cfg.get('country', '')}"
-            )
-            location = str(location).strip()
-            if location:
-                start_date = df["date"].min().date()
-                last_hist_date = df["date"].max().date()
-                end_date = last_hist_date + dt.timedelta(days=horizon)
-                weather_df = _fetch_visualcrossing_history_and_forecast(
-                    location,
-                    start_date,
-                    end_date,
-                )
-        except Exception:
-            weather_df = pd.DataFrame()
+    # Weerfeatures toevoegen (historie + future)
+    df, weather_future_df = _prepare_weather_for_training_and_forecast(
+        df=df,
+        weather_cfg=weather_cfg,
+        use_weather=use_weather,
+        horizon=horizon,
+    )
 
-    if not weather_df.empty:
-        weather_df = weather_df.copy()
-        weather_df["date"] = pd.to_datetime(weather_df["date"])
-        # Merge met historie
-        df = df.merge(weather_df, on="date", how="left", suffixes=("", "_w"))
-        # Consistente namen
-        rename_map = {
-            "temp": "w_temp",
-            "precip": "w_precip",
-            "windspeed": "w_wind",
-        }
-        df.rename(columns=rename_map, inplace=True)
-        # Missing vullen met gemiddelde (zodat het model ze kan gebruiken)
-        for col in ["w_temp", "w_precip", "w_wind"]:
-            if col in df.columns:
-                df[col] = df[col].astype(float)
-                df[col] = df[col].fillna(df[col].mean())
-    else:
-        # Als geen weerdata → geen weer features
-        for col in ["w_temp", "w_precip", "w_wind"]:
-            if col in df.columns:
-                df.drop(columns=[col], inplace=True)
-
-    # Featurekolommen
-    base_feature_cols = [
+    # Basisfeaturelijst
+    feature_cols = [
         "dow",
         "month",
         "day_of_month",
@@ -472,15 +380,29 @@ def build_pro_footfall_turnover_forecast(
         "footfall_roll_28",
     ]
 
-    feature_cols = base_feature_cols.copy()
-    use_weather_features = False
-    if use_weather and all(col in df.columns for col in ["w_temp", "w_precip", "w_wind"]):
-        feature_cols += ["w_temp", "w_precip", "w_wind"]
-        use_weather_features = True
+    weather_feature_cols: list[str] = []
+    if use_weather and {"temp", "precip", "windspeed"}.issubset(df.columns):
+        weather_feature_cols = ["temp", "precip", "windspeed"]
+        feature_cols += weather_feature_cols
+    else:
+        # Als weerdata niet beschikbaar is → niet gebruiken in features
+        weather_future_df = None
 
-    # Trainset
-    df_model = df.dropna(subset=feature_cols + ["footfall"]).copy()
+    # Eerste rijen met NaN in lags/rollings droppen
+    # Let op: we droppen NIET op weerkolommen (LightGBM kan NaN aan)
+    df_model = df.dropna(
+        subset=[
+            "footfall",
+            "footfall_lag_1",
+            "footfall_lag_7",
+            "footfall_lag_14",
+            "footfall_roll_7",
+            "footfall_roll_28",
+        ]
+    ).copy()
+
     if df_model.shape[0] < 30:
+        # Te weinig data na feature engineering → fallback
         simple = build_simple_footfall_turnover_forecast(
             df_all_raw,
             horizon=horizon,
@@ -489,9 +411,11 @@ def build_pro_footfall_turnover_forecast(
         simple["used_simple_fallback"] = True
         return simple
 
+    # Trainset
     X_train = df_model[feature_cols].values
     y_train = df_model["footfall"].values
 
+    # LightGBM model
     model = lgb.LGBMRegressor(
         n_estimators=400,
         learning_rate=0.05,
@@ -502,100 +426,109 @@ def build_pro_footfall_turnover_forecast(
     )
     model.fit(X_train, y_train)
 
-    # Handige global means voor forecast
-    global_spv = df["sales_per_visitor"].mean()
-    global_w_temp = df["w_temp"].mean() if "w_temp" in df.columns else np.nan
-    global_w_precip = df["w_precip"].mean() if "w_precip" in df.columns else np.nan
-    global_w_wind = df["w_wind"].mean() if "w_wind" in df.columns else np.nan
-
-    # Footfall historiek (lijst voor lags & rollings)
+    # Voor forecast: lijst met footfall-waarden (historie)
     foot_hist = df["footfall"].tolist()
     last_date = df["date"].max()
+    global_spv = df["sales_per_visitor"].mean()
 
-    # Kalender + eventueel weer voor toekomstige data
+    # Helper om kalenderfeatures voor een target-dag te halen
+    def _calendar_features_for_date(ts: pd.Timestamp) -> Dict[str, Any]:
+        tmp = pd.DataFrame({"date": [ts]})
+        tmp = add_retail_calendar_features(tmp, date_col="date")
+        row = tmp.iloc[0]
+        return {
+            "dow": int(row["dow"]),
+            "month": int(row["month"]),
+            "day_of_month": int(row["day_of_month"]),
+            "is_weekend": int(row["is_weekend"]),
+            "is_q4": int(row["is_q4"]),
+            "is_december_peak": int(row["is_december_peak"]),
+            "is_summer_holiday": int(row["is_summer_holiday"]),
+            "is_nl_holiday": int(row["is_nl_holiday"]),
+            "is_christmas_period": int(row["is_christmas_period"]),
+            "is_black_friday_weekend": int(row["is_black_friday_weekend"]),
+        }
+
+    # Future weather lookup helper
+    def _weather_for_date(ts: pd.Timestamp) -> Dict[str, float]:
+        if weather_future_df is None:
+            return {"temp": 0.0, "precip": 0.0, "windspeed": 0.0}
+        row = weather_future_df.loc[weather_future_df["date"] == ts]
+        if row.empty:
+            return {"temp": 0.0, "precip": 0.0, "windspeed": 0.0}
+        return {
+            "temp": float(row["temp"].iloc[0]),
+            "precip": float(row["precip"].iloc[0]),
+            "windspeed": float(row["windspeed"].iloc[0]),
+        }
+
+    # Iteratieve forecast voor horizon dagen
     future_dates = pd.date_range(last_date + pd.Timedelta(days=1), periods=horizon, freq="D")
-    cal_future = pd.DataFrame({"date": future_dates})
-    cal_future = _add_calendar_features(cal_future)
-
-    if not weather_df.empty:
-        # Gebruik dezelfde weather_df als bij historie-merge
-        wf = weather_df.copy()
-        wf["date"] = pd.to_datetime(wf["date"])
-        wf.rename(
-            columns={"temp": "w_temp", "precip": "w_precip", "windspeed": "w_wind"},
-            inplace=True,
-        )
-        cal_future = cal_future.merge(wf, on="date", how="left")
-
-    cal_future = cal_future.set_index("date")
-
-    fc_rows = []
+    fc_rows: list[Dict[str, Any]] = []
 
     for target_date in future_dates:
-        # kalenderfeatures voor deze dag
-        cal_row = cal_future.loc[target_date]
-
-        # lags
         new_idx = len(foot_hist)
 
+        # Kalenderfeatures
+        cal = _calendar_features_for_date(target_date)
+
+        # Lags uit foot_hist (historisch + eerder voorspelde waarden)
         def _lag_or_last(idx_offset: int) -> float:
             idx = new_idx - idx_offset
             if 0 <= idx < len(foot_hist):
                 return float(foot_hist[idx])
-            return float(foot_hist[0]) if len(foot_hist) > 0 else 0.0
+            return float(foot_hist[0]) if foot_hist else 0.0
 
         lag_1 = _lag_or_last(1)
         lag_7 = _lag_or_last(7)
         lag_14 = _lag_or_last(14)
 
+        # rolling means over de laatste 7 / 28 bekende punten (incl. voorspelde)
         if len(foot_hist) > 0:
             roll_7 = float(np.mean(foot_hist[-7:])) if len(foot_hist) >= 3 else float(
                 np.mean(foot_hist)
             )
-            roll_28 = float(np.mean(foot_hist[-28:])) if len(foot_hist) >= 7 else float(
-                np.mean(foot_hist)
+            roll_28 = (
+                float(np.mean(foot_hist[-28:]))
+                if len(foot_hist) >= 7
+                else float(np.mean(foot_hist))
             )
         else:
             roll_7 = 0.0
             roll_28 = 0.0
 
-        # Basis-kalenderfeatures
-        x_vals = [
-            float(cal_row["dow"]),
-            float(cal_row["month"]),
-            float(cal_row["day_of_month"]),
-            float(cal_row["is_weekend"]),
-            float(cal_row["is_q4"]),
-            float(cal_row["is_december_peak"]),
-            float(cal_row["is_summer_holiday"]),
-            float(cal_row["is_nl_holiday"]),
-            float(cal_row["is_christmas_period"]),
-            float(cal_row["is_black_friday_weekend"]),
-            float(lag_1),
-            float(lag_7),
-            float(lag_14),
-            float(roll_7),
-            float(roll_28),
-        ]
+        feat: Dict[str, Any] = {
+            "dow": cal["dow"],
+            "month": cal["month"],
+            "day_of_month": cal["day_of_month"],
+            "is_weekend": cal["is_weekend"],
+            "is_q4": cal["is_q4"],
+            "is_december_peak": cal["is_december_peak"],
+            "is_summer_holiday": cal["is_summer_holiday"],
+            "is_nl_holiday": cal["is_nl_holiday"],
+            "is_christmas_period": cal["is_christmas_period"],
+            "is_black_friday_weekend": cal["is_black_friday_weekend"],
+            "footfall_lag_1": lag_1,
+            "footfall_lag_7": lag_7,
+            "footfall_lag_14": lag_14,
+            "footfall_roll_7": roll_7,
+            "footfall_roll_28": roll_28,
+        }
 
-        # Eventueel weer
-        if use_weather_features:
-            def _safe_weather(col_name: str, global_val: float) -> float:
-                val = float(cal_row[col_name]) if col_name in cal_row.index else np.nan
-                if np.isnan(val):
-                    if not np.isnan(global_val):
-                        return float(global_val)
-                    return 0.0
-                return val
+        if weather_future_df is not None and weather_feature_cols:
+            w = _weather_for_date(target_date)
+            feat["temp"] = w["temp"]
+            feat["precip"] = w["precip"]
+            feat["windspeed"] = w["windspeed"]
 
-            x_vals.append(_safe_weather("w_temp", global_w_temp))
-            x_vals.append(_safe_weather("w_precip", global_w_precip))
-            x_vals.append(_safe_weather("w_wind", global_w_wind))
+        # Zorg dat de featurevector exact in dezelfde volgorde staat als feature_cols
+        x_new = [feat.get(col, 0.0) for col in feature_cols]
 
-        y_pred = float(model.predict(np.array([x_vals]))[0])
-        y_pred = max(y_pred, 0.0)
+        y_pred = float(model.predict(np.array([x_new]))[0])
+        y_pred = max(y_pred, 0.0)  # geen negatieve footfall
 
         foot_hist.append(y_pred)
+
         turnover_pred = y_pred * (global_spv if not np.isnan(global_spv) else 0.0)
 
         fc_rows.append(
@@ -618,6 +551,7 @@ def build_pro_footfall_turnover_forecast(
     fut_foot = fc["footfall_forecast"].sum()
     fut_turn = fc["turnover_forecast"].sum()
 
+    # Historiek voor grafiek: laatste 28 dagen
     hist_recent = df[df["date"] >= (last_date - pd.Timedelta(days=27))].copy()
 
     return {
@@ -629,8 +563,6 @@ def build_pro_footfall_turnover_forecast(
         "forecast_footfall_sum": float(fut_foot),
         "forecast_turnover_sum": float(fut_turn),
         "last_date": last_date,
-        "model_type": "lightgbm_dow_lags_calendar_weather"
-        if use_weather_features
-        else "lightgbm_dow_lags_calendar",
+        "model_type": "lightgbm_dow_lags_events_weather",
         "used_simple_fallback": False,
     }
