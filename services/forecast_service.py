@@ -11,6 +11,17 @@ try:
 except Exception:
     HAS_LIGHTGBM = False
 
+# Optionele weer-ondersteuning (Visual Crossing via weather_service)
+try:
+    from weather_service import (
+        get_historical_weather_daily,
+        get_forecast_weather_daily,
+    )
+
+    HAS_WEATHER = True
+except Exception:
+    HAS_WEATHER = False
+
 
 def _ensure_sales_per_visitor(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -141,25 +152,170 @@ def build_simple_footfall_turnover_forecast(
 
 
 # -----------------------------------------------------------
-# PRO FORECAST (LightGBM + lags/rolling stats) – MINI VARIANT
+# PRO FORECAST (LightGBM + lags/rolling stats + optioneel weer)
 # -----------------------------------------------------------
+
+# Weer-features die we uit weather_service verwachten
+WEATHER_FEATURES = ["temp", "precip", "precipprob", "windspeed", "cloudcover"]
+
+
+def _enrich_with_weather_history(
+    df: pd.DataFrame,
+    weather_cfg: dict | None,
+) -> pd.DataFrame:
+    """
+    Plakt historische weerdata (dagelijks) aan df op basis van 'date'.
+
+    - Als weather_cfg of HAS_WEATHER ontbreekt, worden de weerkolommen
+      gewoon gevuld met 0.0 (model werkt dan feitelijk zonder weer).
+    - weather_cfg verwacht dezelfde keys als weather_service:
+      mode, lat, lon, city, country, postal_code, ...
+    """
+    df = df.copy()
+
+    # Zorg dat alle weather columns bestaan
+    for col in WEATHER_FEATURES:
+        if col not in df.columns:
+            df[col] = np.nan
+
+    if not HAS_WEATHER or not weather_cfg:
+        # Geen weer beschikbaar → vul alles met 0, zodat model wel kan draaien
+        for col in WEATHER_FEATURES:
+            df[col] = df[col].fillna(0.0)
+        return df
+
+    # Datumrange bepalen
+    df["date_only"] = pd.to_datetime(df["date"]).dt.date
+    start_date = df["date_only"].min().strftime("%Y-%m-%d")
+    end_date = df["date_only"].max().strftime("%Y-%m-%d")
+
+    try:
+        wdf = get_historical_weather_daily(
+            mode=weather_cfg.get("mode", "postal_country"),
+            lat=weather_cfg.get("lat"),
+            lon=weather_cfg.get("lon"),
+            city=weather_cfg.get("city"),
+            country=weather_cfg.get("country"),
+            postal_code=weather_cfg.get("postal_code"),
+            start_date=start_date,
+            end_date=end_date,
+        )
+    except Exception:
+        # Bij problemen met de API ook gewoon graceful degraden
+        for col in WEATHER_FEATURES:
+            df[col] = df[col].fillna(0.0)
+        df = df.drop(columns=["date_only"])
+        return df
+
+    if wdf.empty:
+        for col in WEATHER_FEATURES:
+            df[col] = df[col].fillna(0.0)
+        df = df.drop(columns=["date_only"])
+        return df
+
+    wdf = wdf.copy()
+    # wdf['date'] is een date-string of date-object
+    wdf["date"] = pd.to_datetime(wdf["date"]).dt.date
+
+    # Merge op date_only
+    df = df.merge(
+        wdf[["date"] + WEATHER_FEATURES].rename(columns={"date": "date_only"}),
+        on="date_only",
+        how="left",
+        suffixes=("", "_w"),
+    )
+
+    df = df.drop(columns=["date_only"])
+
+    # Vul missende weerwaardes slim op
+    for col in WEATHER_FEATURES:
+        if col not in df.columns:
+            df[col] = 0.0
+        else:
+            # eerst mediaan, anders 0
+            if df[col].notna().any():
+                df[col] = df[col].fillna(df[col].median())
+            else:
+                df[col] = df[col].fillna(0.0)
+
+    return df
+
+
+def _build_weather_forecast_map(
+    start_date: pd.Timestamp,
+    horizon: int,
+    weather_cfg: dict | None,
+):
+    """
+    Maakt een dict: { date (date-object) -> {weather_feature: value} }
+    voor de forecast-periode (start_date+1 t/m horizon).
+    """
+    if not HAS_WEATHER or not weather_cfg or horizon <= 0:
+        return {}
+
+    # We willen horizon dagen vooruit, beginnend vanaf start_date + 1
+    try:
+        wdf = get_forecast_weather_daily(
+            mode=weather_cfg.get("mode", "postal_country"),
+            lat=weather_cfg.get("lat"),
+            lon=weather_cfg.get("lon"),
+            city=weather_cfg.get("city"),
+            country=weather_cfg.get("country"),
+            postal_code=weather_cfg.get("postal_code"),
+            days_ahead=horizon,
+            start_offset_days=1,  # dag na laatste datum in historie
+        )
+    except Exception:
+        return {}
+
+    if wdf.empty:
+        return {}
+
+    wdf = wdf.copy()
+    wdf["date"] = pd.to_datetime(wdf["date"]).dt.date
+
+    weather_map: dict = {}
+    for _, row in wdf.iterrows():
+        d = row["date"]
+        weather_map[d] = {}
+        for col in WEATHER_FEATURES:
+            weather_map[d][col] = float(row.get(col, 0.0))
+
+    return weather_map
+
 
 def build_pro_footfall_turnover_forecast(
     df_all_raw: pd.DataFrame,
     horizon: int = 14,
     min_history_days: int = 60,
+    weather_cfg: dict | None = None,
+    use_weather: bool = True,
 ) -> dict:
     """
     Pro-forecast met:
     - LightGBM (als beschikbaar)
     - Features: dow, maand, dag, weekend, lags & rolling means
+    - Optioneel: weerfeatures (temp, neerslag, wind, bewolking) via Visual Crossing
+
+    Parameters:
+    - df_all_raw: DataFrame met minimaal 'date' en 'footfall', optioneel 'turnover'
+    - horizon: aantal dagen vooruit
+    - min_history_days: minimaal aantal unieke dagen historie
+    - weather_cfg: dict met instellingen voor weather_service, bv:
+        {
+            "mode": "postal_country",
+            "postal_code": "1102 DB",
+            "country": "Netherlands",
+        }
+      of met lat/lon etc.
+    - use_weather: als False, wordt weer genegeerd zelfs als weather_cfg is gezet.
 
     Als LightGBM niet beschikbaar is of er te weinig historie is:
     -> automatische fallback naar build_simple_footfall_turnover_forecast(...),
        met 'used_simple_fallback' = True.
 
     Return: zelfde structuur als simple-forecast-result, plus:
-        - "model_type": "lightgbm_dow_lags" of "simple_dow"
+        - "model_type": "lightgbm_dow_lags" (met of zonder weer)
         - "used_simple_fallback": bool
     """
 
@@ -230,8 +386,17 @@ def build_pro_footfall_turnover_forecast(
     df["footfall_roll_7"] = df["footfall"].rolling(window=7, min_periods=3).mean()
     df["footfall_roll_28"] = df["footfall"].rolling(window=28, min_periods=7).mean()
 
+    # Optioneel: weer-geschiedenis plakken
+    if use_weather:
+        df = _enrich_with_weather_history(df, weather_cfg)
+    else:
+        # zorg wel dat columns bestaan
+        for col in WEATHER_FEATURES:
+            if col not in df.columns:
+                df[col] = 0.0
+
     # Eerste rijen met NaN in lags/rollings droppen
-    feature_cols = [
+    base_feature_cols = [
         "dow",
         "month",
         "day_of_month",
@@ -243,7 +408,10 @@ def build_pro_footfall_turnover_forecast(
         "footfall_roll_28",
     ]
 
-    df_model = df.dropna(subset=feature_cols + ["footfall"]).copy()
+    # Definitieve featurelijst (kalender + lags + weer)
+    feature_cols = base_feature_cols + list(WEATHER_FEATURES)
+
+    df_model = df.dropna(subset=base_feature_cols + ["footfall"]).copy()
     if df_model.shape[0] < 30:
         # Te weinig data na feature engineering → fallback
         simple = build_simple_footfall_turnover_forecast(
@@ -274,6 +442,12 @@ def build_pro_footfall_turnover_forecast(
     last_date = df["date"].max()
     global_spv = df["sales_per_visitor"].mean()
 
+    # Weerforecast voor de horizon-periode ophalen
+    if use_weather:
+        weather_map = _build_weather_forecast_map(last_date, horizon, weather_cfg)
+    else:
+        weather_map = {}
+
     # Iteratieve forecast voor horizon dagen
     future_dates = pd.date_range(last_date + pd.Timedelta(days=1), periods=horizon, freq="D")
     fc_rows = []
@@ -290,10 +464,10 @@ def build_pro_footfall_turnover_forecast(
 
         def _lag_or_last(idx_offset: int) -> float:
             idx = new_idx - idx_offset
-            if idx >= 0 and idx < len(foot_hist):
-                return foot_hist[idx]
+            if 0 <= idx < len(foot_hist):
+                return float(foot_hist[idx])
             else:
-                return foot_hist[0] if len(foot_hist) > 0 else 0.0
+                return float(foot_hist[0]) if len(foot_hist) > 0 else 0.0
 
         lag_1 = _lag_or_last(1)
         lag_7 = _lag_or_last(7)
@@ -301,11 +475,19 @@ def build_pro_footfall_turnover_forecast(
 
         # rolling means over de laatste 7 / 28 bekende punten (incl. voorspelde)
         if len(foot_hist) > 0:
-            roll_7 = np.mean(foot_hist[-7:]) if len(foot_hist) >= 3 else np.mean(foot_hist)
-            roll_28 = np.mean(foot_hist[-28:]) if len(foot_hist) >= 7 else np.mean(foot_hist)
+            roll_7 = float(np.mean(foot_hist[-7:])) if len(foot_hist) >= 3 else float(np.mean(foot_hist))
+            roll_28 = float(np.mean(foot_hist[-28:])) if len(foot_hist) >= 7 else float(np.mean(foot_hist))
         else:
             roll_7 = 0.0
             roll_28 = 0.0
+
+        # Weerfeatures voor deze dag
+        w = weather_map.get(target_date.date(), {}) if weather_map else {}
+        temp = float(w.get("temp", 0.0))
+        precip = float(w.get("precip", 0.0))
+        precipprob = float(w.get("precipprob", 0.0))
+        windspeed = float(w.get("windspeed", 0.0))
+        cloudcover = float(w.get("cloudcover", 0.0))
 
         x_new = [
             dow,
@@ -317,6 +499,11 @@ def build_pro_footfall_turnover_forecast(
             lag_14,
             roll_7,
             roll_28,
+            temp,
+            precip,
+            precipprob,
+            windspeed,
+            cloudcover,
         ]
 
         y_pred = float(model.predict(np.array([x_new]))[0])
@@ -358,6 +545,6 @@ def build_pro_footfall_turnover_forecast(
         "forecast_footfall_sum": float(fut_foot),
         "forecast_turnover_sum": float(fut_turn),
         "last_date": last_date,
-        "model_type": "lightgbm_dow_lags",
+        "model_type": "lightgbm_dow_lags",  # nu met (optionele) weerfeatures
         "used_simple_fallback": False,
     }
