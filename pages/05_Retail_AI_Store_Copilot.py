@@ -1,5 +1,6 @@
 # pages/05_Retail_AI_Store_Copilot.py
 
+import os
 import numpy as np
 import pandas as pd
 import requests
@@ -89,6 +90,10 @@ else:
     REPORT_URL = raw_api_url + "/get-report"
 
 VISUALCROSSING_KEY = st.secrets.get("visualcrossing_key", None)
+
+# Maak de key ook beschikbaar als environment variable voor weather_service
+if VISUALCROSSING_KEY:
+    os.environ["VISUALCROSSING_API_KEY"] = VISUALCROSSING_KEY
 
 # ----------------------
 # PFM brand colors
@@ -184,13 +189,15 @@ def get_report(
 
 
 # -------------
-# Weather helper (Visual Crossing)
+# Weather helper (Visual Crossing direct voor grafiek)
 # -------------
 
 @st.cache_data(ttl=3600)
 def fetch_visualcrossing_history(location_str: str, start_date, end_date) -> pd.DataFrame:
     """
     Haalt historische daily weather data op via Visual Crossing.
+    Wordt gebruikt voor de 'Weer vs footfall'-grafiek.
+    Forecast gebruikt de centrale weather_service via forecast_service.
     """
     if not VISUALCROSSING_KEY:
         return pd.DataFrame()
@@ -462,11 +469,11 @@ def main():
         "CBS postcode (4-cijferig)",
         value=postcode[:4] if postcode else "",
     )
-    
+
     forecast_mode = st.sidebar.radio(
-    "Forecast mode",
-    ["Simple (DoW)", "Pro (LightGBM beta)"],
-    index=0
+        "Forecast mode",
+        ["Simple (DoW)", "Pro (LightGBM beta)"],
+        index=0,
     )
 
     run_btn = st.sidebar.button("Analyseer", type="primary")
@@ -565,7 +572,7 @@ def main():
     if not df_prev.empty:
         df_prev = compute_daily_kpis(df_prev)
 
-    # --- Weerdata via Visual Crossing ---
+    # --- Weerdata via Visual Crossing voor grafiek ---
     weather_df = pd.DataFrame()
     if weather_location and VISUALCROSSING_KEY:
         weather_df = fetch_visualcrossing_history(weather_location, start_cur, end_cur)
@@ -885,9 +892,43 @@ def main():
     # --- Forecast: footfall & omzet (dag niveau, 14 dagen) ---
     st.markdown("### Forecast: footfall & omzet (volgende 14 dagen)")
 
+    # Weather config voor forecast_service (op basis van weerlocatie input)
+    weather_cfg = None
+    if VISUALCROSSING_KEY and weather_location:
+        # Verwacht iets als "Amsterdam,NL" of "Rotterdam,Nederland"
+        city_part = weather_location
+        country = "Netherlands"
+
+        parts = weather_location.split(",")
+        if len(parts) >= 1:
+            city_part = parts[0].strip()
+        if len(parts) >= 2:
+            country_code = parts[1].strip().upper()
+            country_map = {
+                "NL": "Netherlands",
+                "BE": "Belgium",
+                "DE": "Germany",
+                "FR": "France",
+                "UK": "United Kingdom",
+                "GB": "United Kingdom",
+            }
+            country = country_map.get(country_code, country_code)
+
+        weather_cfg = {
+            "mode": "city_country",
+            "city": city_part,
+            "country": country,
+        }
+
     try:
         if forecast_mode == "Pro (LightGBM beta)":
-            fc_res = build_pro_footfall_turnover_forecast(df_hist_raw)
+            fc_res = build_pro_footfall_turnover_forecast(
+                df_hist_raw,
+                horizon=14,
+                min_history_days=60,
+                weather_cfg=weather_cfg,
+                use_weather=bool(weather_cfg),
+            )
         else:
             fc_res = build_simple_footfall_turnover_forecast(df_hist_raw)
 
@@ -989,7 +1030,7 @@ def main():
 
     except Exception as e:
         st.info(
-            "Forecast kon niet worden berekend (te weinig data of ontbrekende kolommen)."
+            "Forecast kon niet worden berekend (te weinig data, ontbrekende kolommen of weerdata-issue)."
         )
         st.exception(e)
 
@@ -1011,6 +1052,8 @@ def main():
         )
         st.write("CBS stats:", cbs_stats)
         st.write("Weather df:", weather_df.head())
+        st.write("Forecast mode:", forecast_mode)
+        st.write("Weather cfg (forecast):", weather_cfg)
 
 
 if __name__ == "__main__":
