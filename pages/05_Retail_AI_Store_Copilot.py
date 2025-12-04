@@ -8,6 +8,15 @@ import streamlit as st
 import altair as alt  # eventueel later nog voor andere grafieken
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
+# BOVENAAN, naast andere imports
+try:
+    from openai import OpenAI
+    _OPENAI_INSTALLED = True
+except Exception:
+    OpenAI = None
+    _OPENAI_INSTALLED = False
+
+from services.event_service import build_event_flags_for_dates
 
 from datetime import datetime, timedelta
 
