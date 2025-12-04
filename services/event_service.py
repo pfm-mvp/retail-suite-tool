@@ -1,187 +1,134 @@
 # services/event_service.py
 
 from __future__ import annotations
-
 import datetime as dt
-from typing import Set
-
+from typing import Iterable, List
 import pandas as pd
 
 
-# -----------------------------------------------------------
-# Basis: Pasen / NL-feestdagen / Black Friday
-# -----------------------------------------------------------
+def _normalize_dates(dates: Iterable) -> pd.Series:
+    """Zorgt dat we een genormaliseerde datetime.date-serie hebben."""
+    s = pd.to_datetime(pd.Series(list(dates)), errors="coerce").dt.normalize()
+    return s
 
-def easter_date(year: int) -> dt.date:
+
+def _black_friday(year: int) -> dt.date:
     """
-    Berekent paaszondag (Gregoriaanse kalender).
-    Meeus/Jones/Butcher algoritme.
+    Black Friday = 4e vrijdag van november.
     """
-    a = year % 19
-    b = year // 100
-    c = year % 100
-    d = b // 4
-    e = b % 4
-    f = (b + 8) // 25
-    g = (b - f + 1) // 3
-    h = (19 * a + b - d - g + 15) % 30
-    i = c // 4
-    k = c % 4
-    l = (32 + 2 * e + 2 * i - h - k) % 7
-    m = (a + 11 * h + 22 * l) // 451
-    month = (h + l - 7 * m + 114) // 31
-    day = ((h + l - 7 * m + 114) % 31) + 1
-    return dt.date(year, month, day)
+    # 1 november
+    d = dt.date(year, 11, 1)
+    # naar eerste vrijdag
+    while d.weekday() != 4:
+        d += dt.timedelta(days=1)
+    # dan + 3 weken = 4e vrijdag
+    d += dt.timedelta(weeks=3)
+    return d
 
 
-def nl_holidays_for_year(year: int) -> Set[dt.date]:
-    """
-    Basis-set met NL-feestdagen voor retail-analyses.
-    Niet 100% juridisch compleet – wél praktisch als model-feature.
-    """
-    holidays: Set[dt.date] = set()
-
-    # Vaste dagen
-    holidays.add(dt.date(year, 1, 1))    # Nieuwjaarsdag
-    holidays.add(dt.date(year, 4, 27))   # Koningsdag
-    holidays.add(dt.date(year, 5, 5))    # Bevrijdingsdag
-    holidays.add(dt.date(year, 12, 25))  # 1e Kerstdag
-    holidays.add(dt.date(year, 12, 26))  # 2e Kerstdag
-
-    # Paas- / pinksterreeks
-    easter = easter_date(year)
-    good_friday = easter - dt.timedelta(days=2)
-    easter_monday = easter + dt.timedelta(days=1)
-    ascension = easter + dt.timedelta(days=39)
-    pentecost = easter + dt.timedelta(days=49)
-    pentecost_monday = easter + dt.timedelta(days=50)
-
-    holidays.update(
-        {
-            good_friday,
-            easter,
-            easter_monday,
-            ascension,
-            pentecost,
-            pentecost_monday,
-        }
-    )
-
-    return holidays
+def _date_range(start: dt.date, end: dt.date) -> List[dt.date]:
+    """Inclusief start en end."""
+    days = (end - start).days
+    return [start + dt.timedelta(days=i) for i in range(days + 1)]
 
 
-def black_friday_date(year: int) -> dt.date:
-    """
-    Black Friday = laatste vrijdag van november.
-    """
-    last_nov = dt.date(year, 11, 30)
-    while last_nov.weekday() != 4:  # 0=maandag, 4=vrijdag
-        last_nov -= dt.timedelta(days=1)
-    return last_nov
-
-
-# -----------------------------------------------------------
-# DataFrame helper: retail-kalenderfeatures
-# -----------------------------------------------------------
-
-def add_retail_calendar_features(
-    df: pd.DataFrame,
-    date_col: str = "date",
+def build_event_flags_for_dates(
+    dates: Iterable,
+    country: str = "NL",
 ) -> pd.DataFrame:
     """
-    Voegt retail-kalenderfeatures toe op basis van een datumbepaalde kolom.
+    Geeft per datum simpele event-flags terug.
+    Gebruik: features voor forecast + uitleg voor de storemanager.
 
-    Features:
-    - dow                (0=ma, ..., 6=zo)
-    - month
-    - day_of_month
-    - is_weekend
-    - is_q4              (okt–dec)
-    - is_december_peak   (december)
-    - is_summer_holiday  (juli/aug)
-    - is_nl_holiday      (NL-feestdag)
-    - is_christmas_period (15–31 december)
-    - is_black_friday_weekend (vr/za/zo rond Black Friday)
+    Output kolommen:
+    - date (Timestamp, genormaliseerd)
+    - is_weekend (0/1)
+    - is_national_holiday (0/1)
+    - is_school_holiday (0/1)  [grof benaderd]
+    - is_black_friday (0/1)
+    - is_december_trade (0/1)  [Sinterklaas/Kerstdrukte]
+    - is_summer_sale (0/1)     [juli/august]
     """
-    if df is None or df.empty or date_col not in df.columns:
+    s = _normalize_dates(dates)
+    if s.empty:
+        return pd.DataFrame(columns=[
+            "date",
+            "is_weekend",
+            "is_national_holiday",
+            "is_school_holiday",
+            "is_black_friday",
+            "is_december_trade",
+            "is_summer_sale",
+        ])
+
+    df = pd.DataFrame({"date": s})
+    df = df.dropna(subset=["date"]).drop_duplicates(subset=["date"]).reset_index(drop=True)
+    if df.empty:
         return df
 
-    out = df.copy()
-    out[date_col] = pd.to_datetime(out[date_col], errors="coerce")
-    out = out.dropna(subset=[date_col])
+    df["date_only"] = df["date"].dt.date
+    df["year"] = df["date"].dt.year
 
-    if out.empty:
-        return out
+    # Basisflag: weekend
+    df["is_weekend"] = df["date"].dt.weekday.isin([5, 6]).astype(int)
 
-    d = out[date_col]
+    # --- Nationale feestdagen & vakanties – NL (grof benaderd demo) ---
+    nat_holidays = set()
+    school_holidays = set()
+    summer_sale = set()
+    december_trade = set()
+    black_fridays = set()
 
-    out["dow"] = d.dt.weekday
-    out["month"] = d.dt.month
-    out["day_of_month"] = d.dt.day
-    out["is_weekend"] = out["dow"].isin([5, 6]).astype(int)
-
-    out["is_q4"] = out["month"].isin([10, 11, 12]).astype(int)
-    out["is_december_peak"] = (out["month"] == 12).astype(int)
-    out["is_summer_holiday"] = out["month"].isin([7, 8]).astype(int)
-
-    years = d.dt.year.unique().tolist()
-
-    # NL-feestdagen
-    holiday_dates: Set[dt.date] = set()
+    years = sorted(df["year"].unique().tolist())
     for y in years:
-        holiday_dates |= nl_holidays_for_year(int(y))
+        # Black Friday
+        bf = _black_friday(y)
+        black_fridays.add(bf)
 
-    out["is_nl_holiday"] = d.dt.date.isin(holiday_dates).astype(int)
+        # Grof: zomer-vakantie NL: 15 juli – 31 augustus
+        summer_hol = _date_range(dt.date(y, 7, 15), dt.date(y, 8, 31))
+        school_holidays.update(summer_hol)
+        summer_sale.update(summer_hol)
 
-    # Kerstperiode 15–31 dec
-    out["is_christmas_period"] = (
-        (out["month"] == 12) & (out["day_of_month"] >= 15)
-    ).astype(int)
+        # Kerstvakantie globaal: 24 dec – 1 jan (van y en y+1)
+        xmas_start = dt.date(y, 12, 24)
+        xmas_end = dt.date(y + 1, 1, 1)
+        school_holidays.update(_date_range(xmas_start, xmas_end))
 
-    # Black Friday-weekend (vr–zo)
-    bf_weekend_dates: Set[dt.date] = set()
-    for y in years:
-        bf = black_friday_date(int(y))
-        for offset in range(0, 3):
-            bf_weekend_dates.add(bf + dt.timedelta(days=offset))
+        # Voorjaarsvakantie: 15 feb – 1 maart
+        spring_start = dt.date(y, 2, 15)
+        spring_end = dt.date(y, 3, 1)
+        school_holidays.update(_date_range(spring_start, spring_end))
 
-    out["is_black_friday_weekend"] = d.dt.date.isin(bf_weekend_dates).astype(int)
+        # December trade-peak: 1 dec – 31 dec
+        december_trade.update(_date_range(dt.date(y, 12, 1), dt.date(y, 12, 31)))
 
-    return out
+        # Nationale feestdagen (NL, +/−):
+        for d in [
+            dt.date(y, 1, 1),   # Nieuwjaar
+            dt.date(y, 4, 27),  # Koningsdag
+            dt.date(y, 12, 25), # 1e Kerstdag
+            dt.date(y, 12, 26), # 2e Kerstdag
+        ]:
+            nat_holidays.add(d)
 
+    # Flags mappen naar df
+    df["is_national_holiday"] = df["date_only"].apply(lambda d: int(d in nat_holidays))
+    df["is_school_holiday"] = df["date_only"].apply(lambda d: int(d in school_holidays))
+    df["is_black_friday"] = df["date_only"].apply(lambda d: int(d in black_fridays))
+    df["is_december_trade"] = df["date_only"].apply(lambda d: int(d in december_trade))
+    df["is_summer_sale"] = df["date_only"].apply(lambda d: int(d in summer_sale))
 
-# -----------------------------------------------------------
-# Kleine helper voor labels (optioneel, voor UI)
-# -----------------------------------------------------------
+    # Opruimen
+    df = df.drop(columns=["date_only", "year"])
 
-def describe_retail_event(date_value: dt.date) -> str:
-    """
-    Geeft een korte beschrijving van een event/kalendermoment.
-    Handig voor tooltips / uitleg in dashboards.
-    """
-    if isinstance(date_value, dt.datetime):
-        date_value = date_value.date()
-
-    y = date_value.year
-    holidays = nl_holidays_for_year(y)
-
-    if date_value in holidays:
-        # Heel eenvoudig: alleen "Feestdag"
-        # (uitbreiden met naam per datum kan altijd later)
-        return "Feestdag (NL)"
-
-    bf = black_friday_date(y)
-    if date_value == bf:
-        return "Black Friday"
-    if date_value == bf + dt.timedelta(days=1):
-        return "Black Friday weekend (zaterdag)"
-    if date_value == bf + dt.timedelta(days=2):
-        return "Black Friday weekend (zondag)"
-
-    if date_value.month == 12 and date_value.day >= 15:
-        return "Kerstperiode"
-
-    if date_value.month in (7, 8):
-        return "Zomerperiode"
-
-    return ""
+    cols = [
+        "date",
+        "is_weekend",
+        "is_national_holiday",
+        "is_school_holiday",
+        "is_black_friday",
+        "is_december_trade",
+        "is_summer_sale",
+    ]
+    return df[cols].copy()
