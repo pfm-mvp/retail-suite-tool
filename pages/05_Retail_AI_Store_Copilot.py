@@ -374,6 +374,17 @@ def main():
 
     today = datetime.today().date()
 
+    # Vanaf welke datum mag de forecast-historie gebruikt worden?
+    default_hist_start = today - timedelta(days=365)
+    hist_start_input = st.sidebar.date_input(
+        "Forecast-historie vanaf",
+        value=default_hist_start,
+        help=(
+            "Deze datum bepaalt vanaf wanneer we historische data gebruiken om "
+            "het forecast-model (Simple / Pro) te trainen."
+        ),
+    )
+
     def get_week_range(base_date):
         """Maandag–zondag week van base_date."""
         wd = base_date.weekday()  # 0=ma
@@ -511,10 +522,11 @@ def main():
     df_all_raw = df_all_raw.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
 
     # ------------------------------
-    # Extra history voor forecast (laatste 365 dagen via period=date)
+    # Extra history voor forecast (via period=date)
     # ------------------------------
     hist_end = datetime.today().date()
-    hist_start = hist_end - timedelta(days=365)
+    # Gebruik de gekozen startdatum uit de sidebar, maar clamp naar vandaag
+    hist_start = min(hist_start_input, hist_end)
 
     try:
         resp_hist = get_report(
@@ -905,6 +917,20 @@ def main():
     # --- Forecast: footfall & omzet (dag niveau, 14 dagen) ---
     st.markdown("### Forecast: footfall & omzet (volgende 14 dagen)")
 
+    # Uitleg voor demo / klant
+    st.markdown(
+        """
+        <small>
+        💡 <strong>Forecast uitleg</strong><br>
+        - <strong>Simple (DoW)</strong> gebruikt gemiddelden per weekdag op basis van je historische data.<br>
+        - <strong>Pro (LightGBM beta)</strong> bouwt hierop voort met seizoenseffecten (Q4, feestdagen),
+          lags/rolling averages en optioneel weerdata.<br>
+        - Als er (nog) te weinig bruikbare historie is of LightGBM niet beschikbaar is, valt Pro automatisch terug op Simple.
+        </small>
+        """,
+        unsafe_allow_html=True,
+    )
+
     # Weather config voor forecast_service (op basis van weerlocatie input)
     weather_cfg = None
     if VISUALCROSSING_KEY and weather_location:
@@ -1068,6 +1094,14 @@ def main():
         st.write("Weather df:", weather_df.head())
         st.write("Forecast mode:", forecast_mode)
         st.write("Weather cfg (forecast):", weather_cfg)
+
+        st.write("Forecast mode (UI):", forecast_mode)
+        try:
+            st.write("Forecast model_type:", fc_res.get("model_type"))
+            st.write("Forecast used_simple_fallback:", fc_res.get("used_simple_fallback"))
+            st.write("Forecast head:", fc_res["forecast"].head())
+        except Exception:
+            st.write("Forecast object nog niet beschikbaar in deze run.")
 
 
 if __name__ == "__main__":
