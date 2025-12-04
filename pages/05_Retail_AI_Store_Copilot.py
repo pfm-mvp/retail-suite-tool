@@ -572,10 +572,23 @@ def main():
     if not df_prev.empty:
         df_prev = compute_daily_kpis(df_prev)
 
-    # --- Weerdata via Visual Crossing voor grafiek ---
+    # --- Weerdata via Visual Crossing ---
     weather_df = pd.DataFrame()
     if weather_location and VISUALCROSSING_KEY:
         weather_df = fetch_visualcrossing_history(weather_location, start_cur, end_cur)
+
+    # Config voor forecast-model (zelfde locatie-string)
+    weather_cfg = None
+    if VISUALCROSSING_KEY and weather_location:
+        parts = weather_location.split(",")
+        city = parts[0].strip() if parts else ""
+        country = parts[1].strip() if len(parts) > 1 else ""
+        weather_cfg = {
+            "mode": "city_country",
+            "city": city,
+            "country": country,
+            "location": weather_location.strip(),
+        }
 
     # --- Pathzz street traffic (weekly, demo) ---
     pathzz_weekly = fetch_monthly_street_traffic(
@@ -918,6 +931,7 @@ def main():
             "mode": "city_country",
             "city": city_part,
             "country": country,
+            "api_key": VISUALCROSSING_KEY,  # << nieuw
         }
 
     try:
