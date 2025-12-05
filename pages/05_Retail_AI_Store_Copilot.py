@@ -1295,6 +1295,44 @@ def main():
                     delta=delta_turn,
                 )
 
+                        # --- Verwachte maandomzet (actueel + forecast rest van maand) ---
+            month_start = datetime(today.year, today.month, 1).date()
+            today_date = today
+
+            if "turnover" in df_all_raw.columns:
+                actual_month_turn = df_all_raw[
+                    (df_all_raw["date"].dt.date >= month_start)
+                    & (df_all_raw["date"].dt.date <= today_date)
+                ]["turnover"].sum()
+            else:
+                actual_month_turn = 0.0
+
+            future_month_turn = 0.0
+            if isinstance(fc, pd.DataFrame) and "date" in fc.columns and "turnover_forecast" in fc.columns:
+                fc_month = fc.copy()
+                fc_month["date"] = pd.to_datetime(fc_month["date"], errors="coerce").dt.date
+                future_month_turn = fc_month[
+                    (fc_month["date"] > today_date)
+                    & (fc_month["date"].month == today_date.month)
+                ]["turnover_forecast"].sum()
+
+            expected_month_turn = actual_month_turn + future_month_turn
+
+            col_month, _ = st.columns([2, 3])
+            with col_month:
+                st.markdown("#### Verwachte omzet – huidige maand")
+                st.metric(
+                    "Verwachte omzet deze maand",
+                    fmt_eur(expected_month_turn),
+                )
+                if actual_month_turn > 0:
+                    remaining = expected_month_turn - actual_month_turn
+                    st.caption(
+                        f"Gerealiseerd tot nu toe: {fmt_eur(actual_month_turn)} · "
+                        f"Verwachte extra omzet rest van de maand: {fmt_eur(remaining)} "
+                        f"(binnen 14-daagse forecast horizon)."
+                    )
+
             # Grafiek: laatste 28 dagen historisch + forecast
             fig_fc = make_subplots(specs=[[{"secondary_y": True}]])
 
