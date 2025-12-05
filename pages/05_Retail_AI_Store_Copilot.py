@@ -456,6 +456,149 @@ Schrijf in het Nederlands, praktisch en to-the-point.
         )
     return "\n".join(tips)
 
+def build_store_ai_coach_text(
+    store_name: str,
+    recent_foot: float,
+    recent_turn: float | float,
+    fut_foot: float,
+    fut_turn: float | float,
+    spv_cur: float | float,
+    conv_cur: float | float,
+    fc: pd.DataFrame,
+) -> str:
+    """
+    Bouwt een data-gedreven tekst voor de AI Store Coach
+    op basis van historische vs forecast KPI's.
+    """
+    # Safeties
+    recent_foot = float(recent_foot or 0)
+    fut_foot = float(fut_foot or 0)
+    recent_turn = float(recent_turn or 0)
+    fut_turn = float(fut_turn or 0)
+
+    has_recent_foot = recent_foot > 0
+    has_recent_turn = recent_turn > 0
+    has_spv_cur = pd.notna(spv_cur) and (spv_cur or 0) > 0
+    has_conv_cur = pd.notna(conv_cur) and (conv_cur or 0) > 0
+
+    # 1) Footfall-trend
+    foot_msg = ""
+    if has_recent_foot and fut_foot > 0:
+        diff_foot = fut_foot - recent_foot
+        diff_foot_pct = (diff_foot / recent_foot) * 100
+        richting = "meer" if diff_foot > 0 else "minder"
+        foot_msg = (
+            f"- **Footfall-trend**: we verwachten ongeveer "
+            f"{diff_foot_pct:+.1f}% {richting} bezoekers dan in de laatste 14 dagen "
+            f"(~{fmt_int(abs(diff_foot))} bezoekers verschil).\n"
+        )
+    elif fut_foot > 0:
+        foot_msg = (
+            f"- **Footfall-trend**: forecast laat ongeveer {fmt_int(fut_foot)} bezoekers zien "
+            f"voor de komende 14 dagen, maar er is te weinig historie om dit goed te vergelijken.\n"
+        )
+    else:
+        foot_msg = (
+            "- **Footfall-trend**: er is onvoldoende data om een betrouwbare bezoekersforecast te maken.\n"
+        )
+
+    # 2) Omzet-gap & scenario's
+    omzet_msg = ""
+    scenario_msg = ""
+
+    if has_recent_turn and fut_turn > 0:
+        diff_turn = fut_turn - recent_turn
+        diff_turn_pct = (diff_turn / recent_turn) * 100
+        richting = "meer" if diff_turn > 0 else "minder"
+        omzet_msg = (
+            f"- **Omzet-verwachting**: de forecast ligt ongeveer "
+            f"{diff_turn_pct:+.1f}% {richting} dan de laatste 14 dagen "
+            f"(~{fmt_eur(abs(diff_turn))} verschil).\n"
+        )
+    elif fut_turn > 0:
+        omzet_msg = (
+            f"- **Omzet-verwachting**: forecast omzet is ongeveer {fmt_eur(fut_turn)}, "
+            "maar er is te weinig historie om dit te spiegelen aan een vorige periode.\n"
+        )
+    else:
+        omzet_msg = (
+            "- **Omzet-verwachting**: er is onvoldoende data om een betrouwbare omzetforecast te tonen.\n"
+        )
+
+    # 2a) Scenario: SPV +5%
+    if fut_foot > 0 and fut_turn > 0:
+        spv_forecast = fut_turn / fut_foot
+        uplift_pct = 5.0
+        extra_turn_spv = fut_foot * spv_forecast * uplift_pct / 100.0
+        scenario_msg += (
+            f"- **Scenario SPV +{uplift_pct:.0f}%**: als je in de komende 14 dagen de "
+            f"besteding per bezoeker met ~{uplift_pct:.0f}% verhoogt, levert dat circa "
+            f"{fmt_eur(extra_turn_spv)} extra omzet op bovenop de forecast.\n"
+        )
+
+    # 2b) Scenario: conversie +1 procentpunt (alleen als we conv & SPV hebben)
+    if fut_foot > 0 and has_spv_cur and has_conv_cur:
+        conv_baseline = float(conv_cur)
+        spv_baseline = float(spv_cur)
+        # ATV ≈ SPV / (conv% / 100)
+        atv_est = spv_baseline * 100.0 / conv_baseline
+        conv_new = conv_baseline + 1.0  # +1 pp
+        extra_trans = fut_foot * (conv_new - conv_baseline) / 100.0
+        extra_turn_conv = extra_trans * atv_est
+
+        scenario_msg += (
+            f"- **Scenario conversie +1 pp**: met een stijging van de conversie "
+            f"van {conv_baseline:.1f}% naar {conv_new:.1f}% genereer je ongeveer "
+            f"{fmt_int(extra_trans)} extra transacties en ~{fmt_eur(extra_turn_conv)} extra omzet "
+            f"in de komende 14 dagen (bij gelijkblijvend bonbedrag).\n"
+        )
+
+    # 3) Piek- en rustigste dagen uit de forecast
+    peak_msg = ""
+    if isinstance(fc, pd.DataFrame) and not fc.empty and "footfall_forecast" in fc.columns:
+        fc_local = fc.copy()
+        fc_local["date"] = pd.to_datetime(fc_local["date"], errors="coerce")
+        fc_local = fc_local.dropna(subset=["date"])
+
+        if not fc_local.empty:
+            top_days = (
+                fc_local.sort_values("footfall_forecast", ascending=False)
+                .head(3)
+            )
+            low_days = (
+                fc_local.sort_values("footfall_forecast", ascending=True)
+                .head(2)
+            )
+
+            def _fmt_day(row):
+                d = row["date"]
+                return f"{d.strftime('%a %d-%m')} (~{fmt_int(row['footfall_forecast'])} bezoekers)"
+
+            top_str = ", ".join(_fmt_day(r) for _, r in top_days.iterrows())
+            low_str = ", ".join(_fmt_day(r) for _, r in low_days.iterrows())
+
+            peak_msg = (
+                f"- **Piekmomenten benutten**: hoogste forecast ligt op {top_str}. "
+                "Zorg hier voor maximale bemensing, actieve verkoop en duidelijke actiezones.\n"
+                f"- **Stille momenten slim gebruiken**: rustigere dagen zijn {low_str}. "
+                "Gebruik deze uren voor training, herindelen van het schap en voorbereiden van acties.\n"
+            )
+
+    # 4) Samenvattende actie
+    action_msg = (
+        "- **Focus voor deze periode**: combineer een scherpe personeelsplanning op drukke dagen "
+        "met gerichte acties op SPV en conversie (bijvoorbeeld actieve begroeting, bundelaanbiedingen "
+        "en duidelijke promoties bij de topcategorieën). Koppel na 2 weken kort terug wat het effect was "
+        "op omzet vs. forecast.\n"
+    )
+
+    header = f"### AI Store Coach – komende 14 dagen\n\n"
+    intro = (
+        f"Voor **{store_name}** kijken we naar de combinatie van historische resultaten en de "
+        "forecast voor de komende 14 dagen. Hieronder zie je waar je concreet op kunt sturen:\n\n"
+    )
+
+    return header + intro + foot_msg + omzet_msg + scenario_msg + peak_msg + action_msg
 
 # -------------
 # MAIN UI
@@ -1056,7 +1199,7 @@ def main():
 
         st.plotly_chart(fig_weather, use_container_width=True)
 
-    # --- Forecast: footfall & omzet (dag niveau, 14 dagen) ---
+    # --- Forecast: footfall & omzet (volgende 14 dagen) ---
     st.markdown("### Forecast: footfall & omzet (volgende 14 dagen)")
 
     # Uitleg voor demo / klant
@@ -1066,28 +1209,41 @@ def main():
         💡 <strong>Forecast uitleg</strong><br>
         - <strong>Simple (DoW)</strong> gebruikt gemiddelden per weekdag op basis van je historische data.<br>
         - <strong>Pro (LightGBM beta)</strong> bouwt hierop voort met seizoenseffecten (Q4, feestdagen),
-          lags/rolling averages en simple event-flags zoals vakanties en decemberpiek.<br>
+          lags/rolling averages en optioneel weerdata.<br>
         - Als er (nog) te weinig bruikbare historie is of LightGBM niet beschikbaar is, valt Pro automatisch terug op Simple.
         </small>
         """,
         unsafe_allow_html=True,
     )
 
-    # Weather config voor forecast (gebruikt base-config)
-    weather_cfg = weather_cfg_base
+    # Weather config voor forecast_service (op basis van weerlocatie input)
+    weather_cfg = None
+    if VISUALCROSSING_KEY and weather_location:
+        # Verwacht iets als "Amsterdam,NL" of "Rotterdam,Nederland"
+        city_part = weather_location
+        country = "Netherlands"
 
-    # Event-flags voor historie + toekomst
-    events_hist = build_event_flags_for_dates(
-        df_hist_raw["date"],
-        country="NL",
-    )
+        parts = weather_location.split(",")
+        if len(parts) >= 1:
+            city_part = parts[0].strip()
+        if len(parts) >= 2:
+            country_code = parts[1].strip().upper()
+            country_map = {
+                "NL": "Netherlands",
+                "BE": "Belgium",
+                "DE": "Germany",
+                "FR": "France",
+                "UK": "United Kingdom",
+                "GB": "United Kingdom",
+            }
+            country = country_map.get(country_code, country_code)
 
-    last_hist_date = df_hist_raw["date"].max()
-    future_dates = pd.date_range(last_hist_date + pd.Timedelta(days=1), periods=14, freq="D")
-    events_future = build_event_flags_for_dates(
-        future_dates,
-        country="NL",
-    )
+        weather_cfg = {
+            "mode": "city_country",
+            "city": city_part,
+            "country": country,
+            "api_key": VISUALCROSSING_KEY,
+        }
 
     try:
         if forecast_mode == "Pro (LightGBM beta)":
@@ -1097,8 +1253,6 @@ def main():
                 min_history_days=60,
                 weather_cfg=weather_cfg,
                 use_weather=bool(weather_cfg),
-                event_flags_hist=events_hist,
-                event_flags_future=events_future,
             )
         else:
             fc_res = build_simple_footfall_turnover_forecast(df_hist_raw)
@@ -1199,20 +1353,22 @@ def main():
 
             st.plotly_chart(fig_fc, use_container_width=True)
 
-            # ---- AI Store Coach ----
-            st.markdown("### AI Store Coach – komende 14 dagen")
-            coach_text = build_ai_store_coach_text(
-                shop_name=shop_row["name"],
-                brand=selected_client["brand"],
-                fc_res=fc_res,
-                events_future_df=events_future,
-                weather_cfg=weather_cfg,
+            # --- DATA-GEDREVEN AI STORE COACH ---
+            coach_text = build_store_ai_coach_text(
+                store_name=shop_row["name"],
+                recent_foot=recent_foot,
+                recent_turn=recent_turn,
+                fut_foot=fut_foot,
+                fut_turn=fut_turn,
+                spv_cur=spv_cur,
+                conv_cur=conv_cur,
+                fc=fc,
             )
             st.markdown(coach_text)
 
     except Exception as e:
         st.info(
-            "Forecast kon niet worden berekend (te weinig data, ontbrekende kolommen of event/weer-issue)."
+            "Forecast kon niet worden berekend (te weinig data, ontbrekende kolommen of weerdata-issue)."
         )
         st.exception(e)
 
