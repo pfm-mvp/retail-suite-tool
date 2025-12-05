@@ -1295,10 +1295,11 @@ def main():
                     delta=delta_turn,
                 )
 
-                        # --- Verwachte maandomzet (actueel + forecast rest van maand) ---
+            # --- Verwachte maandomzet (actueel + forecast rest van maand) ---
             month_start = datetime(today.year, today.month, 1).date()
             today_date = today
 
+            # Gerealiseerde omzet deze maand (t/m vandaag)
             if "turnover" in df_all_raw.columns:
                 actual_month_turn = df_all_raw[
                     (df_all_raw["date"].dt.date >= month_start)
@@ -1307,14 +1308,22 @@ def main():
             else:
                 actual_month_turn = 0.0
 
+            # Forecast voor resterende dagen van deze maand (binnen 14-daagse horizon)
             future_month_turn = 0.0
-            if isinstance(fc, pd.DataFrame) and "date" in fc.columns and "turnover_forecast" in fc.columns:
+            if (
+                isinstance(fc, pd.DataFrame)
+                and "date" in fc.columns
+                and "turnover_forecast" in fc.columns
+            ):
                 fc_month = fc.copy()
-                fc_month["date"] = pd.to_datetime(fc_month["date"], errors="coerce").dt.date
-                future_month_turn = fc_month[
-                    (fc_month["date"] > today_date)
-                    & (fc_month["date"].month == today_date.month)
-                ]["turnover_forecast"].sum()
+                fc_month["date"] = pd.to_datetime(fc_month["date"], errors="coerce")
+
+                fc_month = fc_month.dropna(subset=["date"])
+                if not fc_month.empty:
+                    future_month_turn = fc_month[
+                        (fc_month["date"].dt.date > today_date)
+                        & (fc_month["date"].dt.month == today_date.month)
+                    ]["turnover_forecast"].sum()
 
             expected_month_turn = actual_month_turn + future_month_turn
 
