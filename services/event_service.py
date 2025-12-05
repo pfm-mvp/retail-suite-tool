@@ -6,41 +6,33 @@ from typing import Iterable, Union
 import numpy as np
 import pandas as pd
 
-DateLike = Union[pd.Series, pd.DatetimeIndex, Iterable]
+DateInput = Union[pd.Series, pd.DatetimeIndex, Iterable]
 
 
-def _to_date_series(dates: DateLike) -> pd.Series:
+def _to_date_series(dates: DateInput) -> pd.Series:
     """
-    Zorgt ervoor dat 'dates' altijd wordt omgezet naar een nette
-    pandas Series met genormaliseerde datums (zonder tijdcomponent).
-
-    Accepteert o.a.:
-    - list/tuple van strings of datums
-    - pandas.Series
-    - pandas.DatetimeIndex
-    - elke andere Iterable met datumachtige waarden
+    Converteer willekeurige input (list, Series, DatetimeIndex, ...) naar
+    een nette pandas Series met genormaliseerde datums (zonder tijd).
     """
+    # Alles eerst naar een list, dan naar Series
     if isinstance(dates, pd.Series):
         s = dates
     elif isinstance(dates, (pd.DatetimeIndex, pd.Index)):
         s = pd.Series(dates)
     else:
-        # list, tuple, range, etc.
         s = pd.Series(list(dates))
 
-    # Alles naar datetime, ongeldig → NaT
+    # Naar datetime, ongeldig -> NaT
     s = pd.to_datetime(s, errors="coerce")
     # NaT eruit
     s = s.dropna()
     if s.empty:
         return s
 
-    # Alleen datumdeel (00:00:00)
+    # Alleen datum, tijd op 00:00:00
     s = s.dt.normalize()
-
-    # Index resetten (0..n-1) zodat merges voorspelbaar blijven
+    # Index 0..n-1
     s = s.reset_index(drop=True)
-
     return s
 
 
@@ -63,11 +55,11 @@ def _boxing_day_for_year(year: int) -> pd.Timestamp:
 
 
 def build_event_flags_for_dates(
-    dates: DateLike,
+    dates: DateInput,
     country: str = "NL",
 ) -> pd.DataFrame:
     """
-    Bouwt een eenvoudige event-feature set voor een reeks datums.
+    Bouw een eenvoudige event-feature set voor een reeks datums.
 
     Output DataFrame met kolommen:
     - date
@@ -76,10 +68,7 @@ def build_event_flags_for_dates(
     - is_black_friday
     - is_christmas
     - is_boxing_day
-    - event_score  (ruwe intensiteitsscore voor model features)
-
-    country-parameter staat er vooral voor toekomstige uitbreiding
-    (NL-schoolvakanties etc.), maar wordt nu nog niet specifiek gebruikt.
+    - event_score
     """
     s = _to_date_series(dates)
 
@@ -111,7 +100,8 @@ def build_event_flags_for_dates(
     bf_map = {y: _black_friday_for_year(y) for y in unique_years}
 
     df["is_black_friday"] = df.apply(
-        lambda r: int(r["date"] == bf_map.get(r["year"])), axis=1
+        lambda r: int(r["date"] == bf_map.get(r["year"])),
+        axis=1,
     )
 
     df["is_christmas"] = (
