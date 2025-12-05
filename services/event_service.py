@@ -1,134 +1,116 @@
 # services/event_service.py
 
-from __future__ import annotations
-import datetime as dt
-from typing import Iterable, List
 import pandas as pd
+from datetime import date, timedelta
 
 
-def _normalize_dates(dates: Iterable) -> pd.Series:
-    """Zorgt dat we een genormaliseerde datetime.date-serie hebben."""
-    s = pd.to_datetime(pd.Series(list(dates)), errors="coerce").dt.normalize()
+def _to_date_series(dates):
+    """
+    Zorgt dat we altijd een nette pandas Series met datums hebben.
+    Input kan zijn: list, DatetimeIndex, Series, etc.
+    """
+    if isinstance(dates, (pd.DatetimeIndex, pd.Series)):
+        s = pd.to_datetime(dates)
+    else:
+        s = pd.to_datetime(pd.Series(dates))
+
+    s = s.dropna().reset_index(drop=True)
     return s
 
 
-def _black_friday(year: int) -> dt.date:
+def _get_black_friday(year: int) -> date:
     """
-    Black Friday = 4e vrijdag van november.
+    Black Friday = laatste vrijdag van november.
+    Simpele benadering, maar goed genoeg voor retail-usecases.
     """
-    # 1 november
-    d = dt.date(year, 11, 1)
-    # naar eerste vrijdag
-    while d.weekday() != 4:
-        d += dt.timedelta(days=1)
-    # dan + 3 weken = 4e vrijdag
-    d += dt.timedelta(weeks=3)
+    d = date(year, 11, 30)
+    while d.weekday() != 4:  # 0=ma, 4=vr
+        d = d - timedelta(days=1)
     return d
 
 
-def _date_range(start: dt.date, end: dt.date) -> List[dt.date]:
-    """Inclusief start en end."""
-    days = (end - start).days
-    return [start + dt.timedelta(days=i) for i in range(days + 1)]
-
-
-def build_event_flags_for_dates(
-    dates: Iterable,
-    country: str = "NL",
-) -> pd.DataFrame:
+def build_event_flags_for_dates(dates, country: str = "NL") -> pd.DataFrame:
     """
-    Geeft per datum simpele event-flags terug.
-    Gebruik: features voor forecast + uitleg voor de storemanager.
+    Bouwt simpele event-flags voor een reeks datums.
 
-    Output kolommen:
-    - date (Timestamp, genormaliseerd)
-    - is_weekend (0/1)
-    - is_national_holiday (0/1)
-    - is_school_holiday (0/1)  [grof benaderd]
+    Input:
+        dates: iterabel met datums (str, datetime, etc.)
+        country: future-proof (nu alleen NL-logic)
+
+    Output DataFrame met kolommen:
+    - date (datetime64[ns])
+    - is_december_trade (0/1)
+    - is_summer_sale (0/1)
     - is_black_friday (0/1)
-    - is_december_trade (0/1)  [Sinterklaas/Kerstdrukte]
-    - is_summer_sale (0/1)     [juli/august]
+    - is_school_holiday (0/1, grove benadering)
+
+    Logica (NL, demo-niveau):
+    - december = volledige handels-/feestmaand
+    - summer_sale = juni / juli / augustus
+    - black_friday = laatste vrijdag van november
+    - schoolvakanties:
+        * meivakantie: ~25 april – 10 mei
+        * zomervakantie: ~10 juli – 31 augustus
     """
-    s = _normalize_dates(dates)
+    s = _to_date_series(dates)
     if s.empty:
-        return pd.DataFrame(columns=[
-            "date",
-            "is_weekend",
-            "is_national_holiday",
-            "is_school_holiday",
-            "is_black_friday",
-            "is_december_trade",
-            "is_summer_sale",
-        ])
+        return pd.DataFrame(
+            {
+                "date": [],
+                "is_december_trade": [],
+                "is_summer_sale": [],
+                "is_black_friday": [],
+                "is_school_holiday": [],
+            }
+        )
 
     df = pd.DataFrame({"date": s})
-    df = df.dropna(subset=["date"]).drop_duplicates(subset=["date"]).reset_index(drop=True)
-    if df.empty:
-        return df
-
     df["date_only"] = df["date"].dt.date
     df["year"] = df["date"].dt.year
+    df["month"] = df["date"].dt.month
+    df["day"] = df["date"].dt.day
 
-    # Basisflag: weekend
-    df["is_weekend"] = df["date"].dt.weekday.isin([5, 6]).astype(int)
+    # December handelsmaand
+    df["is_december_trade"] = (df["month"] == 12).astype(int)
 
-    # --- Nationale feestdagen & vakanties – NL (grof benaderd demo) ---
-    nat_holidays = set()
-    school_holidays = set()
-    summer_sale = set()
-    december_trade = set()
-    black_fridays = set()
+    # Summer sale: juni/juli/augustus
+    df["is_summer_sale"] = df["month"].isin([6, 7, 8]).astype(int)
 
-    years = sorted(df["year"].unique().tolist())
-    for y in years:
-        # Black Friday
-        bf = _black_friday(y)
-        black_fridays.add(bf)
+    # Black Friday per jaar
+    bf_map = {y: _get_black_friday(y) for y in df["year"].unique()}
+    df["is_black_friday"] = df.apply(
+        lambda r: 1 if r["date_only"] == bf_map.get(r["year"]) else 0,
+        axis=1,
+    )
 
-        # Grof: zomer-vakantie NL: 15 juli – 31 augustus
-        summer_hol = _date_range(dt.date(y, 7, 15), dt.date(y, 8, 31))
-        school_holidays.update(summer_hol)
-        summer_sale.update(summer_hol)
+    # Schoolvakanties (NL, grove benaderingen)
+    def _is_mei_holiday(d: date) -> bool:
+        if d.month == 4 and d.day >= 25:
+            return True
+        if d.month == 5 and d.day <= 10:
+            return True
+        return False
 
-        # Kerstvakantie globaal: 24 dec – 1 jan (van y en y+1)
-        xmas_start = dt.date(y, 12, 24)
-        xmas_end = dt.date(y + 1, 1, 1)
-        school_holidays.update(_date_range(xmas_start, xmas_end))
+    def _is_summer_holiday(d: date) -> bool:
+        if d.month == 7 and d.day >= 10:
+            return True
+        if d.month == 8:
+            return True
+        return False
 
-        # Voorjaarsvakantie: 15 feb – 1 maart
-        spring_start = dt.date(y, 2, 15)
-        spring_end = dt.date(y, 3, 1)
-        school_holidays.update(_date_range(spring_start, spring_end))
+    def _is_school_holiday(d: date) -> bool:
+        return _is_mei_holiday(d) or _is_summer_holiday(d)
 
-        # December trade-peak: 1 dec – 31 dec
-        december_trade.update(_date_range(dt.date(y, 12, 1), dt.date(y, 12, 31)))
+    df["is_school_holiday"] = df["date_only"].apply(
+        lambda d: 1 if _is_school_holiday(d) else 0
+    )
 
-        # Nationale feestdagen (NL, +/−):
-        for d in [
-            dt.date(y, 1, 1),   # Nieuwjaar
-            dt.date(y, 4, 27),  # Koningsdag
-            dt.date(y, 12, 25), # 1e Kerstdag
-            dt.date(y, 12, 26), # 2e Kerstdag
-        ]:
-            nat_holidays.add(d)
-
-    # Flags mappen naar df
-    df["is_national_holiday"] = df["date_only"].apply(lambda d: int(d in nat_holidays))
-    df["is_school_holiday"] = df["date_only"].apply(lambda d: int(d in school_holidays))
-    df["is_black_friday"] = df["date_only"].apply(lambda d: int(d in black_fridays))
-    df["is_december_trade"] = df["date_only"].apply(lambda d: int(d in december_trade))
-    df["is_summer_sale"] = df["date_only"].apply(lambda d: int(d in summer_sale))
-
-    # Opruimen
-    df = df.drop(columns=["date_only", "year"])
-
-    cols = [
-        "date",
-        "is_weekend",
-        "is_national_holiday",
-        "is_school_holiday",
-        "is_black_friday",
-        "is_december_trade",
-        "is_summer_sale",
-    ]
-    return df[cols].copy()
+    return df[
+        [
+            "date",
+            "is_december_trade",
+            "is_summer_sale",
+            "is_black_friday",
+            "is_school_holiday",
+        ]
+    ].reset_index(drop=True)
