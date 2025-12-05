@@ -62,6 +62,9 @@ def load_region_mapping(path: str = "data/regions.csv") -> pd.DataFrame:
     Verwacht een CSV met minimaal:
     shop_id;region
 
+    Optioneel:
+    - sqm_region  (float, m² per winkel)
+
     shop_id → int
     region  → str
     """
@@ -76,6 +79,11 @@ def load_region_mapping(path: str = "data/regions.csv") -> pd.DataFrame:
     df["shop_id"] = pd.to_numeric(df["shop_id"], errors="coerce").astype("Int64")
     df["region"] = df["region"].astype(str)
     df = df.dropna(subset=["shop_id"])
+
+    # Optionele sqm_region naar float
+    if "sqm_region" in df.columns:
+        df["sqm_region"] = pd.to_numeric(df["sqm_region"], errors="coerce")
+
     return df
 
 
@@ -309,6 +317,14 @@ def main():
     region_choice = st.sidebar.selectbox("Regio", available_regions)
 
     region_shops = merged[merged["region"] == region_choice].copy()
+
+    # 👉 hier vullen we sqm vanuit regions.csv als fallback
+    if "sqm_region" in region_shops.columns:
+        if "sqm" in region_shops.columns:
+            region_shops["sqm"] = region_shops["sqm"].fillna(region_shops["sqm_region"])
+        else:
+            region_shops["sqm"] = region_shops["sqm_region"]
+
     shop_ids = region_shops["id"].dropna().astype(int).unique().tolist()
 
     if not shop_ids:
