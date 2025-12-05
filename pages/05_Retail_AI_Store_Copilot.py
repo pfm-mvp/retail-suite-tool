@@ -8,6 +8,7 @@ import streamlit as st
 import altair as alt  # eventueel later nog voor andere grafieken
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
+
 # BOVENAAN, naast andere imports
 try:
     from openai import OpenAI
@@ -84,6 +85,24 @@ st.set_page_config(
     page_title="PFM Retail Performance Copilot",
     layout="wide"
 )
+
+
+def _get_openai_client():
+    if not _OPENAI_INSTALLED:
+        return None
+    try:
+        api_key = st.secrets.get("OPENAI_API_KEY", None)
+    except Exception:
+        api_key = None
+    if not api_key:
+        return None
+    try:
+        return OpenAI(api_key=api_key)
+    except Exception:
+        return None
+
+
+_OPENAI_CLIENT = _get_openai_client()
 
 # ----------------------
 # API URL / secrets setup
@@ -322,6 +341,120 @@ def aggregate_monthly(df: pd.DataFrame, sqm: float | None) -> pd.DataFrame:
         agg["footfall_per_sqm"] = np.nan
 
     return agg
+
+
+# -------------
+# AI Store Coach helper
+# -------------
+
+def build_ai_store_coach_text(
+    shop_name: str,
+    brand: str,
+    fc_res: dict,
+    events_future_df: pd.DataFrame | None = None,
+    weather_cfg: dict | None = None,
+) -> str:
+    """
+    Genereert korte tekst met aanbevelingen.
+    Probeert OpenAI te gebruiken; zo niet, simpele rule-based tekst.
+    """
+    recent_foot = fc_res.get("recent_footfall_sum", 0.0) or 0.0
+    fut_foot = fc_res.get("forecast_footfall_sum", 0.0) or 0.0
+    recent_turn = fc_res.get("recent_turnover_sum", np.nan)
+    fut_turn = fc_res.get("forecast_turnover_sum", np.nan)
+
+    model_type = fc_res.get("model_type", "unknown")
+    used_fallback = fc_res.get("used_simple_fallback", False)
+
+    # Event highlights (alleen toekomst)
+    event_lines = []
+    if events_future_df is not None and not events_future_df.empty:
+        ef = events_future_df.copy()
+        ef["date"] = pd.to_datetime(ef["date"]).dt.date
+        for _, row in ef.iterrows():
+            labels = []
+            if row.get("is_black_friday", 0) == 1:
+                labels.append("Black Friday-achtig moment")
+            if row.get("is_december_trade", 0) == 1:
+                labels.append("decemberpiek")
+            if row.get("is_summer_sale", 0) == 1:
+                labels.append("summer sale-periode")
+            if row.get("is_school_holiday", 0) == 1:
+                labels.append("schoolvakantie")
+            if labels:
+                event_lines.append(
+                    f"- {row['date']}: " + ", ".join(labels)
+                )
+
+    base_summary = (
+        f"Store: {shop_name} (brand: {brand}). "
+        f"Laatste 14 dagen footfall: {recent_foot:.0f}, forecast volgende 14 dagen: {fut_foot:.0f}. "
+    )
+    if not pd.isna(recent_turn) and not pd.isna(fut_turn):
+        base_summary += (
+            f"Omzet laatste 14 dagen ~ {recent_turn:.0f}, verwacht ~ {fut_turn:.0f}. "
+        )
+
+    if used_fallback:
+        base_summary += "Model heeft fallback naar simple DoW gebruikt. "
+    else:
+        base_summary += f"Modeltype: {model_type}. "
+
+    if weather_cfg:
+        base_summary += f"Weerlocatie: {weather_cfg.get('city','?')}, {weather_cfg.get('country','?')}. "
+
+    if event_lines:
+        base_summary += "Belangrijke komende dagen:\n" + "\n".join(event_lines)
+
+    # OpenAI beschikbaar?
+    if _OPENAI_CLIENT:
+        prompt = f"""
+Je bent een retail performance coach voor een filiaalmanager.
+
+Gegevens:
+{base_summary}
+
+Geef in maximaal 5 bullets concrete acties voor de storemanager:
+- focus op personeelsplanning rond drukke dagen,
+- benutten van piek-momenten (events/feestdagen),
+- ideeën voor conversie/SPV-verhoging,
+- 1 bullet over hoe hij/zij dit aan het regioteam kan terugkoppelen.
+
+Schrijf in het Nederlands, praktisch en to-the-point.
+"""
+        try:
+            completion = _OPENAI_CLIENT.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "Je bent een ervaren retail operations coach."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.4,
+            )
+            return completion.choices[0].message.content.strip()
+        except Exception:
+            # Fallback naar simpele tekst
+            return (
+                "AI Store Coach kon niet worden aangeroepen. "
+                "Basisinzicht: plan extra sterk op de drukste dagen, "
+                "test één verbetering in conversie (bijv. begroetingsscript of kassaproces) "
+                "en zorg dat je dit kort rapporteert aan je regiomanager."
+            )
+
+    # Rule-based fallback
+    tips = [
+        "• Bekijk de 2–3 drukste forecast-dagen en zorg daar voor extra bezetting aan de front-of-house.",
+        "• Plan minimaal één test om de conversie te verhogen (bijv. actief begroeten of betere routing rond de bestverkopende categorie).",
+        "• Gebruik de forecast-omzet als richtlijn voor je dagtargets en bespreek dit kort in de dagstart.",
+        "• Kijk in de grafiek naar dagen waar footfall hoog is maar omzet of SPV achterblijft: dat zijn je snelste verbeterkansen.",
+        "• Deel een korte samenvatting (1 slide of 3 bullets) met je regiomanager over wat je de komende 2 weken gaat testen.",
+    ]
+    if event_lines:
+        tips.insert(
+            1,
+            "• Rond speciale dagen (bijvoorbeeld events/feestdagen in de forecast) kun je extra acties plannen: instore promo, demo of social-posts.",
+        )
+    return "\n".join(tips)
 
 
 # -------------
@@ -598,13 +731,13 @@ def main():
     if weather_location and VISUALCROSSING_KEY:
         weather_df = fetch_visualcrossing_history(weather_location, start_cur, end_cur)
 
-    # Config voor forecast-model (zelfde locatie-string)
-    weather_cfg = None
+    # Config voor forecast-model (locatiestring)
+    weather_cfg_base = None
     if VISUALCROSSING_KEY and weather_location:
         parts = weather_location.split(",")
         city = parts[0].strip() if parts else ""
         country = parts[1].strip() if len(parts) > 1 else ""
-        weather_cfg = {
+        weather_cfg_base = {
             "mode": "city_country",
             "city": city,
             "country": country,
@@ -933,41 +1066,28 @@ def main():
         💡 <strong>Forecast uitleg</strong><br>
         - <strong>Simple (DoW)</strong> gebruikt gemiddelden per weekdag op basis van je historische data.<br>
         - <strong>Pro (LightGBM beta)</strong> bouwt hierop voort met seizoenseffecten (Q4, feestdagen),
-          lags/rolling averages en optioneel weerdata.<br>
+          lags/rolling averages en simple event-flags zoals vakanties en decemberpiek.<br>
         - Als er (nog) te weinig bruikbare historie is of LightGBM niet beschikbaar is, valt Pro automatisch terug op Simple.
         </small>
         """,
         unsafe_allow_html=True,
     )
 
-    # Weather config voor forecast_service (op basis van weerlocatie input)
-    weather_cfg = None
-    if VISUALCROSSING_KEY and weather_location:
-        # Verwacht iets als "Amsterdam,NL" of "Rotterdam,Nederland"
-        city_part = weather_location
-        country = "Netherlands"
+    # Weather config voor forecast (gebruikt base-config)
+    weather_cfg = weather_cfg_base
 
-        parts = weather_location.split(",")
-        if len(parts) >= 1:
-            city_part = parts[0].strip()
-        if len(parts) >= 2:
-            country_code = parts[1].strip().upper()
-            country_map = {
-                "NL": "Netherlands",
-                "BE": "Belgium",
-                "DE": "Germany",
-                "FR": "France",
-                "UK": "United Kingdom",
-                "GB": "United Kingdom",
-            }
-            country = country_map.get(country_code, country_code)
+    # Event-flags voor historie + toekomst
+    events_hist = build_event_flags_for_dates(
+        df_hist_raw["date"],
+        country="NL",
+    )
 
-        weather_cfg = {
-            "mode": "city_country",
-            "city": city_part,
-            "country": country,
-            "api_key": VISUALCROSSING_KEY,  # << nieuw
-        }
+    last_hist_date = df_hist_raw["date"].max()
+    future_dates = pd.date_range(last_hist_date + pd.Timedelta(days=1), periods=14, freq="D")
+    events_future = build_event_flags_for_dates(
+        future_dates,
+        country="NL",
+    )
 
     try:
         if forecast_mode == "Pro (LightGBM beta)":
@@ -977,6 +1097,8 @@ def main():
                 min_history_days=60,
                 weather_cfg=weather_cfg,
                 use_weather=bool(weather_cfg),
+                event_flags_hist=events_hist,
+                event_flags_future=events_future,
             )
         else:
             fc_res = build_simple_footfall_turnover_forecast(df_hist_raw)
@@ -1077,9 +1199,20 @@ def main():
 
             st.plotly_chart(fig_fc, use_container_width=True)
 
+            # ---- AI Store Coach ----
+            st.markdown("### AI Store Coach – komende 14 dagen")
+            coach_text = build_ai_store_coach_text(
+                shop_name=shop_row["name"],
+                brand=selected_client["brand"],
+                fc_res=fc_res,
+                events_future_df=events_future,
+                weather_cfg=weather_cfg,
+            )
+            st.markdown(coach_text)
+
     except Exception as e:
         st.info(
-            "Forecast kon niet worden berekend (te weinig data, ontbrekende kolommen of weerdata-issue)."
+            "Forecast kon niet worden berekend (te weinig data, ontbrekende kolommen of event/weer-issue)."
         )
         st.exception(e)
 
@@ -1102,9 +1235,8 @@ def main():
         st.write("CBS stats:", cbs_stats)
         st.write("Weather df:", weather_df.head())
         st.write("Forecast mode:", forecast_mode)
-        st.write("Weather cfg (forecast):", weather_cfg)
+        st.write("Weather cfg (base):", weather_cfg_base)
 
-        st.write("Forecast mode (UI):", forecast_mode)
         try:
             st.write("Forecast model_type:", fc_res.get("model_type"))
             st.write("Forecast used_simple_fallback:", fc_res.get("used_simple_fallback"))
