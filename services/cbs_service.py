@@ -8,22 +8,12 @@ BASE = "https://opendata.cbs.nl/ODataApi/OData"
 
 
 # -----------------------------
-# Helpers
+# Generieke helpers
 # -----------------------------
-def _period_code(d: date) -> str:
-    return f"{d.year}MM{d.month:02d}"
-
-
-def _prev_month(d: date) -> date:
-    y, m = d.year, d.month - 1
-    if m == 0:
-        y, m = y - 1, 12
-    return date(y, m, 15)
-
-
 def _ym_list(months_back: int) -> List[str]:
+    """Return lijst met periodecodes 'YYYYMM' style, nieuwste laatst."""
     y, m = date.today().year, date.today().month
-    out = []
+    out: List[str] = []
     for _ in range(months_back):
         out.append(f"{y}MM{m:02d}")
         m -= 1
@@ -33,13 +23,13 @@ def _ym_list(months_back: int) -> List[str]:
     return list(reversed(out))
 
 
-def _ym_range(months_back: int) -> tuple[str, str]:
-    ys = _ym_list(months_back)
-    return ys[0], ys[-1]
-
-
 def _odata_select(dataset: str, path: str, params: str = "") -> List[dict]:
-    # path: e.g. "TypedDataSet" or "Branches_2"
+    """
+    Kleine wrapper om OData op te halen.
+
+    path: bv. "TypedDataSet" of "Branches_2".
+    params: bv. "$top=5000" (geen $filter meer in deze versie – dat doen we client-side).
+    """
     url = f"{BASE}/{dataset}/{path}"
     if params:
         url += f"?{params}"
@@ -50,10 +40,13 @@ def _odata_select(dataset: str, path: str, params: str = "") -> List[dict]:
 
 
 def _pick_numeric_field(item: dict, preferred: List[str]) -> str:
+    """Zoek een numeriek veld, bij voorkeur uit 'preferred'."""
     keys = {k.lower(): k for k in item.keys()}
     for p in preferred:
         if p.lower() in keys:
             return keys[p.lower()]
+
+    # Fallback: eerste veld dat naar float te casten is
     for k, v in item.items():
         if isinstance(v, (int, float)):
             return k
@@ -67,7 +60,8 @@ def _pick_numeric_field(item: dict, preferred: List[str]) -> str:
 
 
 def _pick_period_field(item: dict) -> str:
-    for cand in ("Periods", "Perioden", "Period", "Periode"):
+    """Zoek 'Perioden' / 'Periods' / etc."""
+    for cand in ("Perioden", "Periods", "Period", "Periode"):
         if cand in item:
             return cand
     for k in item.keys():
@@ -77,108 +71,78 @@ def _pick_period_field(item: dict) -> str:
     raise KeyError(f"Periodeveld niet gevonden. Keys: {list(item.keys())}")
 
 
-# -----------------------------
-# 83693NED — Consumentenvertrouwen (laatste waarde rond een datum)
-# -----------------------------
+# ============================================================
+# 1) Consumentenvertrouwen – 83693NED
+# ============================================================
+
 def get_consumer_confidence(
     dataset: str = "83693NED",
-    when: date | None = None,
-    max_backtrack: int = 3,
+    months_back: int = 3,
 ) -> Dict:
     """
-    Haalt de consumentenvertrouwen-index op, rond een gegeven datum.
-
-    Implementatie:
-    - We lezen simpelweg de meest recente rijen o.b.v. ID (desc),
-      zodat we niet hoeven te gokken of het veld 'Periods' of 'Perioden' heet.
-    - Daarna zoeken we de eerste rij waarvan de periode <= target maandcode.
+    Eenvoudige helper: pak de laatste maand *met* waarde uit de serie.
+    Handig als je alleen de meest recente index nodig hebt.
     """
-    when = when or date.today()
-    target_period = _period_code(when)
-
-    # Haal wat recente punten op (ruim genoeg voor max_backtrack)
-    try:
-        rows = _odata_select(dataset, "TypedDataSet", "$orderby=ID desc&$top=24")
-    except requests.HTTPError:
+    series = get_cci_series(months_back=months_back, dataset=dataset)
+    if not series:
         return {}
-
-    if not rows:
-        raise RuntimeError("CBS Consumentenvertrouwen: geen data gevonden.")
-
-    period_field = _pick_period_field(rows[0])
-    value_field = _pick_numeric_field(
-        rows[0],
-        [
-            "Consumentenvertrouwen_1",
-            "ConsumerConfidence_1",
-            "Consumentenvertrouwen_2",
-            "ConsumerConfidence_2",
-            "Consumerconfidence",
-        ],
-    )
-
-    chosen = None
-    # rows staan aflopend op ID; we willen de eerste <= target_period
-    for it in rows:
-        p = str(it.get(period_field, ""))
-        if p <= target_period:
-            chosen = it
-            break
-
-    # Als niets <= target_period, neem dan de meest recente
-    if chosen is None:
-        chosen = rows[0]
-
-    raw = chosen[value_field]
-    val = float(raw) if isinstance(raw, (int, float)) else float(str(raw).replace(",", "."))
-    return {"period": chosen[period_field], "value": val, "field": value_field}
+    return series[-1]  # laatste item
 
 
-# -----------------------------
-# 83693NED — Consumentenvertrouwen (reeks, laatste N maanden)
-# -----------------------------
-def get_cci_series(months_back: int = 18, dataset: str = "83693NED") -> List[Dict]:
-    start, end = _ym_range(months_back)
+def get_cci_series(
+    months_back: int = 18,
+    dataset: str = "83693NED",
+) -> List[Dict]:
+    """
+    Geeft een lijst terug met:
+      [{'period': 'YYYYMMxx', 'cci': waarde}, ...]
 
+    We halen maximaal 5000 records op (zonder server-side filter),
+    zoeken zelf het periodeveld en numeriek veld en nemen daarna
+    de laatste `months_back` maanden.
+    """
     try:
-        # Deze tabel is relatief klein, dus we halen gewoon alles (tot 5000)
         rows = _odata_select(dataset, "TypedDataSet", "$top=5000")
     except requests.HTTPError:
         return []
-
     if not rows:
         return []
 
     period_field = _pick_period_field(rows[0])
     value_field = _pick_numeric_field(
         rows[0],
-        [
-            "Consumentenvertrouwen_1",
-            "ConsumerConfidence_1",
-            "Consumentenvertrouwen_2",
-            "ConsumerConfidence_2",
-            "Consumerconfidence",
-        ],
+        ["Consumentenvertrouwen_1", "ConsumerConfidence_1", "Consumerconfidence"],
     )
 
     out: List[Dict] = []
     for it in rows:
-        period = str(it.get(period_field, ""))
-        if not (start <= period <= end):
-            continue
+        period_code = it.get(period_field)
         raw = it.get(value_field)
-        if raw is None:
+        if period_code is None or raw is None:
             continue
-        val = float(raw) if isinstance(raw, (int, float)) else float(str(raw).replace(",", "."))
-        out.append({"period": period, "cci": val})
+
+        if isinstance(raw, (int, float)):
+            val = float(raw)
+        else:
+            try:
+                val = float(str(raw).replace(",", "."))
+            except Exception:
+                continue
+
+        out.append({"period": str(period_code), "cci": val})
 
     out.sort(key=lambda x: x["period"])
+
+    if months_back and len(out) > months_back:
+        out = out[-months_back:]
+
     return out
 
 
-# -----------------------------
-# 85828NED — Branches-lijst ophalen (Key ↔ Title)
-# -----------------------------
+# ============================================================
+# 2) Detailhandelindex – 85828NED
+# ============================================================
+
 def list_retail_branches(dataset: str = "85828NED") -> Tuple[str, List[Dict]]:
     """
     Retourneert (branch_dim_name, items) waarbij items = [{'key':..., 'title':...}, ...]
@@ -199,20 +163,15 @@ def list_retail_branches(dataset: str = "85828NED") -> Tuple[str, List[Dict]]:
 
 def _find_branch_key(branches: List[Dict], query: str) -> str | None:
     q = (query or "").strip().lower()
-    # exacte match op key of title
     for b in branches:
         if str(b["key"]).lower() == q or str(b["title"]).lower() == q:
             return str(b["key"])
-    # bevat-match op title
     for b in branches:
         if q and q in str(b["title"]).lower():
             return str(b["key"])
     return None
 
 
-# -----------------------------
-# 85828NED — Detailhandelindex per branche
-# -----------------------------
 def get_retail_index(
     series: str = "Omzetontwikkeling_1",
     branch_code_or_title: str = "DH_TOTAAL",
@@ -220,119 +179,96 @@ def get_retail_index(
     dataset: str = "85828NED",
 ) -> List[Dict]:
     """
-    Haalt de CBS detailhandelindex op voor een bepaalde branche.
+    Geeft een lijst terug met:
+      [{'period': 'YYYYMMxx', 'retail_value': ..., 'series': ..., 'branch': ...}, ...]
 
-    - Bepaalt dynamisch hoe de periodekolom heet (Periods / Perioden / …)
-    - Filtert server-side op periode + branche, zodat we ruim onder de 10.000-recordlimiet blijven.
+    We halen maximaal 5000 regels op (zonder server-side filter),
+    zoeken client-side:
+      - periodeveld
+      - branchveld
+      - numerieke veld (bv. 'Omzetontwikkeling_1')
+    en filteren daarna op gewenste branche en laatste `months_back` maanden.
     """
-    start, end = _ym_range(months_back)
-
-    # 0) Bepaal periodeveld via een klein probe-request
     try:
-        probe = _odata_select(dataset, "TypedDataSet", "$top=1")
+        rows_all = _odata_select(dataset, "TypedDataSet", "$top=5000")
     except requests.HTTPError:
-        probe = []
-
-    if not probe:
+        return []
+    if not rows_all:
         return []
 
-    period_col = _pick_period_field(probe[0])
+    period_field = _pick_period_field(rows_all[0])
 
-    # 1) Haal branch-dimensie op → probeer server-side met Key
+    # branch-dimensie bepalen
+    branch_field = None
+    for k in rows_all[0].keys():
+        kl = k.lower()
+        if "branch" in kl or "branches" in kl or "branche" in kl:
+            branch_field = k
+            break
+    if not branch_field:
+        return []
+
+    # Branch-key opzoeken via dimensietabel (Key ↔ Title)
     dim_name, branches = list_retail_branches(dataset)
     branch_key = _find_branch_key(branches, branch_code_or_title) if branches else None
 
-    rows: List[Dict] = []
-
-    if dim_name and branch_key:
-        # strikte filter: periode + branche
-        try:
-            rows = _odata_select(
-                dataset,
-                "TypedDataSet",
-                (
-                    f"$filter={period_col} ge '{start}' and {period_col} le '{end}' "
-                    f"and {dim_name} eq '{branch_key}'&$top=5000"
-                ),
+    def _match_branch(item: dict) -> bool:
+        val = str(item.get(branch_field, "")).strip().lower()
+        if branch_key is not None:
+            return val == str(branch_key).lower()
+        if branches:
+            return any(
+                val == str(b["key"]).lower() or val == str(b["title"]).lower()
+                for b in branches
             )
-        except requests.HTTPError:
-            rows = []
+        return branch_code_or_title.lower() in val
 
-    # 2) Fallback: alleen periode-range, daarna client-side filteren op branch
+    rows = [r for r in rows_all if _match_branch(r)]
     if not rows:
-        try:
-            rows = _odata_select(
-                dataset,
-                "TypedDataSet",
-                f"$filter={period_col} ge '{start}' and {period_col} le '{end}'&$top=5000",
-            )
-        except requests.HTTPError:
-            return []
-        if not rows:
-            return []
+        return []
 
-        # zoek branchveld
-        branch_field = None
-        for k in rows[0].keys():
-            kl = k.lower()
-            if "branch" in kl or "branches" in kl or "branche" in kl:
-                branch_field = k
-                break
-        if not branch_field:
-            return []
-
-        def _match(item: dict) -> bool:
-            val = str(item.get(branch_field, "")).strip().lower()
-            if branch_key is not None:
-                return val == str(branch_key).lower()
-            if branches:
-                return any(
-                    val == str(b["key"]).lower() or val == str(b["title"]).lower()
-                    for b in branches
-                )
-            # laatste escape: string-match op meegegeven branch_code_or_title
-            return branch_code_or_title.lower() in val
-
-        rows = [r for r in rows if _match(r)]
-        if not rows:
-            return []
-
-        value_field = _pick_numeric_field(rows[0], [series])
-    else:
-        value_field = _pick_numeric_field(rows[0], [series])
+    value_field = _pick_numeric_field(rows[0], [series])
 
     out: List[Dict] = []
     for it in rows:
+        period_code = it.get(period_field)
         raw = it.get(value_field)
-        if raw is None:
+        if period_code is None or raw is None:
             continue
-        val = float(raw) if isinstance(raw, (int, float)) else float(str(raw).replace(",", "."))
+
+        if isinstance(raw, (int, float)):
+            val = float(raw)
+        else:
+            try:
+                val = float(str(raw).replace(",", "."))
+            except Exception:
+                continue
+
         out.append(
             {
-                "period": it[period_col],
+                "period": str(period_code),
                 "retail_value": val,
                 "series": value_field,
                 "branch": branch_code_or_title,
             }
         )
+
     out.sort(key=lambda x: x["period"])
+
+    if months_back and len(out) > months_back:
+        out = out[-months_back:]
+
     return out
 
 
-# -----------------------------
-# Postcode4 stub – simpele context voor de AI Copilot
-# -----------------------------
+# ============================================================
+# 3) Postcode4 stub – voor context in de AI Copilot
+# ============================================================
+
 def get_cbs_stats_for_postcode4(postcode4: str) -> Dict:
     """
     Simpele placeholder voor CBS-context op postcode4-niveau.
-
-    Nu:
-    - Levert generieke indices terug (NL = 100, iets erboven)
-    - Voorkomt import errors in de AI Copilot
-
-    Later:
-    - Kun je dit vervangen door een echte koppeling
-      (bv. CBS buurt-/wijkstatistieken op basis van postcode → wijkcode).
+    Nu nog demo-data; later kun je dit vervangen door echte buurt-/wijkstatistieken.
     """
     postcode4 = (postcode4 or "").strip()
     if not postcode4:
@@ -342,5 +278,8 @@ def get_cbs_stats_for_postcode4(postcode4: str) -> Dict:
         "postcode4": postcode4,
         "avg_income_index": 100,          # NL = 100
         "population_density_index": 110,  # iets boven het gemiddelde
-        "note": "Demo-indices op basis van CBS. Vervang deze stub later door een echte postcode4-koppeling.",
+        "note": (
+            "Demo-indices op basis van CBS. "
+            "Vervang deze stub later door een echte postcode4-koppeling."
+        ),
     }
