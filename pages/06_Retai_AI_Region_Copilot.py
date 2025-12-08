@@ -732,27 +732,27 @@ def main():
                 .rename(columns={"turnover": "region_turnover"})
             )
 
-        if not region_month.empty:
-            base = region_month["region_turnover"].iloc[0]
+            if not region_month.empty:
+                base = region_month["region_turnover"].iloc[0]
 
-            if base > 0:
-                # Normale index: 100 = eerste maand
-                region_month["region_turnover_index"] = (
-                    region_month["region_turnover"] / base * 100.0
-                )
-            else:
-                # Geen bruikbare basis → kolom toch aanmaken met NaN,
-                # zodat de rest van de code niet crasht
-                region_month["region_turnover_index"] = np.nan
-                st.caption(
-                    "⚠️ Regio-omzetindex kon niet goed genormaliseerd worden "
-                    "(eerste maand-omzet is 0 of ontbreekt). De lijn kan daardoor vlak of leeg zijn."
-                )
+                if base > 0:
+                    # Normale index: 100 = eerste maand
+                    region_month["region_turnover_index"] = (
+                        region_month["region_turnover"] / base * 100.0
+                    )
+                else:
+                    # Geen bruikbare basis → kolom toch aanmaken met NaN,
+                    # zodat de rest van de code niet crasht
+                    region_month["region_turnover_index"] = np.nan
+                    st.caption(
+                        "⚠️ Regio-omzetindex kon niet goed genormaliseerd worden "
+                        "(eerste maand-omzet is 0 of ontbreekt). De lijn kan daardoor vlak of leeg zijn."
+                    )
 
-            # CBS detailhandelindex ophalen
-            try:
-                # bv. laatste 24 maanden
-                cbs_list = get_retail_index(months_back=24)
+                # CBS detailhandelindex ophalen
+                try:
+                    # bv. laatste 24 maanden
+                    cbs_list = get_retail_index(months_back=24)
                 except Exception:
                     cbs_list = []
 
