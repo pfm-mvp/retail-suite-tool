@@ -970,13 +970,23 @@ def main():
         st.write("Region weekly:", region_weekly.head())
         st.write("Pathzz weekly:", pathzz_weekly.head())
         st.write("Capture weekly:", capture_weekly.head())
-        st.write("Store table (raw):", store_table.head() if not store_table.empty else "n.v.t.")
-        from services.cbs_service import get_retail_index, get_cci_series
-        st.write("CBS retail index (sample):", pd.DataFrame(get_retail_index(months_back=3)).head())
-        st.write("CBS CCI (sample):", pd.DataFrame(get_cci_series(months_back=3)).head())
-        st.write("CBS retail index (sample):", cbs_retail_df.head() if not cbs_retail_df.empty else "empty")
-        st.write("CBS CCI (sample):", cci_df.head() if not cci_df.empty else "empty")
 
+        # Nieuw: laat zien of CBS-data gevuld is
+        try:
+            st.write(
+                "CBS retail index (sample):",
+                cbs_retail_df.head() if 'cbs_retail_df' in locals() and not cbs_retail_df.empty else "empty",
+            )
+        except Exception:
+            st.write("CBS retail index (sample): error")
+
+        try:
+            st.write(
+                "CBS CCI (sample):",
+                cci_df.head() if 'cci_df' in locals() and not cci_df.empty else "empty",
+            )
+        except Exception:
+            st.write("CBS CCI (sample): error")
 
 if __name__ == "__main__":
     main()
