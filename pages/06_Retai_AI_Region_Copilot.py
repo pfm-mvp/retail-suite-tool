@@ -701,7 +701,7 @@ def main():
     else:
         st.info("Geen matchende Pathzz-weekdata gevonden voor deze regio/periode.")
 
-        # -----------------------
+    # -----------------------
     # Macro-context: CBS detailhandel & consumentenvertrouwen
     # -----------------------
 
@@ -712,6 +712,7 @@ def main():
     # --- Regio-omzetindex vs CBS detailhandelindex ---
     try:
         if "turnover" in df_period.columns:
+            # 1) Regio-omzet per maand + index 100 = startperiode
             tmp = df_period.copy()
             tmp["month"] = tmp["date"].dt.to_period("M").dt.to_timestamp()
             region_month = (
@@ -727,7 +728,7 @@ def main():
                         region_month["region_turnover"] / base * 100.0
                     )
 
-                # CBS detailhandelindex ophalen
+                # 2) CBS detailhandelindex ophalen
                 try:
                     cbs_retail = get_retail_index(start_period, end_period)
                 except TypeError:
@@ -736,44 +737,17 @@ def main():
                 except Exception:
                     cbs_retail = pd.DataFrame()
 
+                # Verwacht: kolommen 'date' en 'retail_index'
                 if isinstance(cbs_retail, pd.DataFrame) and not cbs_retail.empty:
-                    # Datumkolom bepalen
-                    if "date" not in cbs_retail.columns:
-                        time_col = None
-                        for cand in ["Perioden", "period", "month", "date_str"]:
-                            if cand in cbs_retail.columns:
-                                time_col = cand
-                                break
-                        if time_col is not None:
-                            cbs_retail["date"] = pd.to_datetime(
-                                cbs_retail[time_col], errors="coerce"
-                            )
-                        else:
-                            cbs_retail["date"] = pd.NaT
-
+                    cbs_retail = cbs_retail.copy()
                     cbs_retail["date"] = pd.to_datetime(
                         cbs_retail["date"], errors="coerce"
                     )
                     cbs_retail = cbs_retail.dropna(subset=["date"])
-
-                    # Numerieke kolom kiezen voor index
-                    retail_col = None
-                    for cand in ["retail_index", "index", "value"]:
-                        if cand in cbs_retail.columns:
-                            retail_col = cand
-                            break
-                    if retail_col is None:
-                        num_cols = cbs_retail.select_dtypes(
-                            include=[np.number]
-                        ).columns.tolist()
-                        if num_cols:
-                            retail_col = num_cols[0]
-
                 else:
                     cbs_retail = pd.DataFrame()
-                    retail_col = None
 
-                # Chart-DF opbouwen
+                # 3) Chart-DF opbouwen (2 lijnen: regio vs CBS)
                 chart_lines = []
 
                 reg_line = region_month.rename(columns={"month": "date"})[
@@ -785,99 +759,65 @@ def main():
                 )
                 chart_lines.append(reg_line)
 
-                if (
-                    isinstance(cbs_retail, pd.DataFrame)
-                    and not cbs_retail.empty
-                    and retail_col is not None
-                ):
-                    nat_line = cbs_retail[["date", retail_col]].copy()
+                if not cbs_retail.empty and "retail_index" in cbs_retail.columns:
+                    nat_line = cbs_retail[["date", "retail_index"]].copy()
                     nat_line["series"] = "CBS detailhandelindex"
-                    nat_line = nat_line.rename(columns={retail_col: "value"})
+                    nat_line = nat_line.rename(columns={"retail_index": "value"})
                     chart_lines.append(nat_line)
 
-                chart_all = pd.concat(chart_lines, ignore_index=True)
+                if chart_lines:
+                    chart_all = pd.concat(chart_lines, ignore_index=True)
 
-                macro_chart = (
-                    alt.Chart(chart_all)
-                    .mark_line(point=True)
-                    .encode(
-                        x=alt.X("date:T", title="Maand"),
-                        y=alt.Y("value:Q", title="Index (100 = startperiode)"),
-                        color=alt.Color("series:N", title="Reeks"),
-                        tooltip=[
-                            alt.Tooltip("date:T", title="Maand"),
-                            alt.Tooltip("series:N", title="Reeks"),
-                            alt.Tooltip("value:Q", title="Index", format=".1f"),
-                        ],
+                    macro_chart = (
+                        alt.Chart(chart_all)
+                        .mark_line(point=True)
+                        .encode(
+                            x=alt.X("date:T", title="Maand"),
+                            y=alt.Y("value:Q", title="Index (100 = startperiode)"),
+                            color=alt.Color("series:N", title="Reeks"),
+                            tooltip=[
+                                alt.Tooltip("date:T", title="Maand"),
+                                alt.Tooltip("series:N", title="Reeks"),
+                                alt.Tooltip("value:Q", title="Index", format=".1f"),
+                            ],
+                        )
+                        .properties(height=300)
                     )
-                    .properties(height=300)
-                )
 
-                st.altair_chart(macro_chart, use_container_width=True)
-                macro_chart_shown = True
+                    st.altair_chart(macro_chart, use_container_width=True)
+                    macro_chart_shown = True
 
-    except Exception:
-        # We tonen geen error aan de gebruiker – alleen in debug-sectie zichtbaar
-        macro_chart_shown = macro_chart_shown or False
+    except Exception as e:
+        st.caption(f"⚠️ Kon regio-omzetindex niet koppelen aan CBS detailhandelindex ({e}).")
 
     # --- Consumentenvertrouwen (CCI) ---
     try:
-        # Idealiter dezelfde periode gebruiken
         try:
             cci_df = get_cci_series(start_period, end_period)
         except TypeError:
-            # Als de functie geen parameters verwacht
             cci_df = get_cci_series()
         except Exception:
             cci_df = pd.DataFrame()
 
+        # Verwacht: kolommen 'date' en 'cci'
         if isinstance(cci_df, pd.DataFrame) and not cci_df.empty:
-            if "date" not in cci_df.columns:
-                time_col = None
-                for cand in ["Perioden", "period", "month", "date_str"]:
-                    if cand in cci_df.columns:
-                        time_col = cand
-                        break
-                if time_col is not None:
-                    cci_df["date"] = pd.to_datetime(
-                        cci_df[time_col], errors="coerce"
-                    )
-                else:
-                    cci_df["date"] = pd.NaT
-
+            cci_df = cci_df.copy()
             cci_df["date"] = pd.to_datetime(cci_df["date"], errors="coerce")
             cci_df = cci_df.dropna(subset=["date"])
 
-            # Numerieke kolom kiezen
-            cci_col = None
-            for cand in ["cci", "value", "index"]:
-                if cand in cci_df.columns:
-                    cci_col = cand
-                    break
-            if cci_col is None:
-                num_cols_conf = cci_df.select_dtypes(
-                    include=[np.number]
-                ).columns.tolist()
-                if num_cols_conf:
-                    cci_col = num_cols_conf[0]
-
-            if cci_col is not None:
+            if "cci" in cci_df.columns:
                 cci_chart = (
                     alt.Chart(cci_df)
                     .mark_line(point=True, color="#F04438")
                     .encode(
                         x=alt.X("date:T", title="Maand"),
                         y=alt.Y(
-                            f"{cci_col}:Q",
+                            "cci:Q",
                             title="Consumentenvertrouwen (index)",
                         ),
                         tooltip=[
                             alt.Tooltip("date:T", title="Maand"),
-                            alt.Tooltip(
-                                f"{cci_col}:Q",
-                                title="Index",
-                                format=".1f",
-                            ),
+                            alt.Tooltip("cci:Q", title="Index", format=".1f"),
                         ],
                     )
                     .properties(height=220)
@@ -885,13 +825,14 @@ def main():
                 st.altair_chart(cci_chart, use_container_width=True)
                 macro_chart_shown = True
 
-    except Exception:
-        macro_chart_shown = macro_chart_shown or False
+    except Exception as e:
+        st.caption(f"⚠️ Kon consumentenvertrouwen niet tonen ({e}).")
 
     if not macro_chart_shown:
         st.caption(
-            "Macro-index (CBS detailhandel / consumentenvertrouwen) kon niet volledig worden opgebouwd. "
-            "Controleer de output van get_retail_index() en get_cci_series() in cbs_service."
+            "Macro-index (CBS detailhandel / consumentenvertrouwen) kon niet worden opgebouwd. "
+            "Controleer of get_retail_index() en get_cci_series() een DataFrame met kolommen "
+            "`date` en respectievelijk `retail_index` / `cci` teruggeven."
         )
 
     # -----------------------
