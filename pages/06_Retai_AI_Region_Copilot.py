@@ -876,6 +876,9 @@ def main():
         st.write("Pathzz weekly:", pathzz_weekly.head())
         st.write("Capture weekly:", capture_weekly.head())
         st.write("Store table (raw):", store_table.head() if not store_table.empty else "n.v.t.")
+                from services.cbs_service import get_retail_index, get_cci_series
+        st.write("CBS retail index (sample):", pd.DataFrame(get_retail_index(months_back=3)).head())
+        st.write("CBS CCI (sample):", pd.DataFrame(get_cci_series(months_back=3)).head())
 
 
 if __name__ == "__main__":
