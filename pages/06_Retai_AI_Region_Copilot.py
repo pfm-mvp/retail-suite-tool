@@ -607,18 +607,25 @@ def main():
     st.markdown("### Regioweekbeeld – winkeltraffic vs straattraffic (Pathzz)")
 
     if not capture_weekly.empty:
+        # We nemen nu ook de regio-omzet mee
         chart_df = capture_weekly[
-            ["week_start", "footfall", "street_footfall", "capture_rate"]
+            ["week_start", "footfall", "street_footfall", "turnover", "capture_rate"]
         ].copy()
 
-        # Weeklabel als weeknummer: W01, W02, ...
+        # Weeklabel als nette weeknummers, bv. W01, W02, ...
         iso_calendar = chart_df["week_start"].dt.isocalendar()
         chart_df["week_label"] = iso_calendar.week.apply(lambda w: f"W{int(w):02d}")
 
-        # Data voor de bars (footfall vs street_footfall)
+        week_order = (
+            chart_df.sort_values("week_start")["week_label"]
+            .unique()
+            .tolist()
+        )
+
+        # Bars: footfall, street_footfall én omzet
         counts_long = chart_df.melt(
             id_vars=["week_label"],
-            value_vars=["footfall", "street_footfall"],
+            value_vars=["footfall", "street_footfall", "turnover"],
             var_name="metric",
             value_name="value",
         )
@@ -627,34 +634,36 @@ def main():
             alt.Chart(counts_long)
             .mark_bar(width=20, opacity=0.8)
             .encode(
-                x=alt.X("week_label:N", title="Week", sort=None),
+                x=alt.X("week_label:N", title="Week", sort=week_order),
                 xOffset=alt.XOffset("metric:N"),
                 y=alt.Y(
                     "value:Q",
-                    axis=alt.Axis(title="Footfall / streettraffic (regio)"),
+                    axis=alt.Axis(
+                        title="Footfall / streettraffic / omzet (regio)"
+                    ),
                 ),
                 color=alt.Color(
                     "metric:N",
                     title="",
                     scale=alt.Scale(
-                        domain=["footfall", "street_footfall"],
-                        range=["#1f77b4", "#ff7f0e"],
+                        domain=["footfall", "street_footfall", "turnover"],
+                        range=["#1f77b4", "#ff7f0e", "#4ade80"],  # desnoods later PFM-kleuren
                     ),
                 ),
                 tooltip=[
                     alt.Tooltip("week_label:N", title="Week"),
                     alt.Tooltip("metric:N", title="Type"),
-                    alt.Tooltip("value:Q", title="Aantal", format=",.0f"),
+                    alt.Tooltip("value:Q", title="Waarde", format=",.0f"),
                 ],
             )
         )
 
-        # Lijn met capture rate
+        # Lijn met capture rate (%)
         line_chart = (
             alt.Chart(chart_df)
             .mark_line(point=True, strokeWidth=2, color="#F04438")
             .encode(
-                x=alt.X("week_label:N", title="Week", sort=None),
+                x=alt.X("week_label:N", title="Week", sort=week_order),
                 y=alt.Y(
                     "capture_rate:Q",
                     axis=alt.Axis(title="Capture rate regio (%)"),
@@ -679,12 +688,19 @@ def main():
 
         st.altair_chart(combined, use_container_width=True)
 
-        # Tabel met ruwe waarden
-        st.markdown("### Weekly tabel – regio-footfall, straattraffic & capture rate")
+        # -----------------------
+        # Weekly tabel – nu óók met omzet
+        # -----------------------
+        st.markdown("### Weekly tabel – regio-footfall, straattraffic, omzet & capture rate")
+
         table_df = capture_weekly[
-            ["week_start", "footfall", "street_footfall", "capture_rate"]
+            ["week_start", "footfall", "street_footfall", "turnover", "capture_rate"]
         ].copy()
+
         table_df["week_start"] = table_df["week_start"].dt.strftime("%Y-%m-%d")
+        table_df["footfall"] = table_df["footfall"].map(fmt_int)
+        table_df["street_footfall"] = table_df["street_footfall"].map(fmt_int)
+        table_df["turnover"] = table_df["turnover"].map(fmt_eur)
         table_df["capture_rate"] = table_df["capture_rate"].map(
             lambda x: fmt_pct(x) if not pd.isna(x) else "-"
         )
@@ -694,10 +710,13 @@ def main():
                 "week_start": "Week start",
                 "footfall": "Store footfall (regio)",
                 "street_footfall": "Street footfall (Pathzz)",
+                "turnover": "Omzet (regio)",
                 "capture_rate": "Capture rate",
             }
         )
+
         st.dataframe(table_df, use_container_width=True)
+
     else:
         st.info("Geen matchende Pathzz-weekdata gevonden voor deze regio/periode.")
 
