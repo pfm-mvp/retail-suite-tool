@@ -709,10 +709,21 @@ def main():
 
     macro_chart_shown = False
 
+    # Kleine helper om CBS-perioden "2024MM01" → eerste dag van die maand te maken
+    def _cbs_period_to_date(p: str):
+        try:
+            if isinstance(p, str) and "MM" in p and len(p) >= 8:
+                year = int(p[:4])
+                month = int(p[-2:])
+                return pd.Timestamp(year=year, month=month, day=1)
+        except Exception:
+            return pd.NaT
+        return pd.NaT
+
     # --- Regio-omzetindex vs CBS detailhandelindex ---
     try:
         if "turnover" in df_period.columns:
-            # 1) Regio-omzet per maand + index 100 = startperiode
+            # 1) Regio-omzet per maand + index (100 = eerste maand)
             tmp = df_period.copy()
             tmp["month"] = tmp["date"].dt.to_period("M").dt.to_timestamp()
             region_month = (
@@ -728,22 +739,29 @@ def main():
                         region_month["region_turnover"] / base * 100.0
                     )
 
-                # 2) CBS detailhandelindex ophalen
+                # 2) CBS detailhandelindex ophalen via jouw service
                 try:
-                    cbs_retail = get_retail_index(start_period, end_period)
-                except TypeError:
-                    # Als de functie geen parameters verwacht
-                    cbs_retail = get_retail_index()
+                    # bv. laatste 24 maanden
+                    cbs_list = get_retail_index(months_back=24)
                 except Exception:
-                    cbs_retail = pd.DataFrame()
+                    cbs_list = []
 
-                # Verwacht: kolommen 'date' en 'retail_index'
-                if isinstance(cbs_retail, pd.DataFrame) and not cbs_retail.empty:
-                    cbs_retail = cbs_retail.copy()
-                    cbs_retail["date"] = pd.to_datetime(
-                        cbs_retail["date"], errors="coerce"
-                    )
-                    cbs_retail = cbs_retail.dropna(subset=["date"])
+                if cbs_list:
+                    cbs_retail = pd.DataFrame(cbs_list)
+                    # verwachting uit jouw service: kolom 'period' + 'retail_value'
+                    if "period" in cbs_retail.columns:
+                        cbs_retail["date"] = cbs_retail["period"].apply(
+                            _cbs_period_to_date
+                        )
+                        cbs_retail = cbs_retail.dropna(subset=["date"])
+                    else:
+                        cbs_retail["date"] = pd.NaT
+
+                    # hernoem retail_value → retail_index voor de grafiek
+                    if "retail_value" in cbs_retail.columns:
+                        cbs_retail = cbs_retail.rename(
+                            columns={"retail_value": "retail_index"}
+                        )
                 else:
                     cbs_retail = pd.DataFrame()
 
@@ -759,7 +777,11 @@ def main():
                 )
                 chart_lines.append(reg_line)
 
-                if not cbs_retail.empty and "retail_index" in cbs_retail.columns:
+                if (
+                    isinstance(cbs_retail, pd.DataFrame)
+                    and not cbs_retail.empty
+                    and "retail_index" in cbs_retail.columns
+                ):
                     nat_line = cbs_retail[["date", "retail_index"]].copy()
                     nat_line["series"] = "CBS detailhandelindex"
                     nat_line = nat_line.rename(columns={"retail_index": "value"})
@@ -788,24 +810,25 @@ def main():
                     macro_chart_shown = True
 
     except Exception as e:
-        st.caption(f"⚠️ Kon regio-omzetindex niet koppelen aan CBS detailhandelindex ({e}).")
+        st.caption(
+            f"⚠️ Kon regio-omzetindex niet koppelen aan CBS detailhandelindex ({e})."
+        )
 
     # --- Consumentenvertrouwen (CCI) ---
     try:
         try:
-            cci_df = get_cci_series(start_period, end_period)
-        except TypeError:
-            cci_df = get_cci_series()
+            cci_list = get_cci_series(months_back=24)
         except Exception:
-            cci_df = pd.DataFrame()
+            cci_list = []
 
-        # Verwacht: kolommen 'date' en 'cci'
-        if isinstance(cci_df, pd.DataFrame) and not cci_df.empty:
-            cci_df = cci_df.copy()
-            cci_df["date"] = pd.to_datetime(cci_df["date"], errors="coerce")
-            cci_df = cci_df.dropna(subset=["date"])
+        if cci_list:
+            cci_df = pd.DataFrame(cci_list)
+            # uit jouw service: kolommen 'period' en 'cci'
+            if "period" in cci_df.columns:
+                cci_df["date"] = cci_df["period"].apply(_cbs_period_to_date)
+                cci_df = cci_df.dropna(subset=["date"])
 
-            if "cci" in cci_df.columns:
+            if "cci" in cci_df.columns and not cci_df.empty:
                 cci_chart = (
                     alt.Chart(cci_df)
                     .mark_line(point=True, color="#F04438")
@@ -826,13 +849,14 @@ def main():
                 macro_chart_shown = True
 
     except Exception as e:
-        st.caption(f"⚠️ Kon consumentenvertrouwen niet tonen ({e}).")
+        st.caption(
+            f"⚠️ Kon consumentenvertrouwen niet tonen ({e})."
+        )
 
     if not macro_chart_shown:
         st.caption(
-            "Macro-index (CBS detailhandel / consumentenvertrouwen) kon niet worden opgebouwd. "
-            "Controleer of get_retail_index() en get_cci_series() een DataFrame met kolommen "
-            "`date` en respectievelijk `retail_index` / `cci` teruggeven."
+            "Macro-index (CBS detailhandel & consumentenvertrouwen) kon niet worden opgebouwd. "
+            "Controleer eventueel de output van get_retail_index() en get_cci_series() in cbs_service."
         )
 
     # -----------------------
