@@ -28,7 +28,7 @@ def _odata_select(dataset: str, path: str, params: str = "") -> List[dict]:
     Kleine wrapper om OData op te halen.
 
     path: bv. "TypedDataSet" of "Branches_2".
-    params: bv. "$top=5000" (geen $filter meer in deze versie – dat doen we client-side).
+    params: bv. "$top=5000".
     """
     url = f"{BASE}/{dataset}/{path}"
     if params:
@@ -97,9 +97,8 @@ def get_cci_series(
     Geeft een lijst terug met:
       [{'period': 'YYYYMMxx', 'cci': waarde}, ...]
 
-    We halen maximaal 5000 records op (zonder server-side filter),
-    zoeken zelf het periodeveld en numeriek veld en nemen daarna
-    de laatste `months_back` maanden.
+    We halen maximaal 5000 records op, zoeken zelf het periodeveld en
+    numerieke veld en nemen daarna de laatste `months_back` maanden.
     """
     try:
         rows = _odata_select(dataset, "TypedDataSet", "$top=5000")
@@ -145,6 +144,9 @@ def get_cci_series(
 
 def list_retail_branches(dataset: str = "85828NED") -> Tuple[str, List[Dict]]:
     """
+    (Momenteel niet gebruikt in get_retail_index, maar laten we staan
+    voor het geval we later per branche willen differentiëren.)
+
     Retourneert (branch_dim_name, items) waarbij items = [{'key':..., 'title':...}, ...]
     Probeert Branches_2, daarna Branches.
     """
@@ -162,6 +164,10 @@ def list_retail_branches(dataset: str = "85828NED") -> Tuple[str, List[Dict]]:
 
 
 def _find_branch_key(branches: List[Dict], query: str) -> str | None:
+    """
+    Hulpje om later evt. op specifieke branch te filteren.
+    Nu niet gebruikt door get_retail_index().
+    """
     q = (query or "").strip().lower()
     for b in branches:
         if str(b["key"]).lower() == q or str(b["title"]).lower() == q:
@@ -173,61 +179,32 @@ def _find_branch_key(branches: List[Dict], query: str) -> str | None:
 
 
 def get_retail_index(
-    series: str = "Omzetontwikkeling_1",
-    branch_code_or_title: str = "DH_TOTAAL",
     months_back: int = 18,
     dataset: str = "85828NED",
 ) -> List[Dict]:
     """
-    Geeft een lijst terug met:
-      [{'period': 'YYYYMMxx', 'retail_value': ..., 'series': ..., 'branch': ...}, ...]
+    Simpele detailhandelindex voor NL als geheel.
 
-    We halen maximaal 5000 regels op (zonder server-side filter),
-    zoeken client-side:
-      - periodeveld
-      - branchveld
-      - numerieke veld (bv. 'Omzetontwikkeling_1')
-    en filteren daarna op gewenste branche en laatste `months_back` maanden.
+    Geeft een lijst terug met:
+      [{'period': 'YYYYMMxx', 'retail_index': ...}, ...]
+
+    - We halen maximaal 5000 regels op uit TypedDataSet.
+    - We zoeken één numeriek veld dat als index kan dienen
+      (bij voorkeur Omzetwaarde_1 / Omzetontwikkeling_1 / Index_1).
+    - We sorteren op period en nemen de laatste `months_back` maanden.
     """
     try:
-        rows_all = _odata_select(dataset, "TypedDataSet", "$top=5000")
+        rows = _odata_select(dataset, "TypedDataSet", "$top=5000")
     except requests.HTTPError:
         return []
-    if not rows_all:
-        return []
-
-    period_field = _pick_period_field(rows_all[0])
-
-    # branch-dimensie bepalen
-    branch_field = None
-    for k in rows_all[0].keys():
-        kl = k.lower()
-        if "branch" in kl or "branches" in kl or "branche" in kl:
-            branch_field = k
-            break
-    if not branch_field:
-        return []
-
-    # Branch-key opzoeken via dimensietabel (Key ↔ Title)
-    dim_name, branches = list_retail_branches(dataset)
-    branch_key = _find_branch_key(branches, branch_code_or_title) if branches else None
-
-    def _match_branch(item: dict) -> bool:
-        val = str(item.get(branch_field, "")).strip().lower()
-        if branch_key is not None:
-            return val == str(branch_key).lower()
-        if branches:
-            return any(
-                val == str(b["key"]).lower() or val == str(b["title"]).lower()
-                for b in branches
-            )
-        return branch_code_or_title.lower() in val
-
-    rows = [r for r in rows_all if _match_branch(r)]
     if not rows:
         return []
 
-    value_field = _pick_numeric_field(rows[0], [series])
+    period_field = _pick_period_field(rows[0])
+    value_field = _pick_numeric_field(
+        rows[0],
+        ["Omzetwaarde_1", "Omzetontwikkeling_1", "Index_1"],
+    )
 
     out: List[Dict] = []
     for it in rows:
@@ -247,9 +224,7 @@ def get_retail_index(
         out.append(
             {
                 "period": str(period_code),
-                "retail_value": val,
-                "series": value_field,
-                "branch": branch_code_or_title,
+                "retail_index": val,
             }
         )
 
