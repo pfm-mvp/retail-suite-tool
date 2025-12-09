@@ -147,6 +147,9 @@ def list_retail_branches(dataset: str = "85828NED") -> Tuple[str, List[Dict]]:
     """
     Retourneert (branch_dim_name, items) waarbij items = [{'key':..., 'title':...}, ...]
     Probeert Branches_2, daarna Branches.
+
+    Let op: voor 85828NED bestaan deze tabellen inmiddels níet meer,
+    dus in de praktijk krijg je vaak ("", []) terug.
     """
     for dim in ("Branches_2", "Branches"):
         try:
@@ -182,17 +185,11 @@ def get_retail_index(
     Geeft een lijst terug met:
       [{'period': 'YYYYMMxx', 'retail_value': ..., 'series': ..., 'branch': ...}, ...]
 
-    We halen maximaal 5000 regels op (zonder server-side filter),
-    zoeken client-side:
-      - periodeveld
-      - branchveld
-      - numeriek veld (bv. 'Omzetontwikkeling_1')
-    en filteren daarna op gewenste branche.
-
-    Belangrijk: sommige combinaties leveren meerdere regels per periode op
-    (bijv. verschillende seizoencorrecties). We aggregeren die naar één
-    waarde per 'period' (gemiddelde), zodat de frontend geen “verticale
-    lijnen” krijgt voor dezelfde maand.
+    - Haalt maximaal 5000 regels op (zonder server-side filter).
+    - Probeert een branch-kolom te vinden (bv. 'BedrijfstakkenBranchesSBI2008').
+    - Probeert te filteren op `branch_code_or_title` (via dimensietabel of substring).
+    - Als er géén matches zijn, valt het terug op *alle* rijen, zodat je nooit een
+      lege serie terugkrijgt puur door een mismatch in branch-codes.
     """
     try:
         rows_all = _odata_select(dataset, "TypedDataSet", "$top=5000")
@@ -203,39 +200,49 @@ def get_retail_index(
 
     period_field = _pick_period_field(rows_all[0])
 
-    # branch-dimensie bepalen
+    # branch-dimensie bepalen: o.a. 'BedrijfstakkenBranchesSBI2008'
     branch_field = None
     for k in rows_all[0].keys():
         kl = k.lower()
         if "branch" in kl or "branches" in kl or "branche" in kl:
             branch_field = k
             break
-    if not branch_field:
-        return []
 
-    # Branch-key opzoeken via dimensietabel (Key ↔ Title)
-    dim_name, branches = list_retail_branches(dataset)
-    branch_key = _find_branch_key(branches, branch_code_or_title) if branches else None
+    # Welke numerieke serie gebruiken? (bijv. Ongecorrigeerd_1)
+    value_field = _pick_numeric_field(rows_all[0], [series])
 
-    def _match_branch(item: dict) -> bool:
-        val = str(item.get(branch_field, "")).strip().lower()
-        if branch_key is not None:
-            return val == str(branch_key).lower()
-        if branches:
-            return any(
-                val == str(b["key"]).lower() or val == str(b["title"]).lower()
-                for b in branches
-            )
-        return branch_code_or_title.lower() in val
+    # --- Branch-filter (best-effort) ---
+    rows = rows_all
 
-    rows = [r for r in rows_all if _match_branch(r)]
-    if not rows:
-        return []
+    if branch_field and (branch_code_or_title or "").strip():
+        dim_name, branches = list_retail_branches(dataset)
+        branch_key = _find_branch_key(branches, branch_code_or_title) if branches else None
 
-    value_field = _pick_numeric_field(rows[0], [series])
+        def _match_branch(item: dict) -> bool:
+            val = str(item.get(branch_field, "")).strip().lower()
+            if not val:
+                return False
+            if branch_key is not None:
+                # match op exacte key uit dimensietabel
+                return val == str(branch_key).lower()
+            if branches:
+                # match tegen bekende keys/titels
+                return any(
+                    val == str(b["key"]).lower() or val == str(b["title"]).lower()
+                    for b in branches
+                )
+            # laatste redmiddel: substring-match op de ruwe code
+            return branch_code_or_title.lower() in val
 
-    # ---- per period aggregeren (gemiddelde) ----
-    agg: Dict[str, Dict[str, float]] = {}
+        filtered = [r for r in rows_all if _match_branch(r)]
+
+        # Belangrijk: als er geen enkele match is, niet alles weggooien,
+        # maar gewoon alle rijen gebruiken.
+        if filtered:
+            rows = filtered
+
+    # --- Records omzetten naar outputlijst ---
+    out: List[Dict] = []
     for it in rows:
         period_code = it.get(period_field)
         raw = it.get(value_field)
@@ -250,31 +257,12 @@ def get_retail_index(
             except Exception:
                 continue
 
-        p = str(period_code)
-        if p not in agg:
-            agg[p] = {
-                "sum": 0.0,
-                "count": 0,
-                "series": value_field,
-                "branch": branch_code_or_title,
-            }
-        agg[p]["sum"] += val
-        agg[p]["count"] += 1
-
-    if not agg:
-        return []
-
-    out: List[Dict] = []
-    for p, rec in agg.items():
-        avg_val = rec["sum"] / rec["count"] if rec["count"] > 0 else None
-        if avg_val is None:
-            continue
         out.append(
             {
-                "period": p,
-                "retail_value": avg_val,
-                "series": rec["series"],
-                "branch": rec["branch"],
+                "period": str(period_code),
+                "retail_value": val,
+                "series": value_field,
+                "branch": branch_code_or_title,
             }
         )
 
