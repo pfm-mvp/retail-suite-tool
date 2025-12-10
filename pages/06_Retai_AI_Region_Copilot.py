@@ -834,11 +834,11 @@ def main():
     if retail_series:
         cbs_retail_df = pd.DataFrame(retail_series)
 
-        # 'period' is bv. '2000MM01' → datum = 2000-01-15
+        # period is bv. '2000MM01' → jaar = eerste 4, maand = laatste 2
         cbs_retail_df["date"] = pd.to_datetime(
             cbs_retail_df["period"].str[:4]
             + "-"
-            + cbs_retail_df["period"].str[4:6]
+            + cbs_retail_df["period"].str[-2:]
             + "-15",
             errors="coerce",
         )
@@ -933,7 +933,7 @@ def main():
         cci_df["date"] = pd.to_datetime(
             cci_df["period"].str[:4]
             + "-"
-            + cci_df["period"].str[4:6]
+            + cci_df["period"].str[-2:]
             + "-15",
             errors="coerce",
         )
