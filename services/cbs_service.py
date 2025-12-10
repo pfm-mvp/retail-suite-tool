@@ -66,17 +66,11 @@ def get_retail_index(months_back: int = 24) -> List[Dict]:
 
     We gebruiken:
       - Perioden (bijv. '2000MM01')
-      - Ongecorrigeerd_1 als indexwaarde
+      - Ongecorrigeerd_1 als waarde
       - Gemiddelde over alle branches → 1 macroreeks
-
-    Return:
-        [
-            {"period": "2000MM01", "retail_value": 101.2},
-            {"period": "2000MM02", "retail_value": 102.5},
-            ...
-        ]
     """
-    rows = _fetch_typed_dataset("85828NED", top=50000)
+    # Belangrijk: CBS eist < 10000 records per query
+    rows = _fetch_typed_dataset("85828NED", top=10000)
     if not rows:
         return []
 
@@ -88,7 +82,6 @@ def get_retail_index(months_back: int = 24) -> List[Dict]:
             continue
 
         raw_val = r.get("Ongecorrigeerd_1")
-        # Veel vroege maanden zijn NULL: die slaan we gewoon over
         if raw_val is None:
             continue
 
