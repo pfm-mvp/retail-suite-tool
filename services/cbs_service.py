@@ -94,24 +94,31 @@ def get_cci_series(
     dataset: str = "83693NED",
 ) -> List[Dict]:
     """
-    Geeft een lijst terug met:
+    Lijst met consumentenvertrouwen per maand:
+
       [{'period': 'YYYYMMxx', 'cci': waarde}, ...]
 
-    We halen maximaal 5000 records op (zonder server-side filter),
-    zoeken zelf het periodeveld en numeriek veld en nemen daarna
-    de laatste `months_back` maanden.
+    Gebaseerd op:
+      - Perioden
+      - Consumentenvertrouwen_1
     """
-    try:
-        rows = _odata_select(dataset, "TypedDataSet", "$top=5000")
-    except requests.HTTPError:
-        return []
+    url = f"{BASE}/{dataset}/TypedDataSet?$top=5000"
+    r = requests.get(url, timeout=30)
+    r.raise_for_status()
+    js = r.json()
+    rows = js.get("value", [])
     if not rows:
         return []
 
-    period_field = _pick_period_field(rows[0])
-    value_field = _pick_numeric_field(
-        rows[0],
-        ["Consumentenvertrouwen_1", "ConsumerConfidence_1", "Consumerconfidence"],
+    # We weten uit jouw sample dat deze velden er zijn
+    period_field = "Perioden" if "Perioden" in rows[0] else _pick_period_field(rows[0])
+    value_field = (
+        "Consumentenvertrouwen_1"
+        if "Consumentenvertrouwen_1" in rows[0]
+        else _pick_numeric_field(
+            rows[0],
+            ["Consumentenvertrouwen_1", "ConsumerConfidence_1", "Consumerconfidence"],
+        )
     )
 
     out: List[Dict] = []
@@ -131,13 +138,12 @@ def get_cci_series(
 
         out.append({"period": str(period_code), "cci": val})
 
+    # sorteren en beperken tot de laatste `months_back`
     out.sort(key=lambda x: x["period"])
-
     if months_back and len(out) > months_back:
         out = out[-months_back:]
 
     return out
-
 
 # ============================================================
 # 2) Detailhandelindex – 85828NED
