@@ -183,7 +183,7 @@ def _find_branch_key(branches: List[Dict], query: str) -> str | None:
 
 def get_retail_index(
     series: str = "Omzetontwikkeling_1",
-    branch_code_or_title: str = "DH_TOTAAL",
+    branch_code_or_title: str = "",
     months_back: int = 18,
     dataset: str = "85828NED",
 ) -> List[Dict]:
@@ -191,63 +191,72 @@ def get_retail_index(
     Geeft een lijst terug met:
       [{'period': 'YYYYMMxx', 'retail_value': ..., 'series': ..., 'branch': ...}, ...]
 
-    - Haalt maximaal 5000 regels op (zonder server-side filter).
-    - Probeert een branch-kolom te vinden (bv. 'BedrijfstakkenBranchesSBI2008').
-    - Probeert te filteren op `branch_code_or_title` (via dimensietabel of substring).
-    - Als er géén matches zijn, valt het terug op *alle* rijen, zodat je nooit een
-      lege serie terugkrijgt puur door een mismatch in branch-codes.
+    Voor 85828NED gebruiken we:
+    - Perioden
+    - BedrijfstakkenBranchesSBI2008 als eventueel brancheveld
+    - Een numerieke serie (voorkeur: Omzetontwikkeling_1, anders Kal. gecorrigeerd, etc.)
+
+    Als `branch_code_or_title` leeg is → géén branch-filter (macro NL).
     """
-    try:
-        rows_all = _odata_select(dataset, "TypedDataSet", "$top=5000")
-    except requests.HTTPError:
-        return []
+    # Ruwe OData-call
+    url = f"{BASE}/{dataset}/TypedDataSet?$top=5000"
+    r = requests.get(url, timeout=30)
+    r.raise_for_status()
+    js = r.json()
+    rows_all = js.get("value", [])
     if not rows_all:
         return []
 
-    period_field = _pick_period_field(rows_all[0])
+    first = rows_all[0]
 
-    # branch-dimensie bepalen: o.a. 'BedrijfstakkenBranchesSBI2008'
+    # Periodeveld
+    period_field = "Perioden" if "Perioden" in first else _pick_period_field(first)
+
+    # Mogelijk brancheveld (voor 85828NED: BedrijfstakkenBranchesSBI2008)
     branch_field = None
-    for k in rows_all[0].keys():
+    for k in first.keys():
         kl = k.lower()
-        if "branch" in kl or "branches" in kl or "branche" in kl:
+        if (
+            "branch" in kl
+            or "branches" in kl
+            or "branche" in kl
+            or "bedrijfstakken" in kl
+        ):
             branch_field = k
             break
 
-    # Welke numerieke serie gebruiken? (bijv. Ongecorrigeerd_1)
-    value_field = _pick_numeric_field(rows_all[0], [series])
+    # Waardeveld kiezen (detailhandelindex)
+    preferred_fields = [
+        series,
+        "Omzetontwikkeling_1",
+        "Kalendergecorrigeerd_2",
+        "Seizoengecorrigeerd_3",
+        "Ongecorrigeerd_1",
+    ]
+    value_field = None
+    for f in preferred_fields:
+        if f in first:
+            value_field = f
+            break
+    if value_field is None:
+        value_field = _pick_numeric_field(first, preferred_fields)
 
-    # --- Branch-filter (best-effort) ---
-    rows = rows_all
-
-    if branch_field and (branch_code_or_title or "").strip():
-        dim_name, branches = list_retail_branches(dataset)
-        branch_key = _find_branch_key(branches, branch_code_or_title) if branches else None
+    # --- Branch-filter alleen toepassen als er iets is opgegeven ---
+    if branch_code_or_title and branch_field:
+        q = branch_code_or_title.strip().lower()
 
         def _match_branch(item: dict) -> bool:
             val = str(item.get(branch_field, "")).strip().lower()
-            if not val:
-                return False
-            if branch_key is not None:
-                # match op exacte key uit dimensietabel
-                return val == str(branch_key).lower()
-            if branches:
-                # match tegen bekende keys/titels
-                return any(
-                    val == str(b["key"]).lower() or val == str(b["title"]).lower()
-                    for b in branches
-                )
-            # laatste redmiddel: substring-match op de ruwe code
-            return branch_code_or_title.lower() in val
+            return q in val
 
-        filtered = [r for r in rows_all if _match_branch(r)]
+        rows = [r for r in rows_all if _match_branch(r)]
+    else:
+        # Geen branch opgegeven → alle rijen meenemen (macro NL)
+        rows = rows_all
 
-        # Belangrijk: als er geen enkele match is, niet alles weggooien,
-        # maar gewoon alle rijen gebruiken.
-        if filtered:
-            rows = filtered
+    if not rows:
+        return []
 
-    # --- Records omzetten naar outputlijst ---
     out: List[Dict] = []
     for it in rows:
         period_code = it.get(period_field)
@@ -268,12 +277,11 @@ def get_retail_index(
                 "period": str(period_code),
                 "retail_value": val,
                 "series": value_field,
-                "branch": branch_code_or_title,
+                "branch": branch_code_or_title or "ALL",
             }
         )
 
     out.sort(key=lambda x: x["period"])
-
     if months_back and len(out) > months_back:
         out = out[-months_back:]
 
