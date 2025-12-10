@@ -1,30 +1,9 @@
 # services/cbs_service.py
 from __future__ import annotations
 import requests
-from datetime import date
-from typing import List, Dict, Tuple
+from typing import List, Dict
 
 BASE = "https://opendata.cbs.nl/ODataApi/OData"
-
-
-# -----------------------------
-# Kleine generieke helpers
-# -----------------------------
-def _odata_select(dataset: str, path: str, params: str = "") -> List[dict]:
-    """
-    Eenvoudige wrapper om OData op te halen.
-
-    Voorbeeld-URL:
-    https://opendata.cbs.nl/ODataApi/OData/{dataset}/{path}?{params}
-    """
-    url = f"{BASE}/{dataset}/{path}"
-    if params:
-        url += f"?{params}"
-
-    r = requests.get(url, timeout=30)
-    r.raise_for_status()
-    js = r.json()
-    return js.get("value", [])
 
 
 def _to_float(raw):
@@ -52,9 +31,9 @@ def _pick_period_field(item: dict) -> str:
     raise KeyError(f"Periodeveld niet gevonden. Keys: {list(item.keys())}")
 
 
-# -----------------------------
+# ============================================================
 # 1) Consumentenvertrouwen – 83693NED
-# -----------------------------
+# ============================================================
 def get_cci_series(
     months_back: int = 24,
     dataset: str = "83693NED",
@@ -68,23 +47,24 @@ def get_cci_series(
         ...
       ]
 
-    We vragen alleen de relevante kolommen op:
+    We gebruiken exact dezelfde URL als je healthcheck:
+    https://opendata.cbs.nl/ODataApi/OData/83693NED/TypedDataSet?$top=6000
+    en lezen hieruit:
     - Perioden
     - Consumentenvertrouwen_1
     """
-    try:
-        # Alleen de relevante kolommen + ruim genoeg top
-        rows = _odata_select(
-            dataset,
-            "TypedDataSet",
-            "$select=Perioden,Consumentenvertrouwen_1&$top=6000",
-        )
-    except requests.HTTPError:
-        return []
+    url = f"{BASE}/{dataset}/TypedDataSet?$top=6000"
+    resp = requests.get(url, timeout=30)
+    resp.raise_for_status()
+    js = resp.json()
+    rows = js.get("value", [])
 
     if not rows:
         return []
 
+    # In jouw sample is dit duidelijk:
+    # "Perioden": "1986MM04"
+    # "Consumentenvertrouwen_1": 2
     period_field = _pick_period_field(rows[0])
     value_field = "Consumentenvertrouwen_1"
 
@@ -97,7 +77,7 @@ def get_cci_series(
             continue
         out.append({"period": str(per), "cci": val})
 
-    # sorteren op periodecode (bv. '1986MM04' → string-sort is ok)
+    # sorteer op periodecode (bv. '1986MM04' → string-sort is prima)
     out.sort(key=lambda x: x["period"])
 
     if months_back and len(out) > months_back:
@@ -119,24 +99,22 @@ def get_consumer_confidence(
     return series[-1]  # laatste element = meest recent
 
 
-# -----------------------------
+# ============================================================
 # 2) Detailhandelindex – 85828NED
-# -----------------------------
+# ============================================================
 def get_retail_index(
     series: str = "Ongecorrigeerd_1",
-    branch_code_or_title: str = "DH_TOTAAL",  # wordt bewust genegeerd
+    branch_code_or_title: str = "ALL",  # genegeerd, macro NL
     months_back: int = 24,
     dataset: str = "85828NED",
 ) -> List[Dict]:
     """
     Haalt een generieke detailhandelindex uit 85828NED.
 
-    LET OP:
-    - We negeren branch_code_or_title volledig.
-    - We pakken simpelweg de kolom 'Ongecorrigeerd_1' over alle branches heen
-      en middelen per periode.
-    - De 'series' parameter wordt genegeerd en hard gecodeerd naar 'Ongecorrigeerd_1',
-      zodat bestaande aanroepen met series="Omzetontwikkeling_1" niet crashen.
+    Belangrijk:
+    - Jouw sample laat zien dat de waarde-kolom hier 'Ongecorrigeerd_1' is.
+    - De eerste jaren zijn NULL, maar later komen er echte waarden.
+    - We negeren branches en middelen alle niet-NULL waarden per periode.
 
     Return:
       [
@@ -149,25 +127,20 @@ def get_retail_index(
         ...
       ]
     """
-    # We forceren de daadwerkelijke kolomnaam in deze dataset:
     value_field = "Ongecorrigeerd_1"
 
-    try:
-        # Alleen Perioden + de gekozen kolom ophalen
-        rows = _odata_select(
-            dataset,
-            "TypedDataSet",
-            f"$select=Perioden,{value_field}&$top=6000",
-        )
-    except requests.HTTPError:
-        return []
+    url = f"{BASE}/{dataset}/TypedDataSet?$top=6000"
+    resp = requests.get(url, timeout=30)
+    resp.raise_for_status()
+    js = resp.json()
+    rows = js.get("value", [])
 
     if not rows:
         return []
 
     period_field = _pick_period_field(rows[0])
 
-    # Verzamel per periode alle niet-lege waarden, en neem daarna het gemiddelde
+    # Verzamel per periode alle niet-lege waarden, gemiddeld per maand
     per_map: Dict[str, List[float]] = {}
 
     for it in rows:
@@ -192,7 +165,7 @@ def get_retail_index(
                 "period": per_str,
                 "retail_value": avg_val,
                 "series": value_field,
-                "branch": "ALL",  # geen branch-filtering: macro NL
+                "branch": "ALL",
             }
         )
 
@@ -205,20 +178,13 @@ def get_retail_index(
     return out
 
 
-# -----------------------------
-# 3) Postcode4 stub – simpele context voor de AI Copilot
-# -----------------------------
+# ============================================================
+# 3) Postcode4 stub – voor context in de AI Copilot
+# ============================================================
 def get_cbs_stats_for_postcode4(postcode4: str) -> Dict:
     """
     Simpele placeholder voor CBS-context op postcode4-niveau.
-
-    Nu:
-    - Levert generieke indices terug (NL = 100, iets erboven)
-    - Voorkomt import errors in de AI Copilot
-
-    Later:
-    - Kun je dit vervangen door een echte koppeling
-      (bv. CBS buurt-/wijkstatistieken op basis van postcode → wijkcode).
+    Nu nog demo-data; later kun je dit vervangen door echte buurt-/wijkstatistieken.
     """
     postcode4 = (postcode4 or "").strip()
     if not postcode4:
@@ -228,5 +194,8 @@ def get_cbs_stats_for_postcode4(postcode4: str) -> Dict:
         "postcode4": postcode4,
         "avg_income_index": 100,          # NL = 100
         "population_density_index": 110,  # iets boven het gemiddelde
-        "note": "Demo-indices op basis van CBS. Vervang deze stub later door een echte postcode4-koppeling.",
+        "note": (
+            "Demo-indices op basis van CBS. "
+            "Vervang deze stub later door een echte postcode4-koppeling."
+        ),
     }
