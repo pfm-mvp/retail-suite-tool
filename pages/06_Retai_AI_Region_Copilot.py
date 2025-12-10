@@ -490,7 +490,7 @@ def main():
         if "id" in join_cols_existing:
             df_period = df_period.merge(
                 region_shops[join_cols_existing],
-                left_on(store_key_col),
+                left_on=store_key_col,
                 right_on="id",
                 how="left",
             )
