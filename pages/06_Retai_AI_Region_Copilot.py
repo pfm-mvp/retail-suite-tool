@@ -15,6 +15,8 @@ from services.cbs_service import (
     get_cci_series,
     get_retail_index,
 )
+# >>> NEW: radar-service import
+from services.radar_service import build_region_store_radar
 
 st.set_page_config(
     page_title="PFM Region Performance Copilot",
@@ -285,6 +287,7 @@ def aggregate_weekly(df: pd.DataFrame) -> pd.DataFrame:
 
     return df.groupby("week_start", as_index=False).agg(agg_dict)
 
+
 @st.cache_data(ttl=600)
 def debug_cbs_endpoint(dataset: str, top: int = 3) -> dict:
     """
@@ -315,12 +318,16 @@ def debug_cbs_endpoint(dataset: str, top: int = 3) -> dict:
             "error": repr(e),
         }
 
+
 # -------------
 # MAIN UI (Region view)
 # -------------
 
 def main():
     st.title("PFM Region Performance Copilot – Regio-overzicht")
+
+    # >>> NEW: radar DataFrame init (voor debug-sectie)
+    radar_df = pd.DataFrame()
 
     # --- Retailer selectie via clients.json ---
     clients = load_clients("clients.json")
@@ -483,7 +490,7 @@ def main():
         if "id" in join_cols_existing:
             df_period = df_period.merge(
                 region_shops[join_cols_existing],
-                left_on=store_key_col,
+                left_on(store_key_col),
                 right_on="id",
                 how="left",
             )
@@ -697,7 +704,7 @@ def main():
                     title="",
                     scale=alt.Scale(
                         domain=["footfall", "street_footfall", "turnover"],
-                        range=["#1f77b4", "#ff7f0e", "#4ade80"],  # desnoods later PFM-kleuren
+                        range=["#1f77b4", "#ff7f0e", "#4ade80"],
                     ),
                 ),
                 tooltip=[
@@ -819,13 +826,8 @@ def main():
     cbs_retail_error = None
 
     try:
-        # In de nieuwe cbs_service.get_retail_index() pakken we:
-        # - dataset 85828NED
-        # - Perioden
-        # - Ongecorrigeerd_1 als waarde
-        # en middelen we per maand over alle branches (branch = "ALL").
         retail_series = get_retail_index(
-            months_back=24,  # andere parameters worden in cbs_service genegeerd
+            months_back=24,
         )
     except Exception as e:
         retail_series = []
@@ -1002,6 +1004,62 @@ def main():
             "Geen bruikbare CCI-data beschikbaar vanuit de CBS-API (of geen data in de gekozen periode)."
         )
 
+    # >>> NEW: Regionale winkelradar – samengestelde index per winkel
+    if store_key_col is not None:
+        radar_df_local = build_region_store_radar(
+            df_period=df_period,
+            region_shops=region_shops,
+            store_key_col=store_key_col,
+            capture_weekly=capture_weekly,
+            cbs_retail_month=cbs_retail_month,
+            cci_df=cci_df,
+        )
+        if not radar_df_local.empty:
+            radar_df_local = radar_df_local.copy()
+            radar_df_local["radar_score"] = radar_df_local["radar_score"].round(0)
+
+            st.markdown("### Regionale winkelradar (samengestelde index)")
+            view_cols = radar_df_local.rename(
+                columns={
+                    "radar_icon": "",
+                    "store_name": "Winkel",
+                    "radar_score": "Radar-score",
+                    "headline": "Status",
+                    "short_reason": "Toelichting",
+                    "turnover": "Omzet",
+                    "footfall": "Footfall",
+                    "sales_per_visitor": "Gem. besteding/visitor",
+                    "turnover_per_sqm": "Omzet per m²",
+                }
+            )
+
+            st.dataframe(
+                view_cols[
+                    [
+                        "",
+                        "Winkel",
+                        "Radar-score",
+                        "Status",
+                        "Toelichting",
+                        "Omzet",
+                        "Footfall",
+                        "Gem. besteding/visitor",
+                        "Omzet per m²",
+                    ]
+                ],
+                use_container_width=True,
+            )
+
+            st.caption(
+                "De radar-score combineert omzet, footfall, besteding per bezoeker en omzet per m² "
+                "en wordt gecorrigeerd voor macro-ontwikkelingen (consumentenvertrouwen, "
+                "CBS detailhandelindex) en regionale capture rate. "
+                "🟢 = gaat goed, 🟠 = aandacht nodig, 🔴 = presteert onder verwachting."
+            )
+
+            # voor debug
+            radar_df = radar_df_local
+
     # -----------------------
     # Debug-sectie
     # -----------------------
@@ -1028,6 +1086,8 @@ def main():
             "Store table (raw):",
             store_table.head() if not store_table.empty else "n.v.t.",
         )
+        # >>> NEW: radar debug
+        st.write("Radar (head):", radar_df.head() if not radar_df.empty else "empty")
 
         # --- CBS healthchecks ---
         st.markdown("#### 🔍 CBS endpoint healthcheck")
