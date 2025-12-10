@@ -1,201 +1,120 @@
 # services/cbs_service.py
-from __future__ import annotations
+
 import requests
 from typing import List, Dict
 
-BASE = "https://opendata.cbs.nl/ODataApi/OData"
+BASE_URL = "https://opendata.cbs.nl/ODataApi/OData"
 
 
-def _to_float(raw):
-    """Probeer CBS-veld naar float te casten, anders None."""
-    if raw is None:
-        return None
-    if isinstance(raw, (int, float)):
-        return float(raw)
-    try:
-        return float(str(raw).replace(",", "."))
-    except Exception:
-        return None
-
-
-def _pick_period_field(item: dict) -> str:
+def _fetch_typed_dataset(dataset: str, top: int = 5000) -> List[Dict]:
     """
-    Zoek het periodeveld: 'Perioden', 'Periods', ...
+    Haalt ruwe records op uit CBS OData TypedDataSet.
     """
-    for cand in ("Perioden", "Periods", "Period", "Periode"):
-        if cand in item:
-            return cand
-    for k in item.keys():
-        if "period" in k.lower() or "periode" in k.lower():
-            return k
-    raise KeyError(f"Periodeveld niet gevonden. Keys: {list(item.keys())}")
-
-
-# ============================================================
-# 1) Consumentenvertrouwen – 83693NED
-# ============================================================
-def get_cci_series(
-    months_back: int = 24,
-    dataset: str = "83693NED",
-) -> List[Dict]:
-    """
-    Haalt de CCI-reeks op uit 83693NED.
-
-    Return:
-      [
-        {"period": "YYYYMMxx", "cci": float},
-        ...
-      ]
-
-    We gebruiken exact dezelfde URL als je healthcheck:
-    https://opendata.cbs.nl/ODataApi/OData/83693NED/TypedDataSet?$top=6000
-    en lezen hieruit:
-    - Perioden
-    - Consumentenvertrouwen_1
-    """
-    url = f"{BASE}/{dataset}/TypedDataSet?$top=6000"
-    resp = requests.get(url, timeout=30)
+    url = f"{BASE_URL}/{dataset}/TypedDataSet?$top={top}"
+    resp = requests.get(url, timeout=20)
     resp.raise_for_status()
     js = resp.json()
-    rows = js.get("value", [])
+    return js.get("value", [])
 
+
+def get_cci_series(months_back: int = 24) -> List[Dict]:
+    """
+    Haalt consumentenvertrouwen (CCI) op uit dataset 83693NED.
+
+    Return:
+        [
+            {"period": "1986MM04", "cci": 2.0},
+            {"period": "1986MM05", "cci": 8.0},
+            ...
+        ]
+    """
+    rows = _fetch_typed_dataset("83693NED", top=5000)
     if not rows:
         return []
 
-    # In jouw sample is dit duidelijk:
-    # "Perioden": "1986MM04"
-    # "Consumentenvertrouwen_1": 2
-    period_field = _pick_period_field(rows[0])
-    value_field = "Consumentenvertrouwen_1"
+    series: List[Dict] = []
 
-    out: List[Dict] = []
-    for it in rows:
-        per = it.get(period_field)
-        raw = it.get(value_field)
-        val = _to_float(raw)
-        if not per or val is None:
+    for r in rows:
+        period_code = r.get("Perioden")
+        if not period_code:
             continue
-        out.append({"period": str(per), "cci": val})
 
-    # sorteer op periodecode (bv. '1986MM04' → string-sort is prima)
-    out.sort(key=lambda x: x["period"])
-
-    if months_back and len(out) > months_back:
-        out = out[-months_back:]
-
-    return out
-
-
-def get_consumer_confidence(
-    dataset: str = "83693NED",
-    months_back: int = 3,
-) -> Dict:
-    """
-    Convenience: geef de laatste maand met CCI terug.
-    """
-    series = get_cci_series(months_back=months_back, dataset=dataset)
-    if not series:
-        return {}
-    return series[-1]  # laatste element = meest recent
-
-
-# ============================================================
-# 2) Detailhandelindex – 85828NED
-# ============================================================
-def get_retail_index(
-    series: str = "Ongecorrigeerd_1",
-    branch_code_or_title: str = "ALL",  # genegeerd, macro NL
-    months_back: int = 24,
-    dataset: str = "85828NED",
-) -> List[Dict]:
-    """
-    Haalt een generieke detailhandelindex uit 85828NED.
-
-    Belangrijk:
-    - Jouw sample laat zien dat de waarde-kolom hier 'Ongecorrigeerd_1' is.
-    - De eerste jaren zijn NULL, maar later komen er echte waarden.
-    - We negeren branches en middelen alle niet-NULL waarden per periode.
-
-    Return:
-      [
-        {
-          "period": "YYYYMMxx",
-          "retail_value": float,   # gemiddelde over alle branches
-          "series": "Ongecorrigeerd_1",
-          "branch": "ALL"
-        },
-        ...
-      ]
-    """
-    value_field = "Ongecorrigeerd_1"
-
-    url = f"{BASE}/{dataset}/TypedDataSet?$top=6000"
-    resp = requests.get(url, timeout=30)
-    resp.raise_for_status()
-    js = resp.json()
-    rows = js.get("value", [])
-
-    if not rows:
-        return []
-
-    period_field = _pick_period_field(rows[0])
-
-    # Verzamel per periode alle niet-lege waarden, gemiddeld per maand
-    per_map: Dict[str, List[float]] = {}
-
-    for it in rows:
-        per = it.get(period_field)
-        raw = it.get(value_field)
-        val = _to_float(raw)
-        if not per or val is None:
+        val = r.get("Consumentenvertrouwen_1")
+        try:
+            v = float(val)
+        except (TypeError, ValueError):
             continue
-        per_str = str(per)
-        per_map.setdefault(per_str, []).append(val)
 
-    if not per_map:
-        return []
-
-    out: List[Dict] = []
-    for per_str, vals in per_map.items():
-        if not vals:
-            continue
-        avg_val = float(sum(vals) / len(vals))
-        out.append(
+        series.append(
             {
-                "period": per_str,
-                "retail_value": avg_val,
-                "series": value_field,
-                "branch": "ALL",
+                "period": str(period_code),
+                "cci": v,
             }
         )
 
-    # sorteer op periode
-    out.sort(key=lambda x: x["period"])
+    # Sorteer op periode-string en neem de laatste N maanden
+    series = sorted(series, key=lambda x: x["period"])
+    if months_back and len(series) > months_back:
+        series = series[-months_back:]
 
-    if months_back and len(out) > months_back:
-        out = out[-months_back:]
-
-    return out
+    return series
 
 
-# ============================================================
-# 3) Postcode4 stub – voor context in de AI Copilot
-# ============================================================
-def get_cbs_stats_for_postcode4(postcode4: str) -> Dict:
+def get_retail_index(months_back: int = 24) -> List[Dict]:
     """
-    Simpele placeholder voor CBS-context op postcode4-niveau.
-    Nu nog demo-data; later kun je dit vervangen door echte buurt-/wijkstatistieken.
-    """
-    postcode4 = (postcode4 or "").strip()
-    if not postcode4:
-        return {}
+    Haalt een macro detailhandel-index uit dataset 85828NED.
 
-    return {
-        "postcode4": postcode4,
-        "avg_income_index": 100,          # NL = 100
-        "population_density_index": 110,  # iets boven het gemiddelde
-        "note": (
-            "Demo-indices op basis van CBS. "
-            "Vervang deze stub later door een echte postcode4-koppeling."
-        ),
-    }
+    We gebruiken:
+      - Perioden (bijv. '2000MM01')
+      - Ongecorrigeerd_1 als indexwaarde
+      - Gemiddelde over alle branches → 1 macroreeks
+
+    Return:
+        [
+            {"period": "2000MM01", "retail_value": 101.2},
+            {"period": "2000MM02", "retail_value": 102.5},
+            ...
+        ]
+    """
+    rows = _fetch_typed_dataset("85828NED", top=50000)
+    if not rows:
+        return []
+
+    by_period: Dict[str, list] = {}
+
+    for r in rows:
+        period_code = r.get("Perioden")
+        if not period_code:
+            continue
+
+        raw_val = r.get("Ongecorrigeerd_1")
+        # Veel vroege maanden zijn NULL: die slaan we gewoon over
+        if raw_val is None:
+            continue
+
+        try:
+            v = float(raw_val)
+        except (TypeError, ValueError):
+            continue
+
+        key = str(period_code)
+        by_period.setdefault(key, []).append(v)
+
+    series: List[Dict] = []
+    for period_code, vals in by_period.items():
+        if not vals:
+            continue
+        avg_val = sum(vals) / len(vals)
+        series.append(
+            {
+                "period": period_code,
+                "retail_value": avg_val,
+            }
+        )
+
+    # Sorteer en knip op months_back
+    series = sorted(series, key=lambda x: x["period"])
+    if months_back and len(series) > months_back:
+        series = series[-months_back:]
+
+    return series
