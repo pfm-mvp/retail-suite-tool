@@ -780,15 +780,17 @@ def main():
         region_month["region_turnover_index"] = np.nan
         region_month["region_footfall_index"] = np.nan
 
-    # --- 2) CBS detailhandelindex ophalen & normaliseren (indien beschikbaar) ---
-    try:
-        retail_series = get_retail_index(
-            series="Omzetontwikkeling_1",
-            branch_code_or_title="DH_TOTAAL",
-            months_back=24,
-        )
-    except Exception:
-        retail_series = []
+# --- 2) CBS detailhandelindex ophalen & normaliseren (indien beschikbaar) ---
+try:
+    retail_series = get_retail_index(
+        series="Omzetontwikkeling_1",
+        branch_code_or_title="DH_TOTAAL",
+        months_back=24,
+    )
+    cbs_retail_error = None
+except Exception as e:
+    retail_series = []
+    cbs_retail_error = repr(e)
 
     if retail_series:
         cbs_retail_df = pd.DataFrame(retail_series)
@@ -879,8 +881,10 @@ def main():
 
     try:
         cci_series = get_cci_series(months_back=24)
-    except Exception:
+        cci_error = None
+    except Exception as e:
         cci_series = []
+        cci_error = repr(e)
 
     cci_df = pd.DataFrame()
 
@@ -971,11 +975,10 @@ def main():
         st.write("df_all_raw (head):", df_all_raw.head())
         st.write("df_period (head):", df_period.head())
         st.write("Region monthly:", region_month.head())
-        st.write(
-            "CBS retail (sample):",
-            cbs_retail_month.head() if not cbs_retail_month.empty else "empty",
-        )
-        st.write("CCI (sample):", cci_df.head() if not cci_df.empty else "empty")
+        st.write("CBS retail (sample):", cbs_retail_month.head() if not cbs_retail_month.empty else "empty")
+        st.write("CBS retail error:", cbs_retail_error or "geen exception")
+        st.write("CCI (sample):", cci_df.head() if cci_series else "empty")
+        st.write("CCI error:", cci_error or "geen exception")
         st.write("Region weekly:", region_weekly.head())
         st.write("Pathzz weekly:", pathzz_weekly.head())
         st.write("Capture weekly:", capture_weekly.head())
