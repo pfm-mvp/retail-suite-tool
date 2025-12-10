@@ -827,7 +827,7 @@ def main():
         # Let op: lege branch_code_or_title => geen branch-filter, dus gewoon macro NL
         retail_series = get_retail_index(
             series="Omzetontwikkeling_1",
-            branch_code_or_title="",
+            branch_code_or_title="",  # leeg = geen branch-filter, macro NL
             months_back=24,
         )
         cbs_retail_error = None
