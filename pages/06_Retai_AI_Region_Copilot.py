@@ -285,6 +285,35 @@ def aggregate_weekly(df: pd.DataFrame) -> pd.DataFrame:
 
     return df.groupby("week_start", as_index=False).agg(agg_dict)
 
+@st.cache_data(ttl=600)
+def debug_cbs_endpoint(dataset: str, top: int = 3) -> dict:
+    """
+    Simpele healthcheck voor een CBS OData dataset.
+    Probeert https://opendata.cbs.nl/ODataApi/OData/{dataset}/TypedDataSet?$top={top}
+    op te halen en geeft status + eerste records terug.
+    """
+    url = f"https://opendata.cbs.nl/ODataApi/OData/{dataset}/TypedDataSet?$top={top}"
+    try:
+        resp = requests.get(url, timeout=15)
+        status = resp.status_code
+        try:
+            js = resp.json()
+            sample = js.get("value", [])[:top]
+        except Exception:
+            # fallback: tekst tonen als JSON niet lukt
+            sample = resp.text[:1000]
+        return {
+            "ok": resp.ok,
+            "url": url,
+            "status_code": status,
+            "sample": sample,
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "url": url,
+            "error": repr(e),
+        }
 
 # -------------
 # MAIN UI (Region view)
@@ -976,9 +1005,7 @@ except Exception as e:
         st.write("df_period (head):", df_period.head())
         st.write("Region monthly:", region_month.head())
         st.write("CBS retail (sample):", cbs_retail_month.head() if not cbs_retail_month.empty else "empty")
-        st.write("CBS retail error:", cbs_retail_error or "geen exception")
-        st.write("CCI (sample):", cci_df.head() if cci_series else "empty")
-        st.write("CCI error:", cci_error or "geen exception")
+        st.write("CCI (sample):", cci_df.head() if 'cci_df' in locals() and not cci_df.empty else "empty")
         st.write("Region weekly:", region_weekly.head())
         st.write("Pathzz weekly:", pathzz_weekly.head())
         st.write("Capture weekly:", capture_weekly.head())
@@ -986,6 +1013,15 @@ except Exception as e:
             "Store table (raw):",
             store_table.head() if not store_table.empty else "n.v.t.",
         )
+
+        # --- CBS healthchecks ---
+        st.markdown("#### 🔍 CBS endpoint healthcheck")
+
+        cci_debug = debug_cbs_endpoint("83693NED", top=3)
+        st.write("CCI 83693NED:", cci_debug)
+
+        retail_debug = debug_cbs_endpoint("85828NED", top=3)
+        st.write("Retail 85828NED:", retail_debug)
 
 
 if __name__ == "__main__":
