@@ -70,7 +70,7 @@ def get_retail_index(months_back: int = 24) -> List[Dict]:
       - Gemiddelde over alle branches → 1 macroreeks
     """
     # Belangrijk: CBS eist < 10000 records per query
-    rows = _fetch_typed_dataset("85828NED", top=10000)
+    rows = _fetch_typed_dataset("85828NED", top=1000)
     if not rows:
         return []
 
