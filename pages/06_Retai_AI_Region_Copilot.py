@@ -815,12 +815,17 @@ def main():
         region_month["region_footfall_index"] = np.nan
 
     # --- 2) CBS detailhandelindex ophalen & normaliseren (indien beschikbaar) ---
+    cbs_retail_month = pd.DataFrame()
+    cbs_retail_error = None
+
     try:
-        # branch_code_or_title leeg laten → macro NL, geen filter
+        # In de nieuwe cbs_service.get_retail_index() pakken we:
+        # - dataset 85828NED
+        # - Perioden
+        # - Ongecorrigeerd_1 als waarde
+        # en middelen we per maand over alle branches (branch = "ALL").
         retail_series = get_retail_index(
-            series="Omzetontwikkeling_1",
-            branch_code_or_title="",
-            months_back=24,
+            months_back=24,  # andere parameters worden in cbs_service genegeerd
         )
     except Exception as e:
         retail_series = []
@@ -829,7 +834,7 @@ def main():
     if retail_series:
         cbs_retail_df = pd.DataFrame(retail_series)
 
-        # 'period' is bv. '2024MM06' → datum = 2024-06-15
+        # 'period' is bv. '2000MM01' → datum = 2000-01-15
         cbs_retail_df["date"] = pd.to_datetime(
             cbs_retail_df["period"].str[:4]
             + "-"
