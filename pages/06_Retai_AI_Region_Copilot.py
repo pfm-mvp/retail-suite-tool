@@ -1018,9 +1018,68 @@ def main():
             radar_df_local = radar_df_local.copy()
             radar_df_local["radar_score"] = radar_df_local["radar_score"].round(0)
 
+            # ---------- 1) Samenvatting + visuele potentie ----------
+            pot_df = radar_df_local.copy()
+            # alleen positieve potentie meenemen
+            pot_df["potential_annual_pos"] = pot_df["potential_annual"].clip(lower=0)
+
+            total_pot_annual = pot_df["potential_annual_pos"].sum(skipna=True)
+
+            # Top 3 winkels qua jaarpotentieel
+            top3 = pot_df.sort_values("potential_annual_pos", ascending=False).head(3)
+            top3_sum = top3["potential_annual_pos"].sum(skipna=True)
+
             st.markdown("### Regionale winkelradar (samengestelde index)")
 
-            # ---- Tabel: compact, met potentie in euro’s ----
+            # Highlight-blok met totalen
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.metric(
+                    "Totaal jaarpotentieel in deze regio",
+                    fmt_eur(total_pot_annual) if total_pot_annual > 0 else "–",
+                )
+            with col_b:
+                st.metric(
+                    "Top 3 winkels – jaarpotentieel",
+                    fmt_eur(top3_sum) if top3_sum > 0 else "–",
+                )
+
+            # Bar chart: jaarpotentieel per winkel
+            chart_df = pot_df[pot_df["potential_annual_pos"] > 0].copy()
+            if not chart_df.empty:
+                chart_df = chart_df.rename(columns={"store_name": "Winkel"})
+                pot_chart = (
+                    alt.Chart(chart_df)
+                    .mark_bar()
+                    .encode(
+                        y=alt.Y(
+                            "Winkel:N",
+                            sort="-x",
+                            title="Winkel",
+                        ),
+                        x=alt.X(
+                            "potential_annual_pos:Q",
+                            title="Jaarpotentieel (extra omzet in €)",
+                        ),
+                        tooltip=[
+                            alt.Tooltip("Winkel:N", title="Winkel"),
+                            alt.Tooltip(
+                                "potential_annual_pos:Q",
+                                title="Jaarpotentieel",
+                                format=",.0f",
+                            ),
+                        ],
+                    )
+                    .properties(height=260)
+                )
+                st.altair_chart(pot_chart, use_container_width=True)
+
+                st.caption(
+                    "Balklengte = extra omzet per jaar als de winkel op regiomedian per m² zou draaien. "
+                    "Dit is **puur latent potentieel**, geen forecast."
+                )
+
+            # ---------- 2) Tabel: radar + potentie ----------
             tbl_rad = radar_df_local.copy()
 
             # Format kolommen
@@ -1038,11 +1097,11 @@ def main():
                 )
             if "potential_period" in tbl_rad.columns:
                 tbl_rad["potential_period"] = tbl_rad["potential_period"].map(
-                    lambda x: fmt_eur(x) if not pd.isna(x) else "-"
+                    lambda x: fmt_eur(x) if not pd.isna(x) and x > 0 else "-"
                 )
             if "potential_annual" in tbl_rad.columns:
                 tbl_rad["potential_annual"] = tbl_rad["potential_annual"].map(
-                    lambda x: fmt_eur(x) if not pd.isna(x) else "-"
+                    lambda x: fmt_eur(x) if not pd.isna(x) and x > 0 else "-"
                 )
 
             tbl_rad["radar_score"] = tbl_rad["radar_score"].map(
@@ -1055,7 +1114,6 @@ def main():
                     "store_name": "Winkel",
                     "radar_score": "Radar-score",
                     "headline": "Status",
-                    # korte tekst blijft in tabel, maar we gaan details onder de tabel tonen
                     "short_reason": "Korte toelichting",
                     "turnover": "Omzet",
                     "footfall": "Footfall",
@@ -1073,13 +1131,13 @@ def main():
                         "Winkel",
                         "Radar-score",
                         "Status",
-                        "Korte toelichting",
+                        "Potentie (jaar, proj.)",
+                        "Potentie (periode)",
                         "Omzet",
                         "Footfall",
                         "Gem. besteding/visitor",
                         "Omzet per m²",
-                        "Potentie (periode)",
-                        "Potentie (jaar, proj.)",
+                        "Korte toelichting",
                     ]
                 ],
                 use_container_width=True,
@@ -1087,12 +1145,12 @@ def main():
 
             st.caption(
                 "De radar-score combineert omzet, footfall, besteding per bezoeker en omzet per m². "
-                "Potentie (jaar) is de extra omzet in € als de winkel op regiomedian per m² zou draaien, "
-                "geprojecteerd naar een heel jaar. "
+                "De **potentie-kolommen** laten zien hoeveel extra omzet er in deze periode en op jaarbasis mogelijk is "
+                "als de winkel op regiomedian per m² zou draaien. "
                 "🟢 = gaat goed, 🟠 = aandacht nodig, 🔴 = presteert onder verwachting."
             )
 
-            # ---- Detail-toelichting per winkel in expanders (beter leesbaar) ----
+            # ---------- 3) Detail-toelichting per winkel ----------
             st.markdown("#### Toelichting per winkel")
 
             for _, r in radar_df_local.iterrows():
