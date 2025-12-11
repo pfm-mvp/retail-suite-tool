@@ -1003,369 +1003,279 @@ def main():
             "Geen bruikbare CCI-data beschikbaar vanuit de CBS-API (of geen data in de gekozen periode)."
         )
 
-    # ----------------------------------------------------
-    # Store Vitality Index (SVI) – per winkel + regio gauge
-    # ----------------------------------------------------
-    radar_df = pd.DataFrame()  # voor debug
-
-    if store_key_col is not None:
-        svi_df = build_store_vitality(
-            df_period=df_period,
-            region_shops=region_shops,
-            store_key_col=store_key_col,
-        )
-
-        if not svi_df.empty:
-            # --- Regio Vitality Index (radial gauge) ---
-            # Regionale index op basis van laatste maand(en) + SVI
-            last_turn_idx = (
-                region_month["region_turnover_index"].dropna().iloc[-1]
-                if "region_turnover_index" in region_month.columns
-                and region_month["region_turnover_index"].notna().any()
-                else np.nan
-            )
-            last_foot_idx = (
-                region_month["region_footfall_index"].dropna().iloc[-1]
-                if "region_footfall_index" in region_month.columns
-                and region_month["region_footfall_index"].notna().any()
-                else np.nan
-            )
-            last_cbs_idx = (
-                cbs_retail_month["cbs_retail_index"].dropna().iloc[-1]
-                if (not cbs_retail_month.empty)
-                and "cbs_retail_index" in cbs_retail_month.columns
-                and cbs_retail_month["cbs_retail_index"].notna().any()
-                else np.nan
-            )
-            last_cci_idx = (
-                cci_df["cci_index"].dropna().iloc[-1]
-                if (not cci_df.empty)
-                and "cci_index" in cci_df.columns
-                and cci_df["cci_index"].notna().any()
-                else np.nan
-            )
-
-            macro_components = [
-                v for v in [last_turn_idx, last_foot_idx, last_cbs_idx, last_cci_idx]
-                if not np.isnan(v)
-            ]
-            if macro_components:
-                macro_avg = float(np.mean(macro_components))
-                # 50 → 0, 100 → 50, 150 → 100 (clamp)
-                macro_clamped = float(np.clip(macro_avg, 50, 150))
-                region_svi = (macro_clamped - 50) / (150 - 50) * 100.0
-            else:
-                # fallback: gemiddelde store-SVI
-                region_svi = float(svi_df["svi_score"].mean())
-
-            region_svi = float(np.clip(region_svi, 0, 100))
-
-            # Classificatie voor regio
-            if region_svi >= 75:
-                region_status = "High performance"
-                fill_color = "#22c55e"
-            elif region_svi >= 60:
-                region_status = "Good / stable"
-                fill_color = "#f97316"
-            elif region_svi >= 45:
-                region_status = "Attention required"
-                fill_color = "#facc15"
-            else:
-                region_status = "Under pressure"
-                fill_color = "#ef4444"
-
-            empty_color = "#e5e7eb"
-
-            gauge_df = pd.DataFrame(
-                {
-                    "segment": ["filled", "empty"],
-                    "value": [region_svi, max(0.0, 100.0 - region_svi)],
-                }
-            )
-
-            st.markdown("### Regio Vitality Index")
-            col_g1, col_g2 = st.columns([1, 1.2])
-
-            with col_g1:
-                gauge_arc = (
-                    alt.Chart(gauge_df)
-                    .mark_arc(innerRadius=60, outerRadius=80)
-                    .encode(
-                        theta="value:Q",
-                        color=alt.Color(
-                            "segment:N",
-                            scale=alt.Scale(
-                                domain=["filled", "empty"],
-                                range=[fill_color, empty_color],
-                            ),
-                            legend=None,
-                        ),
-                    )
-                    .properties(width=260, height=260)
-                )
-
-                gauge_text = (
-                    alt.Chart(pd.DataFrame({"label": [f"{region_svi:.0f}"]}))
-                    .mark_text(size=32, fontWeight="bold")
-                    .encode(text="label:N")
-                )
-
-                st.altair_chart(gauge_arc + gauge_text, use_container_width=False)
-
-            with col_g2:
-                st.markdown(
-                    f"""
-                    **Regio Vitality Index:** {region_svi:.0f}  
-                    **Status:** {region_status}  
-
-                    Deze index combineert:
-                    - Omzet- en footfall-ontwikkeling in de regio  
-                    - Macro-ontwikkelingen (CBS detailhandelindex & CCI)  
-                    - Store-level performance (SVI)  
-
-                    Hoe dichter bij 100, hoe gezonder de regio presteert
-                    ten opzichte van haar eigen historische niveau.
-                    """
-                )
 
     # ----------------------------------------------------
-    # Store Vitality Index (SVI) – per winkel + regio gauge
+    # Store Vitality Index (SVI) – per winkel + Regio Vitality
     # ----------------------------------------------------
     radar_df = pd.DataFrame()  # voor debug
 
     if store_key_col is not None:
-        svi_df = build_store_vitality(
-            df_period=df_period,
-            region_shops=region_shops,
+        # 1) SVI voor álle winkels in alle regio's
+        svi_all = build_store_vitality(
+            df_period=df_period,      # LET OP: df_period = alle shops in periode
+            region_shops=merged,      # mapping met alle winkels + sqm + labels
             store_key_col=store_key_col,
         )
 
-        if not svi_df.empty:
-            # --- Regio Vitality Index (radial gauge) ---
-            last_turn_idx = (
-                region_month["region_turnover_index"].dropna().iloc[-1]
-                if "region_turnover_index" in region_month.columns
-                and region_month["region_turnover_index"].notna().any()
-                else np.nan
-            )
-            last_foot_idx = (
-                region_month["region_footfall_index"].dropna().iloc[-1]
-                if "region_footfall_index" in region_month.columns
-                and region_month["region_footfall_index"].notna().any()
-                else np.nan
-            )
-            last_cbs_idx = (
-                cbs_retail_month["cbs_retail_index"].dropna().iloc[-1]
-                if (not cbs_retail_month.empty)
-                and "cbs_retail_index" in cbs_retail_month.columns
-                and cbs_retail_month["cbs_retail_index"].notna().any()
-                else np.nan
-            )
-            last_cci_idx = (
-                cci_df["cci_index"].dropna().iloc[-1]
-                if (not cci_df.empty)
-                and "cci_index" in cci_df.columns
-                and cci_df["cci_index"].notna().any()
-                else np.nan
+        if not svi_all.empty:
+            # Regio-kolom erbij hangen op basis van merged
+            region_lookup = merged[["id", "region"]].drop_duplicates()
+            svi_all = svi_all.merge(
+                region_lookup,
+                left_on=store_key_col,
+                right_on="id",
+                how="left",
             )
 
-            macro_components = [
-                v for v in [last_turn_idx, last_foot_idx, last_cbs_idx, last_cci_idx]
-                if not np.isnan(v)
-            ]
-            if macro_components:
-                macro_avg = float(np.mean(macro_components))
-                # 50 → 0, 100 → 50, 150 → 100 (clamp)
-                macro_clamped = float(np.clip(macro_avg, 50, 150))
-                region_svi = (macro_clamped - 50) / (150 - 50) * 100.0
+            # 2) Region Vitality Index per regio (gemiddelde SVI van winkels)
+            region_scores = (
+                svi_all.groupby("region", as_index=False)["svi_score"]
+                .mean()
+                .rename(columns={"svi_score": "region_svi"})
+            )
+
+            # Geselecteerde regio eruit halen
+            row_cur = region_scores[region_scores["region"] == region_choice]
+            if row_cur.empty:
+                st.info("Geen SVI-berekening mogelijk voor deze regio.")
             else:
-                # fallback: gemiddelde store-SVI
-                region_svi = float(svi_df["svi_score"].mean())
+                region_svi = float(row_cur["region_svi"].iloc[0])
+                region_svi = float(np.clip(region_svi, 0, 100))
 
-            region_svi = float(np.clip(region_svi, 0, 100))
+                # Classificatie (0–100)
+                if region_svi >= 75:
+                    region_status = "High performance"
+                    fill_color = "#22c55e"
+                elif region_svi >= 60:
+                    region_status = "Good / stable"
+                    fill_color = "#f97316"
+                elif region_svi >= 45:
+                    region_status = "Attention required"
+                    fill_color = "#facc15"
+                else:
+                    region_status = "Under pressure"
+                    fill_color = "#ef4444"
 
-            # Classificatie voor regio (zelfde logica als SVI 0–100)
-            if region_svi >= 75:
-                region_status = "High performance"
-                fill_color = "#22c55e"
-            elif region_svi >= 60:
-                region_status = "Good / stable"
-                fill_color = "#f97316"
-            elif region_svi >= 45:
-                region_status = "Attention required"
-                fill_color = "#facc15"
-            else:
-                region_status = "Under pressure"
-                fill_color = "#ef4444"
+                empty_color = "#e5e7eb"
 
-            empty_color = "#e5e7eb"
+                gauge_df = pd.DataFrame(
+                    {
+                        "segment": ["filled", "empty"],
+                        "value": [region_svi, max(0.0, 100.0 - region_svi)],
+                    }
+                )
 
-            gauge_df = pd.DataFrame(
-                {
-                    "segment": ["filled", "empty"],
-                    "value": [region_svi, max(0.0, 100.0 - region_svi)],
-                }
-            )
+                st.markdown("### Regio Vitality Index")
 
-            st.markdown("### Regio Vitality Index")
-            col_g1, col_g2 = st.columns([1, 1.2])
+                col_g1, col_g2 = st.columns([1, 1.6])
 
-            with col_g1:
-                gauge_arc = (
-                    alt.Chart(gauge_df)
-                    .mark_arc(innerRadius=60, outerRadius=80)
-                    .encode(
-                        theta="value:Q",
-                        color=alt.Color(
-                            "segment:N",
-                            scale=alt.Scale(
-                                domain=["filled", "empty"],
-                                range=[fill_color, empty_color],
+                # --- Gauge voor geselecteerde regio ---
+                with col_g1:
+                    gauge_arc = (
+                        alt.Chart(gauge_df)
+                        .mark_arc(innerRadius=60, outerRadius=80)
+                        .encode(
+                            theta="value:Q",
+                            color=alt.Color(
+                                "segment:N",
+                                scale=alt.Scale(
+                                    domain=["filled", "empty"],
+                                    range=[fill_color, empty_color],
+                                ),
+                                legend=None,
                             ),
-                            legend=None,
-                        ),
+                        )
+                        .properties(width=260, height=260)
                     )
-                    .properties(width=260, height=260)
-                )
 
-                gauge_text = (
-                    alt.Chart(pd.DataFrame({"label": [f"{region_svi:.0f}"]}))
-                    .mark_text(size=32, fontWeight="bold")
-                    .encode(text="label:N")
-                )
+                    gauge_text = (
+                        alt.Chart(pd.DataFrame({"label": [f"{region_svi:.0f}"]}))
+                        .mark_text(size=32, fontWeight="bold")
+                        .encode(text="label:N")
+                    )
 
-                st.altair_chart(gauge_arc + gauge_text, use_container_width=False)
+                    st.altair_chart(gauge_arc + gauge_text, use_container_width=False)
 
-            with col_g2:
-                st.markdown(
-                    f"""
-                    **Regio Vitality Index:** {region_svi:.0f}  
-                    **Status:** {region_status}  
+                with col_g2:
+                    st.markdown(
+                        f"""
+                        **Regio Vitality Index (geselecteerd):** {region_svi:.0f}  
+                        **Status:** {region_status}  
 
-                    Deze index combineert:
-                    - Omzet- en footfall-ontwikkeling in de regio  
-                    - Macro-ontwikkelingen (CBS detailhandelindex & CCI)  
-                    - Store-level performance (SVI)  
+                        Deze index is het gemiddelde van de Store Vitality Index (SVI)
+                        van alle winkels in deze regio (0–100).  
+                        Hoe dichter bij 100, hoe gezonder de regio presteert binnen de keten.
+                        """
+                    )
 
-                    Hoe dichter bij 100, hoe gezonder de regio presteert
-                    ten opzichte van haar eigen historische niveau.
-                    """
-                )
+                    # --- Benchmark: RVI vs andere regio's ---
+                    st.markdown("**Vergelijking met andere regio's**")
 
-            # --- SVI-per-winkel + potentiële omzet ---
-            period_days = (end_ts - start_ts).days + 1
-            year_factor = 365.0 / period_days if period_days > 0 else 1.0
+                    chart_regions = region_scores.copy()
+                    chart_regions["is_selected"] = chart_regions["region"] == region_choice
 
-            svi_df = svi_df.copy()
-            svi_df["svi_score"] = svi_df["svi_score"].round(0)
-            svi_df["profit_potential_year"] = (
-                svi_df["profit_potential_period"] * year_factor
-            )
-
-            # Ranking-chart (bars) op SVI – 0–100 schaal
-            chart_rank = (
-                alt.Chart(
-                    svi_df.sort_values("svi_score", ascending=False)
-                )
-                .mark_bar()
-                .encode(
-                    x=alt.X(
-                        "svi_score:Q",
-                        title="Store Vitality Index (0–100)",
-                        scale=alt.Scale(domain=[0, 100]),
-                    ),
-                    y=alt.Y(
-                        "store_name:N",
-                        sort="-x",
-                        title="Winkel",
-                    ),
-                    color=alt.Color(
-                        "svi_status:N",
-                        title="Status",
-                        scale=alt.Scale(
-                            domain=[
-                                "High performance",
-                                "Good / stable",
-                                "Attention required",
-                                "Under pressure",
+                    region_chart = (
+                        alt.Chart(chart_regions)
+                        .mark_bar()
+                        .encode(
+                            x=alt.X(
+                                "region_svi:Q",
+                                title="Region Vitality Index (0–100)",
+                                scale=alt.Scale(domain=[0, 100]),
+                            ),
+                            y=alt.Y(
+                                "region:N",
+                                sort="-x",
+                                title="Regio",
+                            ),
+                            color=alt.Color(
+                                "is_selected:N",
+                                scale=alt.Scale(
+                                    domain=[True, False],
+                                    range=["#1d4ed8", "#e5e7eb"],
+                                ),
+                                legend=None,
+                            ),
+                            tooltip=[
+                                alt.Tooltip("region:N", title="Regio"),
+                                alt.Tooltip(
+                                    "region_svi:Q",
+                                    title="RVI",
+                                    format=".0f",
+                                ),
                             ],
-                            range=["#22c55e", "#f97316", "#facc15", "#ef4444"],
-                        ),
-                    ),
-                    tooltip=[
-                        alt.Tooltip("store_name:N", title="Winkel"),
-                        alt.Tooltip("svi_score:Q", title="SVI", format=".0f"),
-                        alt.Tooltip("footfall_index_region:Q", title="Footfall-index", format=".0f"),
-                        alt.Tooltip("capture_index_region:Q", title="Capture-index", format=".0f"),
-                        alt.Tooltip(
-                            "profit_potential_year:Q",
-                            title="Jaarpotentieel (€)",
-                            format=",.0f",
-                        ),
-                    ],
+                        )
+                        .properties(height=220)
+                    )
+
+                    st.altair_chart(region_chart, use_container_width=True)
+
+            # 3) Store Vitality ranking voor alleen de geselecteerde regio
+            svi_region = svi_all[svi_all["region"] == region_choice].copy()
+            if svi_region.empty:
+                st.info("Geen store-level SVI beschikbaar voor deze regio.")
+            else:
+                # Jaarprojectie van het potentiëel
+                period_days = (end_ts - start_ts).days + 1
+                year_factor = 365.0 / period_days if period_days > 0 else 1.0
+
+                svi_region["svi_score"] = svi_region["svi_score"].round(0)
+                svi_region["profit_potential_year"] = (
+                    svi_region["profit_potential_period"] * year_factor
                 )
-                .properties(height=260)
-            )
 
-            st.markdown("### Store Vitality ranking – winkels in deze regio")
-            st.altair_chart(chart_rank, use_container_width=True)
+                # Ranking-chart (bars) op SVI – 0–100 schaal
+                chart_rank = (
+                    alt.Chart(
+                        svi_region.sort_values("svi_score", ascending=False)
+                    )
+                    .mark_bar()
+                    .encode(
+                        x=alt.X(
+                            "svi_score:Q",
+                            title="Store Vitality Index (0–100)",
+                            scale=alt.Scale(domain=[0, 100]),
+                        ),
+                        y=alt.Y(
+                            "store_name:N",
+                            sort="-x",
+                            title="Winkel",
+                        ),
+                        color=alt.Color(
+                            "svi_status:N",
+                            title="Status",
+                            scale=alt.Scale(
+                                domain=[
+                                    "High performance",
+                                    "Good / stable",
+                                    "Attention required",
+                                    "Under pressure",
+                                ],
+                                range=["#22c55e", "#f97316", "#facc15", "#ef4444"],
+                            ),
+                        ),
+                        tooltip=[
+                            alt.Tooltip("store_name:N", title="Winkel"),
+                            alt.Tooltip("svi_score:Q", title="SVI", format=".0f"),
+                            alt.Tooltip(
+                                "footfall_index_region:Q",
+                                title="Footfall-index",
+                                format=".0f",
+                            ),
+                            alt.Tooltip(
+                                "capture_index_region:Q",
+                                title="Capture-index",
+                                format=".0f",
+                            ),
+                            alt.Tooltip(
+                                "profit_potential_year:Q",
+                                title="Jaarpotentieel (€)",
+                                format=",.0f",
+                            ),
+                        ],
+                    )
+                    .properties(height=260)
+                )
 
-            # Tabel met belangrijkste KPI's + korte toelichting
-            table = svi_df.copy()
-            table["Omzet"] = table["turnover"].map(fmt_eur)
-            table["Footfall"] = table["footfall"].map(fmt_int)
-            table["Gem. besteding/visitor"] = table["sales_per_visitor"].map(
-                lambda x: f"€ {x:.2f}".replace(".", ",") if not pd.isna(x) else "-"
-            )
-            table["Omzet per m²"] = table["turnover_per_sqm"].map(
-                lambda x: fmt_eur(x) if not pd.isna(x) else "-"
-            )
-            table["Footfall-index (regio = 100)"] = table["footfall_index_region"].map(
-                lambda x: fmt_pct(x - 100) if not pd.isna(x) else "-"
-            )
-            table["Capture-index (regio = 100)"] = table["capture_index_region"].map(
-                lambda x: fmt_pct(x - 100) if not pd.isna(x) else "-"
-            )
-            table["Jaarpotentieel"] = table["profit_potential_year"].map(fmt_eur)
+                st.markdown("### Store Vitality ranking – winkels in deze regio")
+                st.altair_chart(chart_rank, use_container_width=True)
 
-            view_cols = table.rename(
-                columns={
-                    "svi_icon": "",
-                    "store_name": "Winkel",
-                    "svi_score": "SVI-score",
-                    "svi_status": "Status",
-                    "reason_short": "Korte toelichting",
-                }
-            )
+                # Tabel met belangrijkste KPI's + korte toelichting
+                table = svi_region.copy()
+                table["Omzet"] = table["turnover"].map(fmt_eur)
+                table["Footfall"] = table["footfall"].map(fmt_int)
+                table["Gem. besteding/visitor"] = table["sales_per_visitor"].map(
+                    lambda x: f"€ {x:.2f}".replace(".", ",") if not pd.isna(x) else "-"
+                )
+                table["Omzet per m²"] = table["turnover_per_sqm"].map(
+                    lambda x: fmt_eur(x) if not pd.isna(x) else "-"
+                )
+                table["Footfall-index (regio = 100)"] = table[
+                    "footfall_index_region"
+                ].map(lambda x: fmt_pct(x - 100) if not pd.isna(x) else "-")
+                table["Capture-index (regio = 100)"] = table[
+                    "capture_index_region"
+                ].map(lambda x: fmt_pct(x - 100) if not pd.isna(x) else "-")
+                table["Jaarpotentieel"] = table["profit_potential_year"].map(fmt_eur)
 
-            st.dataframe(
-                view_cols[
-                    [
-                        "",
-                        "Winkel",
-                        "SVI-score",
-                        "Status",
-                        "Korte toelichting",
-                        "Omzet",
-                        "Footfall",
-                        "Gem. besteding/visitor",
-                        "Omzet per m²",
-                        "Footfall-index (regio = 100)",
-                        "Capture-index (regio = 100)",
-                        "Jaarpotentieel",
-                    ]
-                ],
-                use_container_width=True,
-            )
+                view_cols = table.rename(
+                    columns={
+                        "svi_icon": "",
+                        "store_name": "Winkel",
+                        "svi_score": "SVI-score",
+                        "svi_status": "Status",
+                        "reason_short": "Korte toelichting",
+                    }
+                )
 
-            st.caption(
-                "De SVI combineert omzet, footfall, besteding per bezoeker en omzet per m², "
-                "met daarbovenop een index t.o.v. de regio voor footfall en 'fair share' van traffic "
-                "gebaseerd op m². Jaarpotentieel = ruw geannualiseerd omzetverschil t.o.v. regiomedian "
-                "per m² binnen de gekozen periode."
-            )
+                st.dataframe(
+                    view_cols[
+                        [
+                            "",
+                            "Winkel",
+                            "SVI-score",
+                            "Status",
+                            "Korte toelichting",
+                            "Omzet",
+                            "Footfall",
+                            "Gem. besteding/visitor",
+                            "Omzet per m²",
+                            "Footfall-index (regio = 100)",
+                            "Capture-index (regio = 100)",
+                            "Jaarpotentieel",
+                        ]
+                    ],
+                    use_container_width=True,
+                )
 
-            radar_df = svi_df
+                st.caption(
+                    "De SVI combineert omzet, footfall, besteding per bezoeker en omzet per m², "
+                    "met daarbovenop een index t.o.v. de regio voor footfall en 'fair share' van traffic "
+                    "gebaseerd op m². Jaarpotentieel = ruw geannualiseerd omzetverschil t.o.v. regiomedian "
+                    "per m² binnen de gekozen periode."
+                )
+
+                radar_df = svi_region
 
     # -----------------------
     # Debug-sectie
