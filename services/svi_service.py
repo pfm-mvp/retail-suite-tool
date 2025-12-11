@@ -24,7 +24,7 @@ def build_store_vitality(
     store_key_col: str,
 ) -> pd.DataFrame:
     """
-    Bouwt per winkel een Store Vitality Index (SVI, 0–100) + footfall/capture index
+    Bouwt per winkel een Store Vitality Index (SVI, 0–200) + footfall/capture index
     en omzetpotentieel.
 
     Verwacht:
@@ -46,7 +46,7 @@ def build_store_vitality(
     - turnover_per_sqm
     - footfall_index_region (100 = regiomedian)
     - capture_index_region (100 = fair share vs m²-aandeel)
-    - svi_score (0–100)
+    - svi_score (0–200)
     - svi_status (tekst)
     - svi_icon (emoji)
     - reason_short (korte toelichting)
@@ -135,7 +135,6 @@ def build_store_vitality(
     # ---------------------------
 
     # 4.1 Commercial output (omzet + omzet/m² + SPV)
-    #     (we normaliseren een samengestelde metric)
     commercial_metric = (
         agg["turnover"].fillna(0) * 0.5
         + agg["turnover_per_sqm"].fillna(0) * 0.3
@@ -157,26 +156,30 @@ def build_store_vitality(
     agg["p_space"] = _normalize(agg["turnover_per_sqm"])
 
     # ---------------------------
-    # 5. Eindscore (SVI 0–100)
+    # 5. Eindscore (SVI 0–200)
     # ---------------------------
-    agg["svi_score"] = (
+    # Eerst een interne score 0–100 op basis van de pijlers...
+    svi_internal = (
         agg["p_commercial"] * 0.45
         + agg["p_market"] * 0.30
         + agg["p_customer"] * 0.15
         + agg["p_space"] * 0.10
     )
 
+    # ...dan schalen naar 0–200 volgens jouw SVI-definitie
+    agg["svi_score"] = svi_internal * 2.0
+
     # ---------------------------
-    # 6. Status & icon + korte reason
+    # 6. Status & icon + korte reason (op basis van 0–200 schaal)
     # ---------------------------
     def classify(score: float):
         if pd.isna(score):
             return "Onbekend", "⚪"
-        if score >= 75:
+        if score >= 150:
             return "High performance", "🟢"
-        elif score >= 60:
-            return "Good / stable", "🟠"
-        elif score >= 45:
+        elif score >= 110:
+            return "Good / stable", "🟢"
+        elif score >= 90:
             return "Attention required", "🟠"
         else:
             return "Under pressure", "🔴"
@@ -197,7 +200,9 @@ def build_store_vitality(
             reasons.append("Te weinig data om een goede beoordeling te maken.")
             continue
 
-        if s >= 75:
+        # Let op: thresholds blijven inhoudelijk gelijk (ongeveer),
+        # maar de schaal is verdubbeld (0–200 i.p.v. 0–100).
+        if s >= 150:
             if pc >= pm:
                 reasons.append(
                     "Sterke omzet en m²-productiviteit; focus op vasthouden en premium beleving."
@@ -206,7 +211,7 @@ def build_store_vitality(
                 reasons.append(
                     "Sterke positie in traffic en marktaandeel; benut dit met hogere SPV."
                 )
-        elif s >= 60:
+        elif s >= 110:
             if pv < 50:
                 reasons.append(
                     "Boven regiogemiddelde, maar besteding per bezoeker blijft achter – focus op ATV/upsell."
@@ -215,7 +220,7 @@ def build_store_vitality(
                 reasons.append(
                     "Goede basis; optimaliseer traffic of m²-benutting voor extra groei."
                 )
-        elif s >= 45:
+        elif s >= 90:
             if pm < 50:
                 reasons.append(
                     "Onder regio op traffic/capture – meer instroom en zichtbaarheid nodig."
