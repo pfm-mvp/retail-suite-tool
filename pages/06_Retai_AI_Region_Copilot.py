@@ -15,8 +15,7 @@ from services.cbs_service import (
     get_cci_series,
     get_retail_index,
 )
-# >>> NEW: radar-service import
-from services.radar_service import build_region_store_radar
+from services.svi_service import build_store_vitality
 
 st.set_page_config(
     page_title="PFM Region Performance Copilot",
@@ -1004,169 +1003,247 @@ def main():
             "Geen bruikbare CCI-data beschikbaar vanuit de CBS-API (of geen data in de gekozen periode)."
         )
 
-    # >>> Regionale winkelradar – samengestelde index + potentie
+    # ----------------------------------------------------
+    # Store Vitality Index (SVI) – per winkel + regio gauge
+    # ----------------------------------------------------
+    radar_df = pd.DataFrame()  # voor debug
+
     if store_key_col is not None:
-        radar_df_local = build_region_store_radar(
+        svi_df = build_store_vitality(
             df_period=df_period,
             region_shops=region_shops,
             store_key_col=store_key_col,
-            capture_weekly=capture_weekly,
-            cbs_retail_month=cbs_retail_month,
-            cci_df=cci_df,
         )
-        if not radar_df_local.empty:
-            radar_df_local = radar_df_local.copy()
-            radar_df_local["radar_score"] = radar_df_local["radar_score"].round(0)
 
-            # ---------- 1) Samenvatting + visuele potentie ----------
-            pot_df = radar_df_local.copy()
-            # alleen positieve potentie meenemen
-            pot_df["potential_annual_pos"] = pot_df["potential_annual"].clip(lower=0)
-
-            total_pot_annual = pot_df["potential_annual_pos"].sum(skipna=True)
-
-            # Top 3 winkels qua jaarpotentieel
-            top3 = pot_df.sort_values("potential_annual_pos", ascending=False).head(3)
-            top3_sum = top3["potential_annual_pos"].sum(skipna=True)
-
-            st.markdown("### Regionale winkelradar (samengestelde index)")
-
-            # Highlight-blok met totalen
-            col_a, col_b = st.columns(2)
-            with col_a:
-                st.metric(
-                    "Totaal jaarpotentieel in deze regio",
-                    fmt_eur(total_pot_annual) if total_pot_annual > 0 else "–",
-                )
-            with col_b:
-                st.metric(
-                    "Top 3 winkels – jaarpotentieel",
-                    fmt_eur(top3_sum) if top3_sum > 0 else "–",
-                )
-
-            # Bar chart: jaarpotentieel per winkel
-            chart_df = pot_df[pot_df["potential_annual_pos"] > 0].copy()
-            if not chart_df.empty:
-                chart_df = chart_df.rename(columns={"store_name": "Winkel"})
-                pot_chart = (
-                    alt.Chart(chart_df)
-                    .mark_bar()
-                    .encode(
-                        y=alt.Y(
-                            "Winkel:N",
-                            sort="-x",
-                            title="Winkel",
-                        ),
-                        x=alt.X(
-                            "potential_annual_pos:Q",
-                            title="Jaarpotentieel (extra omzet in €)",
-                        ),
-                        tooltip=[
-                            alt.Tooltip("Winkel:N", title="Winkel"),
-                            alt.Tooltip(
-                                "potential_annual_pos:Q",
-                                title="Jaarpotentieel",
-                                format=",.0f",
-                            ),
-                        ],
-                    )
-                    .properties(height=260)
-                )
-                st.altair_chart(pot_chart, use_container_width=True)
-
-                st.caption(
-                    "Balklengte = extra omzet per jaar als de winkel op regiomedian per m² zou draaien. "
-                    "Dit is **puur latent potentieel**, geen forecast."
-                )
-
-            # ---------- 2) Tabel: radar + potentie ----------
-            tbl_rad = radar_df_local.copy()
-
-            # Format kolommen
-            if "turnover" in tbl_rad.columns:
-                tbl_rad["turnover"] = tbl_rad["turnover"].map(fmt_eur)
-            if "footfall" in tbl_rad.columns:
-                tbl_rad["footfall"] = tbl_rad["footfall"].map(fmt_int)
-            if "sales_per_visitor" in tbl_rad.columns:
-                tbl_rad["sales_per_visitor"] = tbl_rad["sales_per_visitor"].map(
-                    lambda x: f"€ {x:.2f}".replace(".", ",") if not pd.isna(x) else "-"
-                )
-            if "turnover_per_sqm" in tbl_rad.columns:
-                tbl_rad["turnover_per_sqm"] = tbl_rad["turnover_per_sqm"].map(
-                    lambda x: fmt_eur(x) if not pd.isna(x) else "-"
-                )
-            if "potential_period" in tbl_rad.columns:
-                tbl_rad["potential_period"] = tbl_rad["potential_period"].map(
-                    lambda x: fmt_eur(x) if not pd.isna(x) and x > 0 else "-"
-                )
-            if "potential_annual" in tbl_rad.columns:
-                tbl_rad["potential_annual"] = tbl_rad["potential_annual"].map(
-                    lambda x: fmt_eur(x) if not pd.isna(x) and x > 0 else "-"
-                )
-
-            tbl_rad["radar_score"] = tbl_rad["radar_score"].map(
-                lambda x: f"{x:.0f}" if not pd.isna(x) else "-"
+        if not svi_df.empty:
+            # --- Regio Vitality Index (radial gauge) ---
+            # Regionale index op basis van laatste maand(en) + SVI
+            last_turn_idx = (
+                region_month["region_turnover_index"].dropna().iloc[-1]
+                if "region_turnover_index" in region_month.columns
+                and region_month["region_turnover_index"].notna().any()
+                else np.nan
+            )
+            last_foot_idx = (
+                region_month["region_footfall_index"].dropna().iloc[-1]
+                if "region_footfall_index" in region_month.columns
+                and region_month["region_footfall_index"].notna().any()
+                else np.nan
+            )
+            last_cbs_idx = (
+                cbs_retail_month["cbs_retail_index"].dropna().iloc[-1]
+                if (not cbs_retail_month.empty)
+                and "cbs_retail_index" in cbs_retail_month.columns
+                and cbs_retail_month["cbs_retail_index"].notna().any()
+                else np.nan
+            )
+            last_cci_idx = (
+                cci_df["cci_index"].dropna().iloc[-1]
+                if (not cci_df.empty)
+                and "cci_index" in cci_df.columns
+                and cci_df["cci_index"].notna().any()
+                else np.nan
             )
 
-            tbl_rad = tbl_rad.rename(
+            macro_components = [
+                v for v in [last_turn_idx, last_foot_idx, last_cbs_idx, last_cci_idx]
+                if not np.isnan(v)
+            ]
+            if macro_components:
+                macro_avg = float(np.mean(macro_components))
+                # 50 → 0, 100 → 50, 150 → 100 (clamp)
+                macro_clamped = float(np.clip(macro_avg, 50, 150))
+                region_svi = (macro_clamped - 50) / (150 - 50) * 100.0
+            else:
+                # fallback: gemiddelde store-SVI
+                region_svi = float(svi_df["svi_score"].mean())
+
+            region_svi = float(np.clip(region_svi, 0, 100))
+
+            # Classificatie voor regio
+            if region_svi >= 75:
+                region_status = "High performance"
+                fill_color = "#22c55e"
+            elif region_svi >= 60:
+                region_status = "Good / stable"
+                fill_color = "#f97316"
+            elif region_svi >= 45:
+                region_status = "Attention required"
+                fill_color = "#facc15"
+            else:
+                region_status = "Under pressure"
+                fill_color = "#ef4444"
+
+            empty_color = "#e5e7eb"
+
+            gauge_df = pd.DataFrame(
+                {
+                    "segment": ["filled", "empty"],
+                    "value": [region_svi, max(0.0, 100.0 - region_svi)],
+                }
+            )
+
+            st.markdown("### Regio Vitality Index")
+            col_g1, col_g2 = st.columns([1, 1.2])
+
+            with col_g1:
+                gauge_arc = (
+                    alt.Chart(gauge_df)
+                    .mark_arc(innerRadius=60, outerRadius=80)
+                    .encode(
+                        theta="value:Q",
+                        color=alt.Color(
+                            "segment:N",
+                            scale=alt.Scale(
+                                domain=["filled", "empty"],
+                                range=[fill_color, empty_color],
+                            ),
+                            legend=None,
+                        ),
+                    )
+                    .properties(width=260, height=260)
+                )
+
+                gauge_text = (
+                    alt.Chart(pd.DataFrame({"label": [f"{region_svi:.0f}"]}))
+                    .mark_text(size=32, fontWeight="bold")
+                    .encode(text="label:N")
+                )
+
+                st.altair_chart(gauge_arc + gauge_text, use_container_width=False)
+
+            with col_g2:
+                st.markdown(
+                    f"""
+                    **Regio Vitality Index:** {region_svi:.0f}  
+                    **Status:** {region_status}  
+
+                    Deze index combineert:
+                    - Omzet- en footfall-ontwikkeling in de regio  
+                    - Macro-ontwikkelingen (CBS detailhandelindex & CCI)  
+                    - Store-level performance (SVI)  
+
+                    Hoe dichter bij 100, hoe gezonder de regio presteert
+                    ten opzichte van haar eigen historische niveau.
+                    """
+                )
+
+            # --- SVI-per-winkel + potentiële omzet ---
+            # periode-lengte in dagen → projectie naar jaar
+            period_days = (end_ts - start_ts).days + 1
+            year_factor = 365.0 / period_days if period_days > 0 else 1.0
+
+            svi_df = svi_df.copy()
+            svi_df["svi_score"] = svi_df["svi_score"].round(0)
+            svi_df["profit_potential_year"] = (
+                svi_df["profit_potential_period"] * year_factor
+            )
+
+            # Ranking-chart (bars) op SVI
+            chart_rank = (
+                alt.Chart(
+                    svi_df.sort_values("svi_score", ascending=False)
+                )
+                .mark_bar()
+                .encode(
+                    x=alt.X(
+                        "svi_score:Q",
+                        title="Store Vitality Index (0–100)",
+                        scale=alt.Scale(domain=[0, 100]),
+                    ),
+                    y=alt.Y(
+                        "store_name:N",
+                        sort="-x",
+                        title="Winkel",
+                    ),
+                    color=alt.Color(
+                        "svi_status:N",
+                        title="Status",
+                        scale=alt.Scale(
+                            domain=[
+                                "High performance",
+                                "Good / stable",
+                                "Attention required",
+                                "Under pressure",
+                            ],
+                            range=["#22c55e", "#f97316", "#facc15", "#ef4444"],
+                        ),
+                    ),
+                    tooltip=[
+                        alt.Tooltip("store_name:N", title="Winkel"),
+                        alt.Tooltip("svi_score:Q", title="SVI", format=".0f"),
+                        alt.Tooltip("footfall_index_region:Q", title="Footfall-index", format=".0f"),
+                        alt.Tooltip("capture_index_region:Q", title="Capture-index", format=".0f"),
+                        alt.Tooltip(
+                            "profit_potential_year:Q",
+                            title="Jaarpotentieel (€)",
+                            format=",.0f",
+                        ),
+                    ],
+                )
+                .properties(height=260)
+            )
+
+            st.markdown("### Store Vitality ranking – winkels in deze regio")
+            st.altair_chart(chart_rank, use_container_width=True)
+
+            # Tabel met belangrijkste KPI's + korte toelichting
+            table = svi_df.copy()
+            table["Omzet"] = table["turnover"].map(fmt_eur)
+            table["Footfall"] = table["footfall"].map(fmt_int)
+            table["Gem. besteding/visitor"] = table["sales_per_visitor"].map(
+                lambda x: f"€ {x:.2f}".replace(".", ",") if not pd.isna(x) else "-"
+            )
+            table["Omzet per m²"] = table["turnover_per_sqm"].map(
+                lambda x: fmt_eur(x) if not pd.isna(x) else "-"
+            )
+            table["Footfall-index (regio = 100)"] = table["footfall_index_region"].map(
+                lambda x: fmt_pct(x - 100) if not pd.isna(x) else "-"
+            )
+            table["Capture-index (regio = 100)"] = table["capture_index_region"].map(
+                lambda x: fmt_pct(x - 100) if not pd.isna(x) else "-"
+            )
+            table["Jaarpotentieel"] = table["profit_potential_year"].map(fmt_eur)
+
+            view_cols = table.rename(
                 columns={
-                    "radar_icon": "",
+                    "svi_icon": "",
                     "store_name": "Winkel",
-                    "radar_score": "Radar-score",
-                    "headline": "Status",
-                    "short_reason": "Korte toelichting",
-                    "turnover": "Omzet",
-                    "footfall": "Footfall",
-                    "sales_per_visitor": "Gem. besteding/visitor",
-                    "turnover_per_sqm": "Omzet per m²",
-                    "potential_period": "Potentie (periode)",
-                    "potential_annual": "Potentie (jaar, proj.)",
+                    "svi_score": "SVI-score",
+                    "svi_status": "Status",
+                    "reason_short": "Korte toelichting",
                 }
             )
 
             st.dataframe(
-                tbl_rad[
+                view_cols[
                     [
                         "",
                         "Winkel",
-                        "Radar-score",
+                        "SVI-score",
                         "Status",
-                        "Potentie (jaar, proj.)",
-                        "Potentie (periode)",
+                        "Korte toelichting",
                         "Omzet",
                         "Footfall",
                         "Gem. besteding/visitor",
                         "Omzet per m²",
-                        "Korte toelichting",
+                        "Footfall-index (regio = 100)",
+                        "Capture-index (regio = 100)",
+                        "Jaarpotentieel",
                     ]
                 ],
                 use_container_width=True,
             )
 
             st.caption(
-                "De radar-score combineert omzet, footfall, besteding per bezoeker en omzet per m². "
-                "De **potentie-kolommen** laten zien hoeveel extra omzet er in deze periode en op jaarbasis mogelijk is "
-                "als de winkel op regiomedian per m² zou draaien. "
-                "🟢 = gaat goed, 🟠 = aandacht nodig, 🔴 = presteert onder verwachting."
+                "De SVI combineert omzet, footfall, besteding per bezoeker en omzet per m², "
+                "met daarbovenop een index t.o.v. de regio voor footfall en 'fair share' van traffic "
+                "gebaseerd op m². Jaarpotentieel = ruw geannualiseerd omzetverschil t.o.v. regiomedian "
+                "per m² binnen de gekozen periode."
             )
 
-            # ---------- 3) Detail-toelichting per winkel ----------
-            st.markdown("#### Toelichting per winkel")
-
-            for _, r in radar_df_local.iterrows():
-                score_str = f"{r['radar_score']:.0f}" if not pd.isna(r["radar_score"]) else "-"
-                pot_period = fmt_eur(r.get("potential_period", np.nan))
-                pot_annual = fmt_eur(r.get("potential_annual", np.nan))
-
-                title = f"{r['radar_icon']} {r['store_name']} – {r['headline']} (score {score_str})"
-
-                with st.expander(title, expanded=False):
-                    st.write(r["short_reason"])
-                    st.write(f"• Potentie in gekozen periode: {pot_period}")
-                    st.write(f"• Potentie geannualiseerd: {pot_annual}")
-
             # voor debug
-            radar_df = radar_df_local
+            radar_df = svi_df
 
     # -----------------------
     # Debug-sectie
