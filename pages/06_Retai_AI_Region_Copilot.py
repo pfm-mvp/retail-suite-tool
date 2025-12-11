@@ -1004,7 +1004,7 @@ def main():
             "Geen bruikbare CCI-data beschikbaar vanuit de CBS-API (of geen data in de gekozen periode)."
         )
 
-    # >>> NEW: Regionale winkelradar – samengestelde index per winkel
+    # >>> Regionale winkelradar – samengestelde index + potentie
     if store_key_col is not None:
         radar_df_local = build_region_store_radar(
             df_period=df_period,
@@ -1019,43 +1019,93 @@ def main():
             radar_df_local["radar_score"] = radar_df_local["radar_score"].round(0)
 
             st.markdown("### Regionale winkelradar (samengestelde index)")
-            view_cols = radar_df_local.rename(
+
+            # ---- Tabel: compact, met potentie in euro’s ----
+            tbl_rad = radar_df_local.copy()
+
+            # Format kolommen
+            if "turnover" in tbl_rad.columns:
+                tbl_rad["turnover"] = tbl_rad["turnover"].map(fmt_eur)
+            if "footfall" in tbl_rad.columns:
+                tbl_rad["footfall"] = tbl_rad["footfall"].map(fmt_int)
+            if "sales_per_visitor" in tbl_rad.columns:
+                tbl_rad["sales_per_visitor"] = tbl_rad["sales_per_visitor"].map(
+                    lambda x: f"€ {x:.2f}".replace(".", ",") if not pd.isna(x) else "-"
+                )
+            if "turnover_per_sqm" in tbl_rad.columns:
+                tbl_rad["turnover_per_sqm"] = tbl_rad["turnover_per_sqm"].map(
+                    lambda x: fmt_eur(x) if not pd.isna(x) else "-"
+                )
+            if "potential_period" in tbl_rad.columns:
+                tbl_rad["potential_period"] = tbl_rad["potential_period"].map(
+                    lambda x: fmt_eur(x) if not pd.isna(x) else "-"
+                )
+            if "potential_annual" in tbl_rad.columns:
+                tbl_rad["potential_annual"] = tbl_rad["potential_annual"].map(
+                    lambda x: fmt_eur(x) if not pd.isna(x) else "-"
+                )
+
+            tbl_rad["radar_score"] = tbl_rad["radar_score"].map(
+                lambda x: f"{x:.0f}" if not pd.isna(x) else "-"
+            )
+
+            tbl_rad = tbl_rad.rename(
                 columns={
                     "radar_icon": "",
                     "store_name": "Winkel",
                     "radar_score": "Radar-score",
                     "headline": "Status",
-                    "short_reason": "Toelichting",
+                    # korte tekst blijft in tabel, maar we gaan details onder de tabel tonen
+                    "short_reason": "Korte toelichting",
                     "turnover": "Omzet",
                     "footfall": "Footfall",
                     "sales_per_visitor": "Gem. besteding/visitor",
                     "turnover_per_sqm": "Omzet per m²",
+                    "potential_period": "Potentie (periode)",
+                    "potential_annual": "Potentie (jaar, proj.)",
                 }
             )
 
             st.dataframe(
-                view_cols[
+                tbl_rad[
                     [
                         "",
                         "Winkel",
                         "Radar-score",
                         "Status",
-                        "Toelichting",
+                        "Korte toelichting",
                         "Omzet",
                         "Footfall",
                         "Gem. besteding/visitor",
                         "Omzet per m²",
+                        "Potentie (periode)",
+                        "Potentie (jaar, proj.)",
                     ]
                 ],
                 use_container_width=True,
             )
 
             st.caption(
-                "De radar-score combineert omzet, footfall, besteding per bezoeker en omzet per m² "
-                "en wordt gecorrigeerd voor macro-ontwikkelingen (consumentenvertrouwen, "
-                "CBS detailhandelindex) en regionale capture rate. "
+                "De radar-score combineert omzet, footfall, besteding per bezoeker en omzet per m². "
+                "Potentie (jaar) is de extra omzet in € als de winkel op regiomedian per m² zou draaien, "
+                "geprojecteerd naar een heel jaar. "
                 "🟢 = gaat goed, 🟠 = aandacht nodig, 🔴 = presteert onder verwachting."
             )
+
+            # ---- Detail-toelichting per winkel in expanders (beter leesbaar) ----
+            st.markdown("#### Toelichting per winkel")
+
+            for _, r in radar_df_local.iterrows():
+                score_str = f"{r['radar_score']:.0f}" if not pd.isna(r["radar_score"]) else "-"
+                pot_period = fmt_eur(r.get("potential_period", np.nan))
+                pot_annual = fmt_eur(r.get("potential_annual", np.nan))
+
+                title = f"{r['radar_icon']} {r['store_name']} – {r['headline']} (score {score_str})"
+
+                with st.expander(title, expanded=False):
+                    st.write(r["short_reason"])
+                    st.write(f"• Potentie in gekozen periode: {pot_period}")
+                    st.write(f"• Potentie geannualiseerd: {pot_annual}")
 
             # voor debug
             radar_df = radar_df_local
