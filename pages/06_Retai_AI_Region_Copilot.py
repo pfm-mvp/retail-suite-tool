@@ -325,7 +325,6 @@ def debug_cbs_endpoint(dataset: str, top: int = 3) -> dict:
 def main():
     st.title("PFM Region Performance Copilot – Regio-overzicht")
 
-    # >>> NEW: radar DataFrame init (voor debug-sectie)
     radar_df = pd.DataFrame()
 
     # --- Retailer selectie via clients.json ---
@@ -409,6 +408,9 @@ def main():
         st.warning(f"Geen winkels gevonden voor regio '{region_choice}'.")
         return
 
+    # Alle winkels (alle regio's) voor de FastAPI-call
+    all_shop_ids = merged["id"].dropna().astype(int).unique().tolist()
+
     # --- Periode keuze ---
     period_choice = st.sidebar.selectbox(
         "Periode",
@@ -434,7 +436,7 @@ def main():
         st.info("Kies een retailer, regio en periode en klik op **Analyseer regio**.")
         return
 
-    # --- Data ophalen uit FastAPI ---
+    # --- Data ophalen uit FastAPI (ALLE winkels, alle regio's) ---
     with st.spinner("Regionale data ophalen uit Storescan / FastAPI..."):
         metric_map = {
             "count_in": "footfall",
@@ -442,7 +444,7 @@ def main():
         }
 
         resp_all = get_report(
-            shop_ids,
+            all_shop_ids,
             list(metric_map.keys()),
             period="this_year",
             step="day",
@@ -455,7 +457,7 @@ def main():
         df_all_raw = df_all_raw.rename(columns=metric_map)
 
     if df_all_raw.empty:
-        st.warning("Geen data gevonden voor deze regio.")
+        st.warning("Geen data gevonden voor deze retailer.")
         return
 
     df_all_raw["date"] = pd.to_datetime(df_all_raw["date"], errors="coerce")
@@ -468,34 +470,49 @@ def main():
             store_key_col = cand
             break
 
-    # Filter op periode
+    # Filter op periode (ALLE winkels)
     start_ts = pd.Timestamp(start_period)
     end_ts = pd.Timestamp(end_period)
 
-    df_period = df_all_raw[
+    df_filtered = df_all_raw[
         (df_all_raw["date"] >= start_ts) & (df_all_raw["date"] <= end_ts)
     ].copy()
 
-    if df_period.empty:
-        st.warning("Geen data in de geselecteerde periode voor deze regio.")
+    if df_filtered.empty:
+        st.warning("Geen data in de geselecteerde periode voor deze retailer.")
         return
 
-    df_period = compute_daily_kpis(df_period)
+    df_filtered = compute_daily_kpis(df_filtered)
 
-    # Als we een store-id kolom hebben: join met region_shops voor sqm_effective + namen
+    # Join met volledige mapping (alle regio's, alle winkels)
     if store_key_col is not None:
         join_cols = ["id", "store_display", "region", "sqm_effective"]
-        join_cols_existing = [c for c in join_cols if c in region_shops.columns]
+        join_cols_existing = [c for c in join_cols if c in merged.columns]
         if "id" in join_cols_existing:
-            df_period = df_period.merge(
-                region_shops[join_cols_existing],
+            df_period = df_filtered.merge(
+                merged[join_cols_existing],
                 left_on=store_key_col,
                 right_on="id",
                 how="left",
             )
+        else:
+            df_period = df_filtered.copy()
+    else:
+        df_period = df_filtered.copy()
 
-    # --- Wekelijkse aggregatie voor de regio ---
-    region_weekly = aggregate_weekly(df_period)
+    # Slice voor de GESELECTEERDE regio
+    if "region" not in df_period.columns:
+        st.warning("Region-informatie ontbreekt in de data (check regions.csv).")
+        return
+
+    df_region = df_period[df_period["region"] == region_choice].copy()
+
+    if df_region.empty:
+        st.warning("Geen data in de geselecteerde periode voor deze regio.")
+        return
+
+    # --- Wekelijkse aggregatie voor de geselecteerde regio ---
+    region_weekly = aggregate_weekly(df_region)
 
     # --- Pathzz street traffic per regio ---
     pathzz_weekly = fetch_region_street_traffic(
@@ -534,9 +551,9 @@ def main():
 
     st.subheader(f"{selected_client['brand']} – Regio {region_choice}")
 
-    foot_total = df_period["footfall"].sum() if "footfall" in df_period.columns else 0
-    turn_total = df_period["turnover"].sum() if "turnover" in df_period.columns else 0
-    spv_avg = df_period["sales_per_visitor"].mean() if "sales_per_visitor" in df_period.columns else np.nan
+    foot_total = df_region["footfall"].sum() if "footfall" in df_region.columns else 0
+    turn_total = df_region["turnover"].sum() if "turnover" in df_region.columns else 0
+    spv_avg = df_region["sales_per_visitor"].mean() if "sales_per_visitor" in df_region.columns else np.nan
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
@@ -562,21 +579,21 @@ def main():
     st.markdown("### Store performance in regio (per winkel)")
 
     store_table = pd.DataFrame()
-    if store_key_col is not None and "turnover" in df_period.columns:
+    if store_key_col is not None and "turnover" in df_region.columns:
         # Per winkel aggregatie
         group_cols = [store_key_col]
         agg_dict = {
             "footfall": "sum",
             "turnover": "sum",
         }
-        if "sales_per_visitor" in df_period.columns:
+        if "sales_per_visitor" in df_region.columns:
             agg_dict["sales_per_visitor"] = "mean"
 
-        if "sqm_effective" in df_period.columns:
+        if "sqm_effective" in df_region.columns:
             agg_dict["sqm_effective"] = "max"
 
         store_agg = (
-            df_period.groupby(group_cols, as_index=False)
+            df_region.groupby(group_cols, as_index=False)
             .agg(agg_dict)
         )
 
@@ -645,7 +662,6 @@ def main():
             "m²-index t.o.v. regio",
         ]], use_container_width=True)
 
-        # Korte uitleg
         st.caption(
             "m²-index t.o.v. regio: 100 = gelijk aan regiomedian. "
             "Onder 100 → onderbenut potentieel per m², boven 100 → outperformer."
@@ -663,12 +679,10 @@ def main():
     st.markdown("### Regioweekbeeld – winkeltraffic vs straattraffic (Pathzz)")
 
     if not capture_weekly.empty:
-        # We nemen nu ook de regio-omzet mee
         chart_df = capture_weekly[
             ["week_start", "footfall", "street_footfall", "turnover", "capture_rate"]
         ].copy()
 
-        # Weeklabel als nette weeknummers, bv. W01, W02, ...
         iso_calendar = chart_df["week_start"].dt.isocalendar()
         chart_df["week_label"] = iso_calendar.week.apply(lambda w: f"W{int(w):02d}")
 
@@ -678,7 +692,6 @@ def main():
             .tolist()
         )
 
-        # Bars: footfall, street_footfall én omzet
         counts_long = chart_df.melt(
             id_vars=["week_label"],
             value_vars=["footfall", "street_footfall", "turnover"],
@@ -714,7 +727,6 @@ def main():
             )
         )
 
-        # Lijn met capture rate (%)
         line_chart = (
             alt.Chart(chart_df)
             .mark_line(point=True, strokeWidth=2, color="#F04438")
@@ -744,9 +756,6 @@ def main():
 
         st.altair_chart(combined, use_container_width=True)
 
-        # -----------------------
-        # Weekly tabel – nu óók met omzet
-        # -----------------------
         st.markdown("### Weekly tabel – regio-footfall, straattraffic, omzet & capture rate")
 
         table_df = capture_weekly[
@@ -796,7 +805,7 @@ def main():
     macro_chart_shown = False
 
     # --- 1) Regio: maandindex opbouwen (footfall & omzet) ---
-    region_month = df_period.copy()
+    region_month = df_region.copy()
     region_month["month"] = region_month["date"].dt.to_period("M").dt.to_timestamp()
 
     region_month = (
@@ -835,7 +844,6 @@ def main():
     if retail_series:
         cbs_retail_df = pd.DataFrame(retail_series)
 
-        # period is bv. '2000MM01' → jaar = eerste 4, maand = laatste 2
         cbs_retail_df["date"] = pd.to_datetime(
             cbs_retail_df["period"].str[:4]
             + "-"
@@ -845,7 +853,6 @@ def main():
         )
         cbs_retail_df = cbs_retail_df.dropna(subset=["date"])
 
-        # maandgemiddelde en index 100 = eerste maand met data
         cbs_retail_month = (
             cbs_retail_df.groupby("date", as_index=False)["retail_value"].mean()
         )
@@ -866,7 +873,6 @@ def main():
     try:
         chart_lines = []
 
-        # Regio-footfall-index
         if "region_footfall_index" in region_month.columns:
             reg_foot = region_month.rename(columns={"month": "date"})[
                 ["date", "region_footfall_index"]
@@ -875,7 +881,6 @@ def main():
             reg_foot = reg_foot.rename(columns={"region_footfall_index": "value"})
             chart_lines.append(reg_foot)
 
-        # Regio-omzet-index
         if "region_turnover_index" in region_month.columns:
             reg_turn = region_month.rename(columns={"month": "date"})[
                 ["date", "region_turnover_index"]
@@ -884,7 +889,6 @@ def main():
             reg_turn = reg_turn.rename(columns={"region_turnover_index": "value"})
             chart_lines.append(reg_turn)
 
-        # CBS-detailhandelindex (macro, indien data)
         if not cbs_retail_month.empty and "cbs_retail_index" in cbs_retail_month.columns:
             cbs_line = cbs_retail_month[["date", "cbs_retail_index"]].copy()
             cbs_line["series"] = "CBS detailhandelindex"
@@ -952,7 +956,6 @@ def main():
         cci_df = pd.DataFrame()
 
     if not cci_df.empty:
-        # Lijnen bouwen: CCI + regio-footfall + regio-omzet
         lines_cc = []
 
         cci_line = cci_df[["date", "cci_index"]].copy()
@@ -1003,22 +1006,20 @@ def main():
             "Geen bruikbare CCI-data beschikbaar vanuit de CBS-API (of geen data in de gekozen periode)."
         )
 
-
     # ----------------------------------------------------
     # Store Vitality Index (SVI) – per winkel + Regio Vitality
     # ----------------------------------------------------
-    radar_df = pd.DataFrame()  # voor debug
+    radar_df = pd.DataFrame()
 
     if store_key_col is not None:
         # 1) SVI voor álle winkels in alle regio's
         svi_all = build_store_vitality(
-            df_period=df_period,      # LET OP: df_period = alle shops in periode
+            df_period=df_period,      # df_period = alle shops in periode
             region_shops=merged,      # mapping met alle winkels + sqm + labels
             store_key_col=store_key_col,
         )
 
         if not svi_all.empty:
-            # Regio-kolom erbij hangen op basis van merged
             region_lookup = merged[["id", "region"]].drop_duplicates()
             svi_all = svi_all.merge(
                 region_lookup,
@@ -1042,7 +1043,6 @@ def main():
                 region_svi = float(row_cur["region_svi"].iloc[0])
                 region_svi = float(np.clip(region_svi, 0, 100))
 
-                # Classificatie (0–100)
                 if region_svi >= 75:
                     region_status = "High performance"
                     fill_color = "#22c55e"
@@ -1069,7 +1069,7 @@ def main():
 
                 col_g1, col_g2 = st.columns([1, 1.6])
 
-                # --- Gauge voor geselecteerde regio ---
+                # Gauge voor geselecteerde regio
                 with col_g1:
                     gauge_arc = (
                         alt.Chart(gauge_df)
@@ -1108,7 +1108,6 @@ def main():
                         """
                     )
 
-                    # --- Benchmark: RVI vs andere regio's ---
                     st.markdown("**Vergelijking met andere regio's**")
 
                     chart_regions = region_scores.copy()
@@ -1155,7 +1154,6 @@ def main():
             if svi_region.empty:
                 st.info("Geen store-level SVI beschikbaar voor deze regio.")
             else:
-                # Jaarprojectie van het potentiëel
                 period_days = (end_ts - start_ts).days + 1
                 year_factor = 365.0 / period_days if period_days > 0 else 1.0
 
@@ -1164,7 +1162,6 @@ def main():
                     svi_region["profit_potential_period"] * year_factor
                 )
 
-                # Ranking-chart (bars) op SVI – 0–100 schaal
                 chart_rank = (
                     alt.Chart(
                         svi_region.sort_values("svi_score", ascending=False)
@@ -1220,7 +1217,6 @@ def main():
                 st.markdown("### Store Vitality ranking – winkels in deze regio")
                 st.altair_chart(chart_rank, use_container_width=True)
 
-                # Tabel met belangrijkste KPI's + korte toelichting
                 table = svi_region.copy()
                 table["Omzet"] = table["turnover"].map(fmt_eur)
                 table["Footfall"] = table["footfall"].map(fmt_int)
@@ -1287,14 +1283,22 @@ def main():
             region_shops[["id", "store_display", "region", "sqm_effective"]].head(),
         )
         st.write("Shop IDs regio:", shop_ids)
+        st.write("ALL shop IDs:", all_shop_ids)
         st.write("Periode:", start_period, "→", end_period)
         st.write("Store key column in df_all_raw:", store_key_col)
         st.write("df_all_raw (head):", df_all_raw.head())
-        st.write("df_period (head):", df_period.head())
+        st.write("df_period (all regions, head):", df_period.head())
+        st.write("df_region (selected region, head):", df_region.head())
         st.write("Region monthly:", region_month.head())
-        st.write("CBS retail (sample DataFrame):", cbs_retail_month.head() if not cbs_retail_month.empty else "empty")
+        st.write(
+            "CBS retail (sample DataFrame):",
+            cbs_retail_month.head() if not cbs_retail_month.empty else "empty",
+        )
         st.write("CBS retail error:", cbs_retail_error)
-        st.write("CCI (sample DataFrame):", cci_df.head() if not cci_df.empty else "empty")
+        st.write(
+            "CCI (sample DataFrame):",
+            cci_df.head() if not cci_df.empty else "empty",
+        )
         st.write("CCI error:", cci_error)
         st.write("Region weekly:", region_weekly.head())
         st.write("Pathzz weekly:", pathzz_weekly.head())
@@ -1303,10 +1307,8 @@ def main():
             "Store table (raw):",
             store_table.head() if not store_table.empty else "n.v.t.",
         )
-        # >>> NEW: radar debug
         st.write("Radar (head):", radar_df.head() if not radar_df.empty else "empty")
 
-        # --- CBS healthchecks ---
         st.markdown("#### 🔍 CBS endpoint healthcheck")
 
         cci_debug = debug_cbs_endpoint("83693NED", top=3)
