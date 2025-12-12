@@ -23,6 +23,16 @@ st.set_page_config(
 )
 
 # ----------------------
+# PFM brand colors
+# ----------------------
+PFM_PURPLE = "#762181"
+PFM_RED = "#F04438"
+PFM_GREY = "#E5E7EB"
+PFM_GREEN = "#22C55E"
+PFM_ORANGE = "#F97316"
+PFM_YELLOW = "#FACC15"
+
+# ----------------------
 # API URL / secrets setup
 # ----------------------
 
@@ -625,47 +635,53 @@ def main():
         store_table = store_agg.copy()
         store_table = store_table.sort_values("sqm_index", ascending=True)
 
-        # Mooie tabel
-        tbl = store_table.copy()
-        tbl["footfall"] = tbl["footfall"].map(fmt_int)
-        tbl["turnover"] = tbl["turnover"].map(fmt_eur)
-        tbl["sales_per_visitor"] = tbl["sales_per_visitor"].map(
-            lambda x: f"€ {x:.2f}".replace(".", ",") if not pd.isna(x) else "-"
-        )
-        tbl["sqm_effective"] = tbl["sqm_effective"].map(fmt_int)
-        tbl["turnover_per_sqm"] = tbl["turnover_per_sqm"].map(
-            lambda x: fmt_eur(x) if not pd.isna(x) else "-"
-        )
-        tbl["sqm_index"] = tbl["sqm_index"].map(
-            lambda x: fmt_pct(x - 100) if not pd.isna(x) else "-"
-        )
+        # Mooie tabel – in expander zodat dashboard "clean" blijft
+        with st.expander("📋 Details per winkel (tabel)"):
+            tbl = store_table.copy()
+            tbl["footfall"] = tbl["footfall"].map(fmt_int)
+            tbl["turnover"] = tbl["turnover"].map(fmt_eur)
+            tbl["sales_per_visitor"] = tbl["sales_per_visitor"].map(
+                lambda x: f"€ {x:.2f}".replace(".", ",") if not pd.isna(x) else "-"
+            )
+            tbl["sqm_effective"] = tbl["sqm_effective"].map(fmt_int)
+            tbl["turnover_per_sqm"] = tbl["turnover_per_sqm"].map(
+                lambda x: fmt_eur(x) if not pd.isna(x) else "-"
+            )
+            tbl["sqm_index"] = tbl["sqm_index"].map(
+                lambda x: fmt_pct(x - 100) if not pd.isna(x) else "-"
+            )
 
-        tbl = tbl.rename(
-            columns={
-                "store_name": "Winkel",
-                "footfall": "Footfall",
-                "turnover": "Omzet",
-                "sales_per_visitor": "Gem. besteding/visitor",
-                "sqm_effective": "m² (effectief)",
-                "turnover_per_sqm": "Omzet per m²",
-                "sqm_index": "m²-index t.o.v. regio",
-            }
-        )
+            tbl = tbl.rename(
+                columns={
+                    "store_name": "Winkel",
+                    "footfall": "Footfall",
+                    "turnover": "Omzet",
+                    "sales_per_visitor": "Gem. besteding/visitor",
+                    "sqm_effective": "m² (effectief)",
+                    "turnover_per_sqm": "Omzet per m²",
+                    "sqm_index": "m²-index t.o.v. regio",
+                }
+            )
 
-        st.dataframe(tbl[[
-            "Winkel",
-            "Footfall",
-            "Omzet",
-            "Gem. besteding/visitor",
-            "m² (effectief)",
-            "Omzet per m²",
-            "m²-index t.o.v. regio",
-        ]], use_container_width=True)
+            st.dataframe(
+                tbl[
+                    [
+                        "Winkel",
+                        "Footfall",
+                        "Omzet",
+                        "Gem. besteding/visitor",
+                        "m² (effectief)",
+                        "Omzet per m²",
+                        "m²-index t.o.v. regio",
+                    ]
+                ],
+                use_container_width=True,
+            )
 
-        st.caption(
-            "m²-index t.o.v. regio: 100 = gelijk aan regiomedian. "
-            "Onder 100 → onderbenut potentieel per m², boven 100 → outperformer."
-        )
+            st.caption(
+                "m²-index t.o.v. regio: 100 = gelijk aan regiomedian. "
+                "Onder 100 → onderbenut potentieel per m², boven 100 → outperformer."
+            )
     else:
         st.info(
             "Geen store-level ID of omzet beschikbaar in de dagdata – "
@@ -716,7 +732,7 @@ def main():
                     title="",
                     scale=alt.Scale(
                         domain=["footfall", "street_footfall", "turnover"],
-                        range=["#1f77b4", "#ff7f0e", "#4ade80"],
+                        range=[PFM_PURPLE, "#B48CD8", PFM_RED],
                     ),
                 ),
                 tooltip=[
@@ -729,7 +745,7 @@ def main():
 
         line_chart = (
             alt.Chart(chart_df)
-            .mark_line(point=True, strokeWidth=2, color="#F04438")
+            .mark_line(point=True, strokeWidth=2, color=PFM_RED)
             .encode(
                 x=alt.X("week_label:N", title="Week", sort=week_order),
                 y=alt.Y(
@@ -785,227 +801,6 @@ def main():
     else:
         st.info("Geen matchende Pathzz-weekdata gevonden voor deze regio/periode.")
 
-    # ... vlak vóór de macro-context sectie
-    cbs_retail_month = pd.DataFrame()
-    cbs_retail_error = None
-    cci_df = pd.DataFrame()
-    cci_error = None
-
-    # -----------------------
-    # Macro-context: CBS detailhandel & consumentenvertrouwen
-    # -----------------------
-
-    st.markdown("### Macro-context: CBS detailhandel & consumentenvertrouwen")
-    st.caption(
-        "Regio-footfall- en omzet worden genormaliseerd op 100 = eerste maand met data. "
-        "CBS-detailhandelindex en consumentenvertrouwen worden ernaast gezet om de "
-        "macro-ontwikkeling te vergelijken."
-    )
-
-    macro_chart_shown = False
-
-    # --- 1) Regio: maandindex opbouwen (footfall & omzet) ---
-    region_month = df_region.copy()
-    region_month["month"] = region_month["date"].dt.to_period("M").dt.to_timestamp()
-
-    region_month = (
-        region_month
-        .groupby("month", as_index=False)[["turnover", "footfall"]]
-        .sum()
-        .rename(columns={
-            "turnover": "region_turnover",
-            "footfall": "region_footfall",
-        })
-    )
-
-    if not region_month.empty:
-        region_month["region_turnover_index"] = index_from_first_nonzero(
-            region_month["region_turnover"]
-        )
-        region_month["region_footfall_index"] = index_from_first_nonzero(
-            region_month["region_footfall"]
-        )
-    else:
-        region_month["region_turnover_index"] = np.nan
-        region_month["region_footfall_index"] = np.nan
-
-    # --- 2) CBS detailhandelindex ophalen & normaliseren (indien beschikbaar) ---
-    cbs_retail_month = pd.DataFrame()
-    cbs_retail_error = None
-
-    try:
-        retail_series = get_retail_index(
-            months_back=24,
-        )
-    except Exception as e:
-        retail_series = []
-        cbs_retail_error = repr(e)
-
-    if retail_series:
-        cbs_retail_df = pd.DataFrame(retail_series)
-
-        cbs_retail_df["date"] = pd.to_datetime(
-            cbs_retail_df["period"].str[:4]
-            + "-"
-            + cbs_retail_df["period"].str[-2:]
-            + "-15",
-            errors="coerce",
-        )
-        cbs_retail_df = cbs_retail_df.dropna(subset=["date"])
-
-        cbs_retail_month = (
-            cbs_retail_df.groupby("date", as_index=False)["retail_value"].mean()
-        )
-        if not cbs_retail_month.empty and cbs_retail_month["retail_value"].notna().any():
-            base_cbs = cbs_retail_month["retail_value"].dropna().iloc[0]
-            if base_cbs != 0:
-                cbs_retail_month["cbs_retail_index"] = (
-                    cbs_retail_month["retail_value"] / base_cbs * 100.0
-                )
-            else:
-                cbs_retail_month["cbs_retail_index"] = np.nan
-        else:
-            cbs_retail_month = pd.DataFrame()
-    else:
-        cbs_retail_month = pd.DataFrame()
-
-    # --- 3) Hoofdgrafiek: Regio vs (optioneel) CBS detailhandel ---
-    try:
-        chart_lines = []
-
-        if "region_footfall_index" in region_month.columns:
-            reg_foot = region_month.rename(columns={"month": "date"})[
-                ["date", "region_footfall_index"]
-            ].copy()
-            reg_foot["series"] = "Regio footfall-index"
-            reg_foot = reg_foot.rename(columns={"region_footfall_index": "value"})
-            chart_lines.append(reg_foot)
-
-        if "region_turnover_index" in region_month.columns:
-            reg_turn = region_month.rename(columns={"month": "date"})[
-                ["date", "region_turnover_index"]
-            ].copy()
-            reg_turn["series"] = "Regio omzet-index"
-            reg_turn = reg_turn.rename(columns={"region_turnover_index": "value"})
-            chart_lines.append(reg_turn)
-
-        if not cbs_retail_month.empty and "cbs_retail_index" in cbs_retail_month.columns:
-            cbs_line = cbs_retail_month[["date", "cbs_retail_index"]].copy()
-            cbs_line["series"] = "CBS detailhandelindex"
-            cbs_line = cbs_line.rename(columns={"cbs_retail_index": "value"})
-            chart_lines.append(cbs_line)
-
-        if chart_lines:
-            chart_all = pd.concat(chart_lines, ignore_index=True)
-
-            macro_chart = (
-                alt.Chart(chart_all)
-                .mark_line(point=True)
-                .encode(
-                    x=alt.X("date:T", title="Maand"),
-                    y=alt.Y("value:Q", title="Index (100 = eerste maand met data)"),
-                    color=alt.Color("series:N", title="Reeks"),
-                    tooltip=[
-                        alt.Tooltip("date:T", title="Maand"),
-                        alt.Tooltip("series:N", title="Reeks"),
-                        alt.Tooltip("value:Q", title="Index", format=".1f"),
-                    ],
-                )
-                .properties(height=320)
-            )
-
-            st.altair_chart(macro_chart, use_container_width=True)
-            st.caption(
-                "Alle reeksen zijn herleid naar index 100 in de eerste maand met data. "
-                "Zo vergelijk je de relatieve ontwikkeling van regio-footfall, omzet en, "
-                "indien beschikbaar, de CBS-detailhandelindex."
-            )
-            macro_chart_shown = True
-    except Exception:
-        macro_chart_shown = macro_chart_shown or False
-
-    # --- 4) Consumentenvertrouwen vs regionale performance ---
-    st.markdown("### Consumentenvertrouwen vs regionale performance")
-
-    try:
-        cci_series = get_cci_series(months_back=24)
-    except Exception as e:
-        cci_series = []
-        cci_error = repr(e)
-
-    if cci_series:
-        cci_df = pd.DataFrame(cci_series)
-        cci_df["date"] = pd.to_datetime(
-            cci_df["period"].str[:4]
-            + "-"
-            + cci_df["period"].str[-2:]
-            + "-15",
-            errors="coerce",
-        )
-        cci_df = cci_df.dropna(subset=["date"])
-
-        if not cci_df.empty and cci_df["cci"].notna().any():
-            base_cci = cci_df["cci"].dropna().iloc[0]
-            if base_cci != 0:
-                cci_df["cci_index"] = cci_df["cci"] / base_cci * 100.0
-            else:
-                cci_df["cci_index"] = np.nan
-        else:
-            cci_df = pd.DataFrame()
-    else:
-        cci_df = pd.DataFrame()
-
-    if not cci_df.empty:
-        lines_cc = []
-
-        cci_line = cci_df[["date", "cci_index"]].copy()
-        cci_line["series"] = "Consumentenvertrouwen-index"
-        cci_line = cci_line.rename(columns={"cci_index": "value"})
-        lines_cc.append(cci_line)
-
-        if "region_footfall_index" in region_month.columns:
-            reg_foot2 = region_month.rename(columns={"month": "date"})[
-                ["date", "region_footfall_index"]
-            ].copy()
-            reg_foot2["series"] = "Regio footfall-index"
-            reg_foot2 = reg_foot2.rename(columns={"region_footfall_index": "value"})
-            lines_cc.append(reg_foot2)
-
-        if "region_turnover_index" in region_month.columns:
-            reg_turn2 = region_month.rename(columns={"month": "date"})[
-                ["date", "region_turnover_index"]
-            ].copy()
-            reg_turn2["series"] = "Regio omzet-index"
-            reg_turn2 = reg_turn2.rename(columns={"region_turnover_index": "value"})
-            lines_cc.append(reg_turn2)
-
-        chart_cc = (
-            alt.Chart(pd.concat(lines_cc, ignore_index=True))
-            .mark_line(point=True)
-            .encode(
-                x=alt.X("date:T", title="Maand"),
-                y=alt.Y("value:Q", title="Index (100 = eerste maand met data)"),
-                color=alt.Color("series:N", title="Reeks"),
-                tooltip=[
-                    alt.Tooltip("date:T", title="Maand"),
-                    alt.Tooltip("series:N", title="Reeks"),
-                    alt.Tooltip("value:Q", title="Index", format=".1f"),
-                ],
-            )
-            .properties(height=260)
-        )
-
-        st.altair_chart(chart_cc, use_container_width=True)
-        st.caption(
-            "Consumentenvertrouwen (CCI) en regionale footfall/omzet zijn hier alle drie "
-            "herleid naar 100 in de eerste maand met data. Zo zie je direct of de regio "
-            "harder of minder hard groeit dan het consumentenvertrouwen."
-        )
-    else:
-        st.info(
-            "Geen bruikbare CCI-data beschikbaar vanuit de CBS-API (of geen data in de gekozen periode)."
-        )
-
     # ----------------------------------------------------
     # Store Vitality Index (SVI) – per winkel + Regio Vitality
     # ----------------------------------------------------
@@ -1043,20 +838,21 @@ def main():
                 region_svi = float(row_cur["region_svi"].iloc[0])
                 region_svi = float(np.clip(region_svi, 0, 100))
 
+                # Statuskleuren (0–100)
                 if region_svi >= 75:
                     region_status = "High performance"
-                    fill_color = "#22c55e"
+                    fill_color = PFM_GREEN
                 elif region_svi >= 60:
                     region_status = "Good / stable"
-                    fill_color = "#f97316"
+                    fill_color = PFM_ORANGE
                 elif region_svi >= 45:
                     region_status = "Attention required"
-                    fill_color = "#facc15"
+                    fill_color = PFM_YELLOW
                 else:
                     region_status = "Under pressure"
-                    fill_color = "#ef4444"
+                    fill_color = PFM_RED
 
-                empty_color = "#e5e7eb"
+                empty_color = PFM_GREY
 
                 gauge_df = pd.DataFrame(
                     {
@@ -1131,7 +927,7 @@ def main():
                                 "is_selected:N",
                                 scale=alt.Scale(
                                     domain=[True, False],
-                                    range=["#1d4ed8", "#e5e7eb"],
+                                    range=[PFM_PURPLE, PFM_GREY],
                                 ),
                                 legend=None,
                             ),
@@ -1188,7 +984,12 @@ def main():
                                     "Attention required",
                                     "Under pressure",
                                 ],
-                                range=["#22c55e", "#f97316", "#facc15", "#ef4444"],
+                                range=[
+                                    PFM_GREEN,
+                                    PFM_ORANGE,
+                                    PFM_YELLOW,
+                                    PFM_RED,
+                                ],
                             ),
                         ),
                         tooltip=[
@@ -1272,6 +1073,251 @@ def main():
                 )
 
                 radar_df = svi_region
+
+    # -----------------------
+    # Macro-context: CBS detailhandel & consumentenvertrouwen
+    # -----------------------
+
+    cbs_retail_month = pd.DataFrame()
+    cbs_retail_error = None
+    cci_df = pd.DataFrame()
+    cci_error = None
+
+    st.markdown("### Macro-context: CBS detailhandel & consumentenvertrouwen")
+    st.caption(
+        "Regio-footfall- en omzet worden genormaliseerd op 100 = eerste maand met data. "
+        "CBS-detailhandelindex en consumentenvertrouwen worden ernaast gezet om de "
+        "macro-ontwikkeling te vergelijken."
+    )
+
+    macro_chart_shown = False
+
+    # --- 1) Regio: maandindex opbouwen (footfall & omzet) ---
+    region_month = df_region.copy()
+    region_month["month"] = region_month["date"].dt.to_period("M").dt.to_timestamp()
+
+    region_month = (
+        region_month
+        .groupby("month", as_index=False)[["turnover", "footfall"]]
+        .sum()
+        .rename(columns={
+            "turnover": "region_turnover",
+            "footfall": "region_footfall",
+        })
+    )
+
+    if not region_month.empty:
+        region_month["region_turnover_index"] = index_from_first_nonzero(
+            region_month["region_turnover"]
+        )
+        region_month["region_footfall_index"] = index_from_first_nonzero(
+            region_month["region_footfall"]
+        )
+    else:
+        region_month["region_turnover_index"] = np.nan
+        region_month["region_footfall_index"] = np.nan
+
+    # --- 2) CBS detailhandelindex ophalen & normaliseren (indien beschikbaar) ---
+    try:
+        retail_series = get_retail_index(
+            months_back=24,
+        )
+    except Exception as e:
+        retail_series = []
+        cbs_retail_error = repr(e)
+
+    if retail_series:
+        cbs_retail_df = pd.DataFrame(retail_series)
+
+        # period is bv. '2000MM01' → jaar = eerste 4, maand = laatste 2
+        cbs_retail_df["date"] = pd.to_datetime(
+            cbs_retail_df["period"].str[:4]
+            + "-"
+            + cbs_retail_df["period"].str[-2:]
+            + "-15",
+            errors="coerce",
+        )
+        cbs_retail_df = cbs_retail_df.dropna(subset=["date"])
+
+        # maandgemiddelde en index 100 = eerste maand met data
+        cbs_retail_month = (
+            cbs_retail_df.groupby("date", as_index=False)["retail_value"].mean()
+        )
+        if not cbs_retail_month.empty and cbs_retail_month["retail_value"].notna().any():
+            base_cbs = cbs_retail_month["retail_value"].dropna().iloc[0]
+            if base_cbs != 0:
+                cbs_retail_month["cbs_retail_index"] = (
+                    cbs_retail_month["retail_value"] / base_cbs * 100.0
+                )
+            else:
+                cbs_retail_month["cbs_retail_index"] = np.nan
+        else:
+            cbs_retail_month = pd.DataFrame()
+    else:
+        cbs_retail_month = pd.DataFrame()
+
+    # --- 3) Hoofdgrafiek: Regio vs (optioneel) CBS detailhandel ---
+    try:
+        chart_lines = []
+
+        # Regio-footfall-index
+        if "region_footfall_index" in region_month.columns:
+            reg_foot = region_month.rename(columns={"month": "date"})[
+                ["date", "region_footfall_index"]
+            ].copy()
+            reg_foot["series"] = "Regio footfall-index"
+            reg_foot = reg_foot.rename(columns={"region_footfall_index": "value"})
+            chart_lines.append(reg_foot)
+
+        # Regio-omzet-index
+        if "region_turnover_index" in region_month.columns:
+            reg_turn = region_month.rename(columns={"month": "date"})[
+                ["date", "region_turnover_index"]
+            ].copy()
+            reg_turn["series"] = "Regio omzet-index"
+            reg_turn = reg_turn.rename(columns={"region_turnover_index": "value"})
+            chart_lines.append(reg_turn)
+
+        # CBS-detailhandelindex (macro, indien data)
+        if not cbs_retail_month.empty and "cbs_retail_index" in cbs_retail_month.columns:
+            cbs_line = cbs_retail_month[["date", "cbs_retail_index"]].copy()
+            cbs_line["series"] = "CBS detailhandelindex"
+            cbs_line = cbs_line.rename(columns={"cbs_retail_index": "value"})
+            chart_lines.append(cbs_line)
+
+        if chart_lines:
+            chart_all = pd.concat(chart_lines, ignore_index=True)
+
+            macro_chart = (
+                alt.Chart(chart_all)
+                .mark_line(point=True)
+                .encode(
+                    x=alt.X("date:T", title="Maand"),
+                    y=alt.Y("value:Q", title="Index (100 = eerste maand met data)"),
+                    color=alt.Color(
+                        "series:N",
+                        title="Reeks",
+                        scale=alt.Scale(
+                            domain=[
+                                "Regio footfall-index",
+                                "Regio omzet-index",
+                                "CBS detailhandelindex",
+                            ],
+                            range=[PFM_PURPLE, PFM_RED, PFM_GREY],
+                        ),
+                    ),
+                    tooltip=[
+                        alt.Tooltip("date:T", title="Maand"),
+                        alt.Tooltip("series:N", title="Reeks"),
+                        alt.Tooltip("value:Q", title="Index", format=".1f"),
+                    ],
+                )
+                .properties(height=320)
+            )
+
+            st.altair_chart(macro_chart, use_container_width=True)
+            st.caption(
+                "Alle reeksen zijn herleid naar index 100 in de eerste maand met data. "
+                "Zo vergelijk je de relatieve ontwikkeling van regio-footfall, omzet en, "
+                "indien beschikbaar, de CBS-detailhandelindex."
+            )
+            macro_chart_shown = True
+    except Exception:
+        macro_chart_shown = macro_chart_shown or False
+
+    # --- 4) Consumentenvertrouwen vs regionale performance ---
+    st.markdown("### Consumentenvertrouwen vs regionale performance")
+
+    try:
+        cci_series = get_cci_series(months_back=24)
+    except Exception as e:
+        cci_series = []
+        cci_error = repr(e)
+
+    if cci_series:
+        cci_df = pd.DataFrame(cci_series)
+        cci_df["date"] = pd.to_datetime(
+            cci_df["period"].str[:4]
+            + "-"
+            + cci_df["period"].str[-2:]
+            + "-15",
+            errors="coerce",
+        )
+        cci_df = cci_df.dropna(subset=["date"])
+
+        if not cci_df.empty and cci_df["cci"].notna().any():
+            base_cci = cci_df["cci"].dropna().iloc[0]
+            if base_cci != 0:
+                cci_df["cci_index"] = cci_df["cci"] / base_cci * 100.0
+            else:
+                cci_df["cci_index"] = np.nan
+        else:
+            cci_df = pd.DataFrame()
+    else:
+        cci_df = pd.DataFrame()
+
+    if not cci_df.empty:
+        # Lijnen bouwen: CCI + regio-footfall + regio-omzet
+        lines_cc = []
+
+        cci_line = cci_df[["date", "cci_index"]].copy()
+        cci_line["series"] = "Consumentenvertrouwen-index"
+        cci_line = cci_line.rename(columns={"cci_index": "value"})
+        lines_cc.append(cci_line)
+
+        if "region_footfall_index" in region_month.columns:
+            reg_foot2 = region_month.rename(columns={"month": "date"})[
+                ["date", "region_footfall_index"]
+            ].copy()
+            reg_foot2["series"] = "Regio footfall-index"
+            reg_foot2 = reg_foot2.rename(columns={"region_footfall_index": "value"})
+            lines_cc.append(reg_foot2)
+
+        if "region_turnover_index" in region_month.columns:
+            reg_turn2 = region_month.rename(columns={"month": "date"})[
+                ["date", "region_turnover_index"]
+            ].copy()
+            reg_turn2["series"] = "Regio omzet-index"
+            reg_turn2 = reg_turn2.rename(columns={"region_turnover_index": "value"})
+            lines_cc.append(reg_turn2)
+
+        chart_cc = (
+            alt.Chart(pd.concat(lines_cc, ignore_index=True))
+            .mark_line(point=True)
+            .encode(
+                x=alt.X("date:T", title="Maand"),
+                y=alt.Y("value:Q", title="Index (100 = eerste maand met data)"),
+                color=alt.Color(
+                    "series:N",
+                    title="Reeks",
+                    scale=alt.Scale(
+                        domain=[
+                            "Consumentenvertrouwen-index",
+                            "Regio footfall-index",
+                            "Regio omzet-index",
+                        ],
+                        range=[PFM_RED, PFM_PURPLE, PFM_GREY],
+                    ),
+                ),
+                tooltip=[
+                    alt.Tooltip("date:T", title="Maand"),
+                    alt.Tooltip("series:N", title="Reeks"),
+                    alt.Tooltip("value:Q", title="Index", format=".1f"),
+                ],
+            )
+            .properties(height=260)
+        )
+
+        st.altair_chart(chart_cc, use_container_width=True)
+        st.caption(
+            "Consumentenvertrouwen (CCI) en regionale footfall/omzet zijn hier alle drie "
+            "herleid naar 100 in de eerste maand met data. Zo zie je direct of de regio "
+            "harder of minder hard groeit dan het consumentenvertrouwen."
+        )
+    else:
+        st.info(
+            "Geen bruikbare CCI-data beschikbaar vanuit de CBS-API (of geen data in de gekozen periode)."
+        )
 
     # -----------------------
     # Debug-sectie
