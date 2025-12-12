@@ -243,6 +243,52 @@ def fetch_region_street_traffic(region: str, start_date, end_date) -> pd.DataFra
     return df[["week_start", "street_footfall"]].reset_index(drop=True)
 
 # ----------------------
+# Robust helpers (prevents KeyError 'region')
+# ----------------------
+def ensure_region_column(df: pd.DataFrame, merged_map: pd.DataFrame, store_key_col: str) -> pd.DataFrame:
+    """
+    Zorgt dat df een kolom 'region' heeft.
+    - vangt region_x / region_y af
+    - koppelt via merged_map[['id','region']] met dtype-safe merge
+    """
+    if df is None or df.empty:
+        return df
+
+    if "region" in df.columns:
+        return df
+
+    for cand in ("region_x", "region_y"):
+        if cand in df.columns:
+            out = df.copy()
+            out["region"] = out[cand]
+            return out
+
+    if merged_map is None or merged_map.empty:
+        return df
+
+    if "id" not in merged_map.columns or "region" not in merged_map.columns:
+        return df
+
+    region_lookup = merged_map[["id", "region"]].drop_duplicates().copy()
+
+    out = df.copy()
+
+    # dtype-safe join keys
+    if store_key_col in out.columns:
+        out[store_key_col] = pd.to_numeric(out[store_key_col], errors="coerce").astype("Int64")
+        region_lookup["id"] = pd.to_numeric(region_lookup["id"], errors="coerce").astype("Int64")
+        out = out.merge(region_lookup, left_on=store_key_col, right_on="id", how="left")
+        return out
+
+    if "id" in out.columns:
+        out["id"] = pd.to_numeric(out["id"], errors="coerce").astype("Int64")
+        region_lookup["id"] = pd.to_numeric(region_lookup["id"], errors="coerce").astype("Int64")
+        out = out.merge(region_lookup, on="id", how="left")
+        return out
+
+    return df
+
+# ----------------------
 # KPI helpers
 # ----------------------
 def compute_daily_kpis(df: pd.DataFrame) -> pd.DataFrame:
@@ -289,7 +335,6 @@ def kpi_card(label: str, value: str, help_text: str = ""):
     )
 
 def status_from_score(score: float):
-    # 0–100 scale
     if score >= 75:
         return "High performance", PFM_GREEN
     if score >= 60:
@@ -327,7 +372,6 @@ def gauge_chart(score_0_100: float, fill_color: str):
 # MAIN
 # ----------------------
 def main():
-    # Header + controls in one row (dashboard feel)
     header_left, header_right = st.columns([2.2, 1.8])
 
     with header_left:
@@ -343,7 +387,6 @@ def main():
             unsafe_allow_html=True,
         )
 
-    # Data needed for selectors
     clients = load_clients("clients.json")
     clients_df = pd.DataFrame(clients)
     clients_df["label"] = clients_df.apply(
@@ -438,7 +481,7 @@ def main():
         st.warning(f"Geen winkels gevonden voor regio '{region_choice}'.")
         return
 
-    # For region compare, we need data for ALL shops (so we can compute region_scores across all regions)
+    # For region compare, we need data for ALL shops
     all_shop_ids = merged["id"].dropna().astype(int).unique().tolist()
     fetch_ids = all_shop_ids if compare_all_regions else region_shop_ids
 
@@ -525,20 +568,14 @@ def main():
         store_key_col=store_key_col,
     )
 
+    # Ensure region exists on svi_all (this prevents KeyError later)
+    svi_all = ensure_region_column(svi_all, merged, store_key_col) if isinstance(svi_all, pd.DataFrame) else pd.DataFrame()
+
     region_scores = pd.DataFrame()
     region_svi = np.nan
     region_status, region_color = ("-", PFM_LINE)
 
-    if not svi_all.empty:
-        # Ensure region column exists
-        if "region" not in svi_all.columns:
-            svi_all = svi_all.merge(
-                merged[["id", "region"]].drop_duplicates(),
-                left_on=store_key_col,
-                right_on="id",
-                how="left",
-            )
-
+    if not svi_all.empty and "region" in svi_all.columns:
         region_scores = (
             svi_all.groupby("region", as_index=False)["svi_score"]
             .mean()
@@ -550,6 +587,11 @@ def main():
         if not cur.empty:
             region_svi = float(np.clip(cur["region_svi"].iloc[0], 0, 100))
             region_status, region_color = status_from_score(region_svi)
+
+    # Prepare svi_region ONCE (reuse in two panels)
+    svi_region = pd.DataFrame()
+    if not svi_all.empty and "region" in svi_all.columns:
+        svi_region = svi_all[svi_all["region"] == region_choice].copy()
 
     # One-screen layout blocks
     st.markdown(f"### {selected_client['brand']} — Regio **{region_choice}**  ·  {start_period} → {end_period}")
@@ -564,7 +606,6 @@ def main():
     with k4:
         kpi_card("Capture", (fmt_pct(avg_capture) if not pd.isna(avg_capture) else "-"), "Gemiddeld (Pathzz)")
     with k5:
-        # Region vitality mini-panel
         st.markdown('<div class="panel"><div class="panel-title">Regio Vitality</div>', unsafe_allow_html=True)
         if not pd.isna(region_svi):
             st.altair_chart(gauge_chart(region_svi, region_color), use_container_width=True)
@@ -630,7 +671,10 @@ def main():
                 )
             )
 
-            st.altair_chart(alt.layer(bar, line).resolve_scale(y="independent").properties(height=280), use_container_width=True)
+            st.altair_chart(
+                alt.layer(bar, line).resolve_scale(y="independent").properties(height=280),
+                use_container_width=True
+            )
 
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -674,49 +718,15 @@ def main():
     with r3_left:
         st.markdown('<div class="panel"><div class="panel-title">Store Vitality ranking — geselecteerde regio</div>', unsafe_allow_html=True)
 
-        if svi_all.empty:
-            st.info("Geen SVI beschikbaar.")
+        if svi_region.empty:
+            st.info("Geen stores in deze regio met SVI (of regio-koppeling ontbreekt).")
         else:
-            # --- Ensure 'region' exists on svi_region (defensive) ---
-if "region" not in svi_region.columns:
-    region_lookup = merged[["id", "region"]].drop_duplicates()
-
-    # store_key_col is the column in svi_region that identifies the store (id/shop_id/location_id)
-    # In most setups build_store_vitality keeps store_key_col as the store identifier column
-    if store_key_col in svi_region.columns:
-        svi_region = svi_region.merge(
-            region_lookup,
-            left_on=store_key_col,
-            right_on="id",
-            how="left",
-        )
-    elif "id" in svi_region.columns:
-        svi_region = svi_region.merge(
-            region_lookup,
-            on="id",
-            how="left",
-        )
-
-# Handle possible suffixes if region ended up as region_x/region_y
-if "region" not in svi_region.columns:
-    for cand in ["region_x", "region_y"]:
-        if cand in svi_region.columns:
-            svi_region["region"] = svi_region[cand]
-            break
-            svi_region = svi_all.merge(
-                merged[["id", "region"]].drop_duplicates(),
-                left_on=store_key_col,
-                right_on="id",
-                how="left",
-            )
-            svi_region = svi_region[svi_region["region"] == region_choice].copy()
+            svi_region["svi_score"] = pd.to_numeric(svi_region["svi_score"], errors="coerce")
+            svi_region = svi_region.dropna(subset=["svi_score"])
 
             if svi_region.empty:
-                st.info("Geen stores in deze regio met SVI.")
+                st.info("Geen valide SVI-scores gevonden.")
             else:
-                svi_region["svi_score"] = pd.to_numeric(svi_region["svi_score"], errors="coerce")
-                svi_region = svi_region.dropna(subset=["svi_score"])
-
                 chart_rank = (
                     alt.Chart(svi_region.sort_values("svi_score", ascending=False).head(12))
                     .mark_bar(cornerRadiusEnd=4)
@@ -747,32 +757,27 @@ if "region" not in svi_region.columns:
     with r3_right:
         st.markdown('<div class="panel"><div class="panel-title">Biggest opportunities</div>', unsafe_allow_html=True)
 
-        if svi_all.empty:
+        if svi_region.empty:
             st.info("Geen opportunity data.")
+        elif "profit_potential_period" not in svi_region.columns:
+            st.info("Geen profit potential gevonden.")
         else:
-            svi_region = svi_all.merge(
-                merged[["id", "region"]].drop_duplicates(),
-                left_on=store_key_col,
-                right_on="id",
-                how="left",
+            period_days = (end_ts - start_ts).days + 1
+            year_factor = 365.0 / period_days if period_days > 0 else 1.0
+
+            tmp = svi_region.copy()
+            tmp["profit_potential_year"] = tmp["profit_potential_period"] * year_factor
+
+            opp = (
+                tmp[["store_name", "profit_potential_year"]]
+                .dropna()
+                .sort_values("profit_potential_year", ascending=False)
+                .head(6)
             )
-            svi_region = svi_region[svi_region["region"] == region_choice].copy()
 
-            if svi_region.empty or "profit_potential_period" not in svi_region.columns:
-                st.info("Geen profit potential gevonden.")
+            if opp.empty:
+                st.info("Geen opportunity records na filtering.")
             else:
-                period_days = (end_ts - start_ts).days + 1
-                year_factor = 365.0 / period_days if period_days > 0 else 1.0
-                svi_region["profit_potential_year"] = svi_region["profit_potential_period"] * year_factor
-
-                opp = (
-                    svi_region[["store_name", "profit_potential_year"]]
-                    .dropna()
-                    .sort_values("profit_potential_year", ascending=False)
-                    .head(6)
-                )
-
-                # show as simple chart (fast, readable)
                 opp_chart = (
                     alt.Chart(opp)
                     .mark_bar(cornerRadiusEnd=4, color=PFM_RED)
@@ -788,7 +793,6 @@ if "region" not in svi_region.columns:
                 )
                 st.altair_chart(opp_chart, use_container_width=True)
 
-                # quick “in your face” line
                 total_top5 = float(opp["profit_potential_year"].head(5).sum())
                 st.markdown(f"**Top 5 samen:** {fmt_eur(total_top5)} / jaar")
 
@@ -825,7 +829,6 @@ if "region" not in svi_region.columns:
             region_month["region_turnover_index"] = index_from_first_nonzero(region_month["region_turnover"])
             region_month["region_footfall_index"] = index_from_first_nonzero(region_month["region_footfall"])
 
-        # CBS retail index
         cbs_retail_month = pd.DataFrame()
         cci_df = pd.DataFrame()
 
@@ -956,7 +959,8 @@ if "region" not in svi_region.columns:
         st.write("All shops:", len(all_shop_ids), "Region shops:", len(region_shop_ids))
         st.write("df_period_all head:", df_period_all.head())
         st.write("df_region head:", df_region.head())
-        st.write("region_scores:", region_scores)
+        st.write("svi_all cols:", svi_all.columns.tolist() if isinstance(svi_all, pd.DataFrame) else "n/a")
+        st.write("region_scores:", region_scores.head() if isinstance(region_scores, pd.DataFrame) else "n/a")
 
 
 if __name__ == "__main__":
