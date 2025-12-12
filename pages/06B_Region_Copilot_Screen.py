@@ -677,6 +677,32 @@ def main():
         if svi_all.empty:
             st.info("Geen SVI beschikbaar.")
         else:
+            # --- Ensure 'region' exists on svi_region (defensive) ---
+if "region" not in svi_region.columns:
+    region_lookup = merged[["id", "region"]].drop_duplicates()
+
+    # store_key_col is the column in svi_region that identifies the store (id/shop_id/location_id)
+    # In most setups build_store_vitality keeps store_key_col as the store identifier column
+    if store_key_col in svi_region.columns:
+        svi_region = svi_region.merge(
+            region_lookup,
+            left_on=store_key_col,
+            right_on="id",
+            how="left",
+        )
+    elif "id" in svi_region.columns:
+        svi_region = svi_region.merge(
+            region_lookup,
+            on="id",
+            how="left",
+        )
+
+# Handle possible suffixes if region ended up as region_x/region_y
+if "region" not in svi_region.columns:
+    for cand in ["region_x", "region_y"]:
+        if cand in svi_region.columns:
+            svi_region["region"] = svi_region[cand]
+            break
             svi_region = svi_all.merge(
                 merged[["id", "region"]].drop_duplicates(),
                 left_on=store_key_col,
