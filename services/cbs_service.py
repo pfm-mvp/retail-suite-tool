@@ -52,7 +52,6 @@ def get_cci_series(months_back: int = 24) -> List[Dict]:
             }
         )
 
-    # Sorteer op periode-string en neem de laatste N maanden
     series = sorted(series, key=lambda x: x["period"])
     if months_back and len(series) > months_back:
         series = series[-months_back:]
@@ -69,7 +68,6 @@ def get_retail_index(months_back: int = 24) -> List[Dict]:
       - Ongecorrigeerd_1 als waarde
       - Gemiddelde over alle branches → 1 macroreeks
     """
-    # Belangrijk: CBS eist < 10000 records per query
     rows = _fetch_typed_dataset("85828NED", top=5000)
     if not rows:
         return []
@@ -105,31 +103,26 @@ def get_retail_index(months_back: int = 24) -> List[Dict]:
             }
         )
 
-    # Sorteer en knip op months_back
     series = sorted(series, key=lambda x: x["period"])
     if months_back and len(series) > months_back:
         series = series[-months_back:]
 
     return series
-    
+
+
 def get_cbs_stats_for_postcode4(postcode4: str) -> dict:
     """
     Backwards compatible wrapper voor de Store Copilot.
-    Als deze functie eerder bestond en later is verwijderd/hernamed, blijft je Store tool werken.
 
-    Retourneert een dict (kan leeg zijn) met postcode4 + (optioneel) kerncijfers.
+    Retourneert minimaal: {"postcode4": "..."} zodat de Store Copilot niet crasht.
+    Later kun je hier echte pc4-statistieken aan hangen.
     """
     pc4 = str(postcode4).strip()
     if not pc4:
         return {}
 
-    # --- Optie A: als je in de nieuwe cbs_service al een 'postcode' helper hebt ---
-    # Vervang onderstaande aanroep door je nieuwe functie (als die bestaat),
-    # bijv: return get_postcode4_stats(pc4)
-    #
-    # Voor nu: fail-safe “empty payload” zodat de Store Copilot niet crasht.
     try:
-        # TODO: Koppel hier je echte postcode4 CBS-logica als je weet welke nieuwe functie het is.
+        # TODO: vervang dit door echte postcode4 CBS-logica als je die weer toevoegt.
         return {"postcode4": pc4}
     except Exception:
         return {"postcode4": pc4}
