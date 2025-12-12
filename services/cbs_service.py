@@ -111,3 +111,25 @@ def get_retail_index(months_back: int = 24) -> List[Dict]:
         series = series[-months_back:]
 
     return series
+    
+def get_cbs_stats_for_postcode4(postcode4: str) -> dict:
+    """
+    Backwards compatible wrapper voor de Store Copilot.
+    Als deze functie eerder bestond en later is verwijderd/hernamed, blijft je Store tool werken.
+
+    Retourneert een dict (kan leeg zijn) met postcode4 + (optioneel) kerncijfers.
+    """
+    pc4 = str(postcode4).strip()
+    if not pc4:
+        return {}
+
+    # --- Optie A: als je in de nieuwe cbs_service al een 'postcode' helper hebt ---
+    # Vervang onderstaande aanroep door je nieuwe functie (als die bestaat),
+    # bijv: return get_postcode4_stats(pc4)
+    #
+    # Voor nu: fail-safe “empty payload” zodat de Store Copilot niet crasht.
+    try:
+        # TODO: Koppel hier je echte postcode4 CBS-logica als je weet welke nieuwe functie het is.
+        return {"postcode4": pc4}
+    except Exception:
+        return {"postcode4": pc4}
