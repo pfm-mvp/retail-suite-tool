@@ -1,6 +1,7 @@
-# pages/05_Retail_AI_Store_Copilot.py
+# pages/05_Retail_AI_Store_Copilot.py  (jouw _Copilot.py)
 
 import os
+import time  # ✅ NEW: for retry backoff
 import numpy as np
 import pandas as pd
 import requests
@@ -161,20 +162,38 @@ def fmt_int(x: float) -> str:
 @st.cache_data(ttl=600)
 def get_locations_by_company(company_id: int) -> pd.DataFrame:
     """
-    Wrapper rond /company/{company_id}/location van de vemcount-agent.
+    ✅ Robust wrapper rond /company/{company_id}/location van de vemcount-agent.
+
+    - Render/cold start friendly
+    - Retry bij ReadTimeout
+    - Langere timeouts
     """
     url = f"{FASTAPI_BASE_URL.rstrip('/')}/company/{company_id}/location"
 
-    resp = requests.get(url, timeout=30)
-    resp.raise_for_status()
-    data = resp.json()
+    last_err = None
+    # 2 pogingen: eerst redelijk, dan ruim (cold start / veel locaties)
+    for attempt, timeout_s in enumerate([45, 120], start=1):
+        try:
+            resp = requests.get(url, timeout=timeout_s)
+            resp.raise_for_status()
+            data = resp.json()
 
-    if isinstance(data, dict) and "locations" in data:
-        df = pd.DataFrame(data["locations"])
-    else:
-        df = pd.DataFrame(data)
+            if isinstance(data, dict) and "locations" in data:
+                df = pd.DataFrame(data["locations"])
+            else:
+                df = pd.DataFrame(data)
 
-    return df
+            return df
+
+        except requests.exceptions.ReadTimeout as e:
+            last_err = e
+            time.sleep(0.8 * attempt)  # kleine backoff
+            continue
+
+    # Als alles faalt → laat ReadTimeout omhoog bubbelen (main() vangt 'm af)
+    raise requests.exceptions.ReadTimeout(
+        f"Timeout bij ophalen locaties voor company {company_id} via {url}"
+    ) from last_err
 
 
 @st.cache_data(ttl=600)
@@ -622,7 +641,19 @@ def main():
     company_id = int(selected_client["company_id"])
 
     # --- Winkels ophalen via FastAPI ---
-    locations_df = get_locations_by_company(company_id)
+    try:
+        locations_df = get_locations_by_company(company_id)
+    except requests.exceptions.ReadTimeout:
+        st.error(
+            "FastAPI locatie-endpoint reageert te traag (timeout). "
+            "Dit gebeurt vaak bij een cold start of als er veel winkels zijn. "
+            "Klik nog eens op **Analyseer** of probeer straks opnieuw."
+        )
+        st.stop()
+    except requests.exceptions.RequestException as e:
+        st.error(f"Fout bij ophalen van winkels uit FastAPI: {e}")
+        st.stop()
+
     if locations_df.empty:
         st.error("Geen winkels gevonden voor deze retailer.")
         return
