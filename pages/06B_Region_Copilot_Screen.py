@@ -593,6 +593,13 @@ def main():
     if not svi_all.empty and "region" in svi_all.columns:
         svi_region = svi_all[svi_all["region"] == region_choice].copy()
 
+    # After: svi_region = svi_all[svi_all["region"] == region_choice].copy()
+
+    if not svi_region.empty and "svi_score" in svi_region.columns:
+        svi_region["svi_score"] = pd.to_numeric(svi_region["svi_score"], errors="coerce")
+        svi_region = svi_region.dropna(subset=["svi_score"]).sort_values("svi_score", ascending=False).reset_index(drop=True)
+        svi_region["rank_in_region"] = np.arange(1, len(svi_region) + 1)
+
     # One-screen layout blocks
     st.markdown(f"### {selected_client['brand']} — Regio **{region_choice}**  ·  {start_period} → {end_period}")
 
