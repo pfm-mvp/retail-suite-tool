@@ -88,6 +88,19 @@ def _get_openai_client():
 
 _OPENAI_CLIENT = _get_openai_client()
 
+@st.cache_data(ttl=600)
+def get_report_with_retry(params: list[tuple[str, str]], timeout_s: int = 120, attempts: int = 2):
+    last_err = None
+    for attempt in range(1, attempts + 1):
+        try:
+            resp = requests.post(REPORT_URL, params=params, timeout=timeout_s)
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            last_err = e
+            time.sleep(0.7 * attempt)
+    raise last_err
+
 # ----------------------
 # API URL / secrets setup
 # ----------------------
