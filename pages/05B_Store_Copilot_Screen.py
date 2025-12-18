@@ -642,11 +642,6 @@ def main():
         help="This date controls how much history we use to train the forecast model.",
     )
 
-    st.sidebar.markdown("### 🎯 Monthly targets (demo)")
-    turnover_target = st.sidebar.number_input("Turnover target (€)", min_value=0, value=18000, step=1000)
-    conv_target = st.sidebar.slider("Conversion target (%)", min_value=5.0, max_value=50.0, value=20.0, step=0.5)
-    spv_target = st.sidebar.number_input("SPV target (€ per visitor)", min_value=0.0, value=2.60, step=0.05, format="%.2f")
-
     def get_week_range(base_date):
         wd = base_date.weekday()
         start = base_date - timedelta(days=wd)
@@ -808,12 +803,6 @@ def main():
     conversion_target_pct = float(st.session_state.targets["conversion_target_pct"])
     spv_target = float(st.session_state.targets["spv_target"])
 
-    run_btn = st.sidebar.button("Analyse", type="primary")
-
-    if not run_btn:
-        st.info("Select retailer & store, pick a period and click **Analyse**.")
-        return
-
     # ✅ Force refresh regions.csv cache when running analysis (prevents stale region_map)
     try:
         load_region_mapping.clear()
@@ -853,20 +842,36 @@ def main():
         )
     else:
         merged_meta["store_display"] = merged_meta.get("name", merged_meta["id"].astype(str))
-
+        
     # ---------------------------
-    # Fetch store data (this year)
+    # Fetch store data (this year)  ✅ incl. transactions for conversion
     # ---------------------------
     with st.spinner("Fetching data via FastAPI..."):
-        metric_map = {"count_in": "footfall", "turnover": "turnover"}
-        resp_all = get_report(
-            [shop_id],
-            list(metric_map.keys()),
-            period="this_year",
-            step="day",
-            source="shops",
-        )
-        df_all_raw = normalize_vemcount_response(resp_all, kpi_keys=metric_map.keys()).rename(columns=metric_map)
+        metric_keys_primary = ["count_in", "turnover", "transactions"]  # <- essentieel voor conversie
+        try:
+            resp_all = get_report(
+                [shop_id],
+                metric_keys_primary,
+                period="this_year",
+                step="day",
+                source="shops",
+            )
+            df_all_raw = normalize_vemcount_response(resp_all, kpi_keys=metric_keys_primary).rename(
+                columns={"count_in": "footfall", "turnover": "turnover", "transactions": "transactions"}
+            )
+        except Exception:
+            # fallback als 'transactions' niet supported is voor deze klant
+            metric_keys_fallback = ["count_in", "turnover"]
+            resp_all = get_report(
+                [shop_id],
+                metric_keys_fallback,
+                period="this_year",
+                step="day",
+                source="shops",
+            )
+            df_all_raw = normalize_vemcount_response(resp_all, kpi_keys=metric_keys_fallback).rename(
+                columns={"count_in": "footfall", "turnover": "turnover"}
+            )
 
     if df_all_raw.empty:
         st.warning("No data found for this year for this store.")
@@ -1122,7 +1127,7 @@ def main():
           font-size: 12px;
           font-weight: 900;
           white-space: nowrap;">
-          {svi_ui['emoji']} {store_svi_status if store_svi_status else svi_ui['label']}
+          {svi_ui['emoji']} {html.escape(str(store_svi_status)) if store_svi_status else html.escape(str(svi_ui['label']))}
         </div>
       </div>
     """
@@ -1179,12 +1184,6 @@ def main():
     # ✅ Month outlook (forecast + actual) with YoY deltas + ring
     # ---------------------------
     st.markdown('<div class="section-title">Month outlook (forecast + actual)</div>', unsafe_allow_html=True)
-    
-    # Targets in sidebar (as requested)
-    with st.sidebar.expander("🎯 Month targets", expanded=False):
-        turnover_target = st.number_input("Turnover target (month) €", min_value=0, value=100000, step=5000)
-        conv_target = st.number_input("Conversion target %", min_value=0.0, value=10.0, step=0.5)
-        spv_target = st.number_input("SPV target €", min_value=0.0, value=50.0, step=1.0)
     
     # current calendar month
     month_start, month_end = get_month_range(today.year, today.month)
