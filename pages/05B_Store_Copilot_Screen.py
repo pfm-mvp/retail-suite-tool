@@ -271,6 +271,12 @@ def fetch_visualcrossing_history(location_str: str, start_date, end_date) -> pd.
 # -------------
 def compute_daily_kpis(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
+
+    # ✅ make sure numeric
+    for c in ["footfall", "turnover", "transactions"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
     if "turnover" in df.columns and "footfall" in df.columns:
         df["sales_per_visitor"] = np.where(
             df["footfall"] > 0,
@@ -586,7 +592,48 @@ def main():
         st.info("Select retailer & store, pick a period and click **Analyse**.")
         return
 
+    # ---------------------------
+    # ✅ Build merged store meta (same philosophy as Region tool)
+    # ---------------------------
+    region_map = load_region_mapping()
+
+    # Normalize ids
+    locations_df = locations_df.copy()
+    locations_df["id"] = pd.to_numeric(locations_df["id"], errors="coerce").astype("Int64")
+
+    merged_meta = pd.DataFrame()
+    if not region_map.empty:
+        merged_meta = locations_df.merge(region_map, left_on="id", right_on="shop_id", how="left")
+    else:
+        merged_meta = locations_df.copy()
+        merged_meta["region"] = np.nan
+        merged_meta["sqm_override"] = np.nan
+        merged_meta["store_label"] = np.nan
+
+    # sqm_effective + store_display
+    if "sqm" in merged_meta.columns:
+        merged_meta["sqm_effective"] = np.where(
+            merged_meta.get("sqm_override", pd.Series([np.nan] * len(merged_meta))).notna(),
+            merged_meta.get("sqm_override"),
+            pd.to_numeric(merged_meta["sqm"], errors="coerce"),
+        )
+    else:
+        merged_meta["sqm_effective"] = pd.to_numeric(merged_meta.get("sqm_override", np.nan), errors="coerce")
+
+    if "store_label" in merged_meta.columns and merged_meta["store_label"].notna().any():
+        merged_meta["store_display"] = np.where(
+            merged_meta["store_label"].notna(),
+            merged_meta["store_label"],
+            merged_meta.get("name", merged_meta["id"].astype(str)),
+        )
+    else:
+        merged_meta["store_display"] = merged_meta.get("name", merged_meta["id"].astype(str))
+
+    merged_meta["region"] = merged_meta.get("region", np.nan).astype(str)
+
+    # ---------------------------
     # --- Fetch store data (this year, then slice locally) ---
+    # ---------------------------
     with st.spinner("Fetching data via FastAPI..."):
         metric_map = {
             "count_in": "footfall",
@@ -609,6 +656,19 @@ def main():
 
     df_all_raw["date"] = pd.to_datetime(df_all_raw["date"], errors="coerce")
     df_all_raw = df_all_raw.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
+
+    # detect store key col for this dataset
+    store_key_col_all = None
+    for cand in ["id", "shop_id", "location_id"]:
+        if cand in df_all_raw.columns:
+            store_key_col_all = cand
+            break
+
+    if store_key_col_all is None:
+        st.error("No store id column found in report response (id/shop_id/location_id).")
+        return
+
+    df_all_raw[store_key_col_all] = pd.to_numeric(df_all_raw[store_key_col_all], errors="coerce").astype("Int64")
 
     # --- Forecast history (date range) ---
     hist_end = datetime.today().date()
@@ -725,116 +785,111 @@ def main():
         conv_delta = f"{(conv_cur - conv_prev) / conv_prev * 100:+.1f}%"
 
     # ---------------------------
-    # ✅ SVI (reuse services/svi_service.py)
+    # ✅ SVI (SVI-proof: same pattern as Region tool)
     # ---------------------------
     store_svi_score = None
     store_svi_rank = None
     store_svi_peer_n = None
     store_region = None
+    store_svi_status = None
+    store_svi_reason = None
+    svi_debug_err = None
 
-    region_map = load_region_mapping()
+    try:
+        # Determine region for this store from merged_meta
+        mm_row = merged_meta[merged_meta["id"].astype("Int64") == pd.Series([shop_id], dtype="Int64").iloc[0]]
+        if not mm_row.empty:
+            reg_val = mm_row["region"].iloc[0]
+            store_region = None if (pd.isna(reg_val) or str(reg_val).strip() in ("", "nan", "None")) else str(reg_val).strip()
 
-    if not region_map.empty:
-        region_map["shop_id"] = pd.to_numeric(region_map["shop_id"], errors="coerce").astype("Int64")
-        this_map_row = region_map[region_map["shop_id"] == shop_id]
-        if not this_map_row.empty:
-            store_region = str(this_map_row["region"].iloc[0])
+        if store_region:
+            peers_meta = merged_meta[merged_meta["region"].astype(str) == store_region].copy()
+            peer_ids = peers_meta["id"].dropna().astype(int).unique().tolist()
 
-    if store_region:
-        # peers = all shops in same region (for this retailer)
-        region_peer_ids = region_map[region_map["region"].astype(str) == store_region]["shop_id"].dropna().astype(int).unique().tolist()
+            # safety: ensure current store included
+            if shop_id not in peer_ids:
+                peer_ids.append(shop_id)
 
-        # limit peers to stores that exist in locations_df (this company)
-        loc_ids = pd.to_numeric(locations_df["id"], errors="coerce").dropna().astype(int).unique().tolist()
-        peer_ids = [sid for sid in region_peer_ids if sid in set(loc_ids)]
-        if shop_id not in peer_ids:
-            peer_ids.append(shop_id)
-
-        # pull peers data for selected current period range
-        try:
+            # 1) Fetch peer data broadly, then slice locally (like 06B)
             resp_peers = get_report(
                 peer_ids,
                 ["count_in", "turnover"],
-                period="date",
+                period="this_year",
                 step="day",
                 source="shops",
-                form_date_from=start_cur.strftime("%Y-%m-%d"),
-                form_date_to=end_cur.strftime("%Y-%m-%d"),
             )
-            df_peers = normalize_vemcount_response(resp_peers, kpi_keys=["count_in", "turnover"]).rename(
+            df_peers_raw = normalize_vemcount_response(resp_peers, kpi_keys=["count_in", "turnover"]).rename(
                 columns={"count_in": "footfall", "turnover": "turnover"}
             )
-            if not df_peers.empty:
-                df_peers["date"] = pd.to_datetime(df_peers["date"], errors="coerce")
-                df_peers = df_peers.dropna(subset=["date"])
 
-                # detect store key col
+            if df_peers_raw is not None and not df_peers_raw.empty:
+                df_peers_raw["date"] = pd.to_datetime(df_peers_raw["date"], errors="coerce")
+                df_peers_raw = df_peers_raw.dropna(subset=["date"]).copy()
+
+                # detect store key col from peers response
                 store_key_col = None
                 for cand in ["id", "shop_id", "location_id"]:
-                    if cand in df_peers.columns:
+                    if cand in df_peers_raw.columns:
                         store_key_col = cand
                         break
 
-                if store_key_col:
-                    # add sqm_effective to df_peers using locations + override
-                    loc_meta = locations_df.copy()
-                    loc_meta["id"] = pd.to_numeric(loc_meta["id"], errors="coerce").astype("Int64")
-                    loc_meta["sqm"] = pd.to_numeric(loc_meta.get("sqm", np.nan), errors="coerce")
+                if store_key_col is None:
+                    raise ValueError("Peers report has no store id column (id/shop_id/location_id).")
 
-                    # region overrides for sqm / labels
-                    reg = region_map.copy()
-                    reg["shop_id"] = pd.to_numeric(reg["shop_id"], errors="coerce").astype("Int64")
-                    reg["sqm_override"] = pd.to_numeric(reg.get("sqm_override", np.nan), errors="coerce")
+                df_peers_raw[store_key_col] = pd.to_numeric(df_peers_raw[store_key_col], errors="coerce").astype("Int64")
 
-                    meta = loc_meta.merge(reg, left_on="id", right_on="shop_id", how="left")
+                # 2) Slice to current period locally
+                df_peers_period = df_peers_raw[
+                    (df_peers_raw["date"] >= start_cur_ts) & (df_peers_raw["date"] <= end_cur_ts)
+                ].copy()
 
-                    meta["sqm_effective"] = np.where(
-                        meta["sqm_override"].notna(),
-                        meta["sqm_override"],
-                        meta["sqm"],
-                    )
+                if df_peers_period.empty:
+                    # fallback: if no data inside the exact slice, keep last 60 days (still peerset)
+                    fallback_start = end_cur_ts - pd.Timedelta(days=60)
+                    df_peers_period = df_peers_raw[
+                        (df_peers_raw["date"] >= fallback_start) & (df_peers_raw["date"] <= end_cur_ts)
+                    ].copy()
 
-                    meta["store_display"] = np.where(
-                        meta.get("store_label", pd.Series([np.nan] * len(meta))).notna(),
-                        meta["store_label"],
-                        meta.get("name", meta["id"].astype(str)),
-                    )
+                # 3) Merge metadata identical to Region tool (includes region & sqm_effective)
+                meta_join = peers_meta[["id", "store_display", "region", "sqm_effective"]].drop_duplicates().copy()
+                meta_join["id"] = pd.to_numeric(meta_join["id"], errors="coerce").astype("Int64")
 
-                    # df_peers join
-                    df_peers[store_key_col] = pd.to_numeric(df_peers[store_key_col], errors="coerce").astype("Int64")
-                    df_peers = df_peers.merge(
-                        meta[["id", "store_display", "sqm_effective"]],
-                        left_on=store_key_col,
-                        right_on="id",
-                        how="left",
-                    )
-                    df_peers["sqm_effective"] = pd.to_numeric(df_peers["sqm_effective"], errors="coerce")
+                df_peers_period = df_peers_period.merge(
+                    meta_join,
+                    left_on=store_key_col,
+                    right_on="id",
+                    how="left",
+                )
 
-                    # compute KPIs needed by SVI service
-                    df_peers = compute_daily_kpis(df_peers)
+                # 4) Compute kpis required by SVI service
+                df_peers_period = compute_daily_kpis(df_peers_period)
 
-                    # build vitality (one row per store)
-                    svi_df = build_store_vitality(
-                        df_period=df_peers,
-                        region_shops=meta.rename(columns={"id": "id"}),  # expects 'id' and 'store_display'
-                        store_key_col=store_key_col,
-                    )
+                # 5) Build SVI for ALL peers
+                svi_df = build_store_vitality(
+                    df_period=df_peers_period,
+                    region_shops=peers_meta,   # must contain id + store_display (+sqm_effective)
+                    store_key_col=store_key_col,
+                )
 
-                    if svi_df is not None and not svi_df.empty:
-                        # rank inside region peers
-                        svi_df["svi_score"] = pd.to_numeric(svi_df["svi_score"], errors="coerce")
-                        svi_df = svi_df.dropna(subset=["svi_score"]).sort_values("svi_score", ascending=False).reset_index(drop=True)
-                        svi_df["rank"] = np.arange(1, len(svi_df) + 1)
+                if svi_df is not None and not svi_df.empty:
+                    # Rank inside region (peers only)
+                    svi_df["svi_score"] = pd.to_numeric(svi_df["svi_score"], errors="coerce")
+                    svi_df = svi_df.dropna(subset=["svi_score"]).sort_values("svi_score", ascending=False).reset_index(drop=True)
+                    svi_df["rank"] = np.arange(1, len(svi_df) + 1)
 
-                        row = svi_df[svi_df[store_key_col].astype("Int64") == pd.Series([shop_id], dtype="Int64").iloc[0]]
-                        if not row.empty:
-                            store_svi_score = float(np.clip(row["svi_score"].iloc[0], 0, 100))
-                            store_svi_rank = int(row["rank"].iloc[0])
-                            store_svi_peer_n = int(len(svi_df))
+                    # pick current store
+                    sid_key = pd.Series([shop_id], dtype="Int64").iloc[0]
+                    row = svi_df[svi_df[store_key_col].astype("Int64") == sid_key]
 
-        except Exception:
-            # keep SVI as None (UI will show placeholders)
-            pass
+                    if not row.empty:
+                        store_svi_score = float(np.clip(row["svi_score"].iloc[0], 0, 100))
+                        store_svi_rank = int(row["rank"].iloc[0])
+                        store_svi_peer_n = int(len(svi_df))
+                        store_svi_status = str(row.get("svi_status", pd.Series([None])).iloc[0]) if "svi_status" in row.columns else None
+                        store_svi_reason = str(row.get("reason_short", pd.Series([None])).iloc[0]) if "reason_short" in row.columns else None
+
+    except Exception as e:
+        svi_debug_err = str(e)
 
     # ---------------------------
     # Row: KPI cards (now includes SVI card)
@@ -866,7 +921,11 @@ def main():
             )
 
     with col5:
-        # ✅ SVI Scorecard (exactly what you asked)
+        # ✅ SVI Scorecard (SVI-proof)
+        status_line = ""
+        if store_svi_status and store_svi_status not in ("None", "nan"):
+            status_line = f" · {store_svi_status}"
+
         st.markdown(
             f"""
             <div style="border:1px solid {PFM_LINE}; border-radius:14px; padding:0.85rem 1rem; background:white;">
@@ -878,11 +937,15 @@ def main():
                 Rank: {f"{store_svi_rank} / {store_svi_peer_n}" if (store_svi_rank and store_svi_peer_n) else "—"}
                 · benchmark vs regional peers
                 {f" · Region: {store_region}" if store_region else ""}
+                {status_line}
               </div>
             </div>
             """,
             unsafe_allow_html=True,
         )
+
+        if store_svi_reason and store_svi_reason not in ("None", "nan"):
+            st.caption(store_svi_reason)
 
     # --- Weekly chart: street vs store + turnover + capture ---
     st.markdown("### Street traffic vs store traffic (weekly demo)")
@@ -1071,6 +1134,11 @@ def main():
         st.write("Shop row:", shop_row)
         st.write("Store region:", store_region)
         st.write("SVI score:", store_svi_score, "Rank:", store_svi_rank, "Peers:", store_svi_peer_n)
+        st.write("SVI status:", store_svi_status)
+        st.write("SVI reason:", store_svi_reason)
+        st.write("SVI error:", svi_debug_err)
+        st.write("Merged meta cols:", merged_meta.columns.tolist() if isinstance(merged_meta, pd.DataFrame) else "n/a")
+        st.write("Merged meta row (this store):", merged_meta[merged_meta["id"].astype("Int64") == pd.Series([shop_id], dtype="Int64").iloc[0]].head())
         st.write("All daily (head):", df_all_raw.head())
         st.write("Current df (head):", df_cur.head())
         st.write("Prev df (head):", df_prev.head())
