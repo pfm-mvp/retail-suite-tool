@@ -8,6 +8,7 @@ import requests
 import streamlit as st
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
+import html  # ✅ for safe HTML escaping inside unsafe_allow_html blocks
 
 try:
     from openai import OpenAI
@@ -641,6 +642,11 @@ def main():
         help="This date controls how much history we use to train the forecast model.",
     )
 
+    st.sidebar.markdown("### 🎯 Monthly targets (demo)")
+    turnover_target = st.sidebar.number_input("Turnover target (€)", min_value=0, value=18000, step=1000)
+    conv_target = st.sidebar.slider("Conversion target (%)", min_value=5.0, max_value=50.0, value=20.0, step=0.5)
+    spv_target = st.sidebar.number_input("SPV target (€ per visitor)", min_value=0.0, value=2.60, step=0.05, format="%.2f")
+
     def get_week_range(base_date):
         wd = base_date.weekday()
         start = base_date - timedelta(days=wd)
@@ -1100,44 +1106,50 @@ def main():
         """, unsafe_allow_html=True)
         if store_svi_reason and store_svi_reason not in ("None", "nan"):
             st.caption(store_svi_reason)
-
+   
     # ---------------------------
-    # ✅ Month outlook (forecast + actual) with YoY deltas
+    # ✅ Month outlook (forecast + actual) with YoY deltas + ring
     # ---------------------------
     st.markdown('<div class="section-title">Month outlook (forecast + actual)</div>', unsafe_allow_html=True)
-
+    
+    # Targets in sidebar (as requested)
+    with st.sidebar.expander("🎯 Month targets", expanded=False):
+        turnover_target = st.number_input("Turnover target (month) €", min_value=0, value=100000, step=5000)
+        conv_target = st.number_input("Conversion target %", min_value=0.0, value=10.0, step=0.5)
+        spv_target = st.number_input("SPV target €", min_value=0.0, value=50.0, step=1.0)
+    
     # current calendar month
     month_start, month_end = get_month_range(today.year, today.month)
     mtd_end = today
-
+    
     # actual MTD from df_all_raw
     mtd_mask = (df_all_raw["date"] >= pd.Timestamp(month_start)) & (df_all_raw["date"] <= pd.Timestamp(mtd_end))
     df_mtd = df_all_raw.loc[mtd_mask].copy()
-
+    
     turnover_mtd = float(df_mtd["turnover"].sum()) if not df_mtd.empty and "turnover" in df_mtd.columns else np.nan
     footfall_mtd = float(df_mtd["footfall"].sum()) if not df_mtd.empty and "footfall" in df_mtd.columns else np.nan
-
+    
     # forecast remaining days of month via DOW means
     future_dates = pd.date_range(pd.Timestamp(mtd_end) + pd.Timedelta(days=1), pd.Timestamp(month_end), freq="D")
     fc_month = forecast_by_dow(df_hist_raw, future_dates)
-
+    
     turnover_rem_fc = float(fc_month["turnover_forecast"].sum()) if not fc_month.empty else np.nan
     footfall_rem_fc = float(fc_month["footfall_forecast"].sum()) if not fc_month.empty else np.nan
-
+    
     turnover_total_fc = (turnover_mtd + turnover_rem_fc) if (pd.notna(turnover_mtd) and pd.notna(turnover_rem_fc)) else np.nan
-
+    
     # last year same month (MTD and full month) via API
     ly_turnover_mtd = np.nan
     ly_turnover_month = np.nan
-
+    
     try:
         month_start_ly = (pd.Timestamp(month_start) - pd.DateOffset(years=1)).date()
         month_end_ly = (pd.Timestamp(month_end) - pd.DateOffset(years=1)).date()
-
+    
         # same “day-of-month progress” for MTD comparison
         mtd_len = (mtd_end - month_start).days
         mtd_end_ly = month_start_ly + timedelta(days=max(mtd_len, 0))
-
+    
         resp_ly = get_report(
             [shop_id],
             ["count_in", "turnover"],
@@ -1154,21 +1166,21 @@ def main():
             df_ly["date"] = pd.to_datetime(df_ly["date"], errors="coerce")
             df_ly = df_ly.dropna(subset=["date"])
             df_ly["turnover"] = pd.to_numeric(df_ly["turnover"], errors="coerce")
-
+    
             ly_turnover_month = float(df_ly["turnover"].sum())
-
+    
             mtd_ly_mask = (df_ly["date"] >= pd.Timestamp(month_start_ly)) & (df_ly["date"] <= pd.Timestamp(mtd_end_ly))
             ly_turnover_mtd = float(df_ly.loc[mtd_ly_mask, "turnover"].sum())
     except Exception:
         pass
-
+    
     # deltas for month cards
     mtd_yoy_delta = pct_delta(turnover_mtd, ly_turnover_mtd)
     total_yoy_delta = pct_delta(turnover_total_fc, ly_turnover_month)
-
-    # Render month cards (4 across)
-    cols_m = st.columns([1, 1, 1, 1])
-
+    
+    # ✅ 5 columns now (4 KPIs + ring)
+    cols_m = st.columns([1, 1, 1, 1, 1.2])
+    
     with cols_m[0]:
         st.markdown(kpi_card_html(
             "Turnover MTD (actual)",
@@ -1176,15 +1188,15 @@ def main():
             sub="vs same month last year (MTD)",
             delta_pct=mtd_yoy_delta
         ), unsafe_allow_html=True)
-
+    
     with cols_m[1]:
         st.markdown(kpi_card_html(
             "Turnover remaining (forecast)",
             fmt_eur(turnover_rem_fc),
-            sub=f"Forecast covers {len(future_dates)}/{len(future_dates)} remaining days." if len(future_dates) > 0 else "No remaining days.",
+            sub=f"Forecast covers {len(future_dates)} remaining days." if len(future_dates) > 0 else "No remaining days.",
             delta_pct=None
         ), unsafe_allow_html=True)
-
+    
     with cols_m[2]:
         st.markdown(kpi_card_html(
             "Turnover total month (forecast)",
@@ -1192,7 +1204,7 @@ def main():
             sub="vs same month last year (full month)",
             delta_pct=total_yoy_delta
         ), unsafe_allow_html=True)
-
+    
     with cols_m[3]:
         st.markdown(kpi_card_html(
             "Footfall remaining (forecast)",
@@ -1200,6 +1212,40 @@ def main():
             sub="",
             delta_pct=None
         ), unsafe_allow_html=True)
+    
+    with cols_m[4]:
+        # ✅ 3-ring "Activity" (Turnover / Conversion / SPV)
+        def _pct(val, target):
+            if target in (None, 0) or pd.isna(val):
+                return 0.0
+            return float(np.clip((float(val) / float(target)) * 100.0, 0, 120))
+    
+        # use: turnover forecast total for the month + current period conv/spv
+        turnover_prog = _pct(turnover_total_fc, turnover_target)
+        conv_prog = _pct(conv_cur, conv_target)
+        spv_prog = _pct(spv_cur, spv_target)
+    
+        # make rings readable & on-brand
+        fig_ring = go.Figure()
+        fig_ring.add_trace(go.Pie(values=[turnover_prog, 100-turnover_prog], hole=0.58,
+                                  marker=dict(colors=[PFM_RED, PFM_LINE]), textinfo="none", showlegend=False))
+        fig_ring.add_trace(go.Pie(values=[conv_prog, 100-conv_prog], hole=0.73,
+                                  marker=dict(colors=[PFM_PURPLE, PFM_LINE]), textinfo="none", showlegend=False))
+        fig_ring.add_trace(go.Pie(values=[spv_prog, 100-spv_prog], hole=0.86,
+                                  marker=dict(colors=[PFM_PEACH, PFM_LINE]), textinfo="none", showlegend=False))
+    
+        fig_ring.update_layout(
+            height=190,
+            margin=dict(t=10, b=10, l=10, r=10),
+            annotations=[dict(
+                text="Targets",
+                x=0.5, y=0.5, showarrow=False,
+                font=dict(size=14, color=PFM_DARK)
+            )]
+        )
+    
+        st.plotly_chart(fig_ring, use_container_width=True)
+        st.caption(f"Turnover {turnover_prog:.0f}% · Conv {conv_prog:.0f}% · SPV {spv_prog:.0f}%")
 
     # ---------------------------
     # ✅ Daily footfall & turnover (actual + forecast) — forecast bars light purple
