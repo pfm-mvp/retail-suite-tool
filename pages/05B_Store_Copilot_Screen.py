@@ -1176,7 +1176,14 @@ def main():
         st.write("SVI score:", store_svi_score, "Rank:", store_svi_rank, "Peers:", store_svi_peer_n)
         st.write("SVI status:", store_svi_status)
         st.write("SVI reason:", store_svi_reason)
-        st.write("SVI error:", svi_debug_err)
+        st.write("SVI error:", store_svi_error)
+        
+        try:
+            st.write("Merged meta cols:", meta.columns.tolist() if isinstance(meta, pd.DataFrame) else None)
+            if isinstance(meta, pd.DataFrame) and not meta.empty:
+                st.write("Meta row (selected store):", meta.loc[meta["id"] == pd.Series([shop_id], dtype="Int64").iloc[0]].head(1))
+        except Exception:
+            pass
         st.write("Merged meta cols:", merged_meta.columns.tolist() if isinstance(merged_meta, pd.DataFrame) else "n/a")
         st.write("Merged meta row (this store):", merged_meta[merged_meta["id"].astype("Int64") == pd.Series([shop_id], dtype="Int64").iloc[0]].head())
         st.write("All daily (head):", df_all_raw.head())
