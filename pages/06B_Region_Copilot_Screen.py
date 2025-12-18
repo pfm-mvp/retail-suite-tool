@@ -125,23 +125,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-top = st.container()
-
-with top:
-    c = st.columns([1.6, 1.2, 1.2, 1.1, 1.1, 0.9])
-    with c[0]:
-        retailer = st.selectbox("Retailer", retailer_options, key="rm_retailer")
-    with c[1]:
-        region = st.selectbox("Regio", region_options, key="rm_region")
-    with c[2]:
-        period = st.selectbox("Periode", period_options, index=2, key="rm_period")
-    with c[3]:
-        compare_regions = st.toggle("Vergelijk met andere regio’s", value=False, key="rm_compare")
-    with c[4]:
-        show_macro = st.toggle("Toon macro (CBS/CCI)", value=False, key="rm_macro")
-    with c[5]:
-        run_btn = st.button("Analyseer", type="primary", key="rm_analyse")
-
 # ----------------------
 # Format helpers
 # ----------------------
