@@ -739,6 +739,74 @@ def main():
         ["Simple (DoW)", "Pro (LightGBM beta)"],
         index=0,
     )
+    
+        # ---------------------------
+    # ✅ Persistent run-state + targets (NO duplicate widgets, NO blank page on rerun)
+    # ---------------------------
+    if "has_run" not in st.session_state:
+        st.session_state.has_run = False
+    
+    if "targets" not in st.session_state:
+        st.session_state.targets = {
+            "turnover_target_month": 20000.0,
+            "conversion_target_pct": 20.0,
+            "spv_target": 3.0,
+        }
+    
+    # --- Monthly targets (demo) — render ONCE in sidebar
+    st.sidebar.markdown("### 🎯 Monthly targets (demo)")
+    
+    turnover_target_month = st.sidebar.number_input(
+        "Turnover target (€)",
+        min_value=0.0,
+        value=float(st.session_state.targets["turnover_target_month"]),
+        step=1000.0,
+        key="turnover_target_month_input",
+    )
+    
+    conversion_target_pct = st.sidebar.slider(
+        "Conversion target (%)",
+        min_value=5.0,
+        max_value=60.0,
+        value=float(st.session_state.targets["conversion_target_pct"]),
+        step=0.5,
+        key="conversion_target_pct_input",
+    )
+    
+    spv_target = st.sidebar.number_input(
+        "SPV target (€ per visitor)",
+        min_value=0.0,
+        value=float(st.session_state.targets["spv_target"]),
+        step=0.10,
+        key="spv_target_input",
+    )
+    
+    # --- Buttons
+    c_btn = st.sidebar.columns([1, 1])
+    run_btn = c_btn[0].button("Analyse", type="primary", key="analyse_btn")
+    reset_btn = c_btn[1].button("Reset", key="reset_btn")
+    
+    if reset_btn:
+        st.session_state.has_run = False
+    
+    if run_btn:
+        # ✅ Freeze targets at the moment of Analyse
+        st.session_state.targets = {
+            "turnover_target_month": float(turnover_target_month),
+            "conversion_target_pct": float(conversion_target_pct),
+            "spv_target": float(spv_target),
+        }
+        st.session_state.has_run = True
+    
+    # ✅ If user hasn't analysed yet, show message but DO NOT st.stop() later in the script
+    if not st.session_state.has_run:
+        st.info("Select retailer & store, set targets, pick a period and click **Analyse**.")
+        return
+    
+    # ✅ Use frozen targets from here onward
+    turnover_target_month = float(st.session_state.targets["turnover_target_month"])
+    conversion_target_pct = float(st.session_state.targets["conversion_target_pct"])
+    spv_target = float(st.session_state.targets["spv_target"])
 
     run_btn = st.sidebar.button("Analyse", type="primary")
 
