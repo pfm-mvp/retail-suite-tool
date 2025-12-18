@@ -1101,12 +1101,13 @@ def main():
 
         except Exception as e:
             store_svi_error = f"SVI build failed: {e}"
+    #  ✅ SVI UI object first (must exist before escaping label)
+    svi_ui = svi_style(store_svi_score)
+
     # ✅ sanitize dynamic values used inside unsafe HTML
     _region_safe = html.escape(str(store_region)) if store_region else ""
     _status_safe = html.escape(str(store_svi_status)) if store_svi_status else ""
-    _label_safe = html.escape(str(svi_ui["label"]))
-    
-    svi_ui = svi_style(store_svi_score)
+    _label_safe = html.escape(str(svi_ui.get("label", "")))  # safe even if missing
     svi_badge = f"""
       <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px;">
         <div>
@@ -1119,7 +1120,11 @@ def main():
             Rank: {f"{store_svi_rank} / {store_svi_peer_n}" if (store_svi_rank and store_svi_peer_n) else "—"}
             · benchmark vs regional peers
             {f" · Region: {_region_safe}" if store_region else ""}
-            ...
+            <div class="kpi-sub">
+              Rank: {f"{store_svi_rank} / {store_svi_peer_n}" if (store_svi_rank and store_svi_peer_n) else "—"}
+              · benchmark vs regional peers
+              {f" · Region: {_region_safe}" if store_region else ""}
+            </div>
             {_status_safe if store_svi_status else _label_safe}
           </div>
         </div>
