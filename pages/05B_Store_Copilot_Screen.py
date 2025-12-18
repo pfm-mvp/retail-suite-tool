@@ -900,14 +900,31 @@ def main():
     try:
         resp_hist = get_report(
             [shop_id],
-            list(metric_map.keys()),
+            metric_keys_primary,
             period="date",
             step="day",
             source="shops",
             form_date_from=hist_start.strftime("%Y-%m-%d"),
             form_date_to=hist_end.strftime("%Y-%m-%d"),
         )
-        df_hist_raw = normalize_vemcount_response(resp_hist, kpi_keys=metric_map.keys()).rename(columns=metric_map)
+        df_hist_raw = normalize_vemcount_response(resp_hist, kpi_keys=metric_keys_primary).rename(
+            columns={"count_in": "footfall", "turnover": "turnover", "transactions": "transactions"}
+        )
+    except Exception:
+        # fallback als transactions niet supported is
+        metric_keys_fallback = ["count_in", "turnover"]
+        resp_hist = get_report(
+            [shop_id],
+            metric_keys_fallback,
+            period="date",
+            step="day",
+            source="shops",
+            form_date_from=hist_start.strftime("%Y-%m-%d"),
+            form_date_to=hist_end.strftime("%Y-%m-%d"),
+        )
+        df_hist_raw = normalize_vemcount_response(resp_hist, kpi_keys=metric_keys_fallback).rename(
+            columns={"count_in": "footfall", "turnover": "turnover"}
+        )
         df_hist_raw["date"] = pd.to_datetime(df_hist_raw["date"], errors="coerce")
         df_hist_raw = df_hist_raw.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
         df_hist_raw = compute_daily_kpis(df_hist_raw)
