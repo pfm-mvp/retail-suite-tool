@@ -592,6 +592,12 @@ def main():
         st.info("Select retailer & store, pick a period and click **Analyse**.")
         return
 
+    # ✅ Force refresh regions.csv cache when running analysis (prevents stale region_map)
+    try:
+        load_region_mapping.clear()
+    except Exception:
+        pass
+
     # ---------------------------
     # ✅ Build merged store meta (same philosophy as Region tool)
     # ---------------------------
