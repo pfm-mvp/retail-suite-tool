@@ -790,146 +790,146 @@ def main():
     if pd.notna(conv_cur) and pd.notna(conv_prev) and conv_prev > 0:
         conv_delta = f"{(conv_cur - conv_prev) / conv_prev * 100:+.1f}%"
 
-# ---------------------------
-# ✅ SVI (reuse services/svi_service.py) — SVI-PROOF
-#    Belangrijk: store_region komt uit meta (zelfde merge als peers),
-#    niet uit een losse region_map lookup die kan falen door cache/mismatch.
-# ---------------------------
-store_svi_score = None
-store_svi_rank = None
-store_svi_peer_n = None
-store_region = None
-store_svi_status = None
-store_svi_reason = None
-store_svi_error = None
+    # ---------------------------
+    # ✅ SVI (reuse services/svi_service.py) — SVI-PROOF
+    #    Belangrijk: store_region komt uit meta (zelfde merge als peers),
+    #    niet uit een losse region_map lookup die kan falen door cache/mismatch.
+    # ---------------------------
+    store_svi_score = None
+    store_svi_rank = None
+    store_svi_peer_n = None
+    store_region = None
+    store_svi_status = None
+    store_svi_reason = None
+    store_svi_error = None
 
-region_map = load_region_mapping()
+    region_map = load_region_mapping()
 
-# 1) Build meta = locations + region mapping (same as Region tool approach)
-try:
-    loc_meta = locations_df.copy()
-    loc_meta["id"] = pd.to_numeric(loc_meta["id"], errors="coerce").astype("Int64")
-    if "sqm" in loc_meta.columns:
-        loc_meta["sqm"] = pd.to_numeric(loc_meta["sqm"], errors="coerce")
-    else:
-        loc_meta["sqm"] = np.nan
-
-    reg = region_map.copy() if region_map is not None else pd.DataFrame()
-    if not reg.empty:
-        reg["shop_id"] = pd.to_numeric(reg["shop_id"], errors="coerce").astype("Int64")
-        reg["sqm_override"] = pd.to_numeric(reg.get("sqm_override", np.nan), errors="coerce")
-
-    meta = loc_meta.merge(reg, left_on="id", right_on="shop_id", how="left")
-
-    meta["sqm_effective"] = np.where(
-        meta.get("sqm_override", pd.Series([np.nan] * len(meta))).notna(),
-        meta["sqm_override"],
-        meta["sqm"],
-    )
-
-    meta["store_display"] = np.where(
-        meta.get("store_label", pd.Series([np.nan] * len(meta))).notna(),
-        meta["store_label"],
-        meta.get("name", meta["id"].astype(str)),
-    )
-
-    # ✅ store_region comes from meta (the merged truth)
-    row_meta = meta.loc[meta["id"] == pd.Series([shop_id], dtype="Int64").iloc[0]]
-    if not row_meta.empty:
-        r = row_meta.get("region", pd.Series([None])).iloc[0]
-        store_region = str(r) if (pd.notna(r) and str(r).strip() != "") else None
-
-except Exception as e:
-    meta = pd.DataFrame()
-    store_svi_error = f"Meta build failed: {e}"
-
-# 2) If we know the region, compute peer SVI for current period
-if store_region and isinstance(meta, pd.DataFrame) and not meta.empty:
+    # 1) Build meta = locations + region mapping (same as Region tool approach)
     try:
-        peer_ids = (
-            meta.loc[meta["region"].astype(str) == str(store_region), "id"]
-            .dropna()
-            .astype(int)
-            .unique()
-            .tolist()
-        )
-
-        # Ensure selected store included
-        if shop_id not in peer_ids:
-            peer_ids.append(shop_id)
-
-        # If region only has 1 store, still allow SVI (rank 1/1) but it’s less meaningful
-        resp_peers = get_report(
-            peer_ids,
-            ["count_in", "turnover"],
-            period="date",
-            step="day",
-            source="shops",
-            form_date_from=start_cur.strftime("%Y-%m-%d"),
-            form_date_to=end_cur.strftime("%Y-%m-%d"),
-        )
-
-        df_peers = normalize_vemcount_response(
-            resp_peers, kpi_keys=["count_in", "turnover"]
-        ).rename(columns={"count_in": "footfall", "turnover": "turnover"})
-
-        if df_peers is not None and not df_peers.empty:
-            df_peers["date"] = pd.to_datetime(df_peers["date"], errors="coerce")
-            df_peers = df_peers.dropna(subset=["date"])
-
-            # detect store key col in response
-            store_key_col = None
-            for cand in ["id", "shop_id", "location_id"]:
-                if cand in df_peers.columns:
-                    store_key_col = cand
-                    break
-
-            if store_key_col is None:
-                store_svi_error = "No store id column found in peers response (id/shop_id/location_id)."
-            else:
-                # join meta into df_peers (sqm_effective + store_display)
-                df_peers[store_key_col] = pd.to_numeric(df_peers[store_key_col], errors="coerce").astype("Int64")
-                df_peers = df_peers.merge(
-                    meta[["id", "store_display", "sqm_effective"]],
-                    left_on=store_key_col,
-                    right_on="id",
-                    how="left",
-                )
-                df_peers["sqm_effective"] = pd.to_numeric(df_peers["sqm_effective"], errors="coerce")
-
-                # compute KPIs needed by SVI service
-                df_peers = compute_daily_kpis(df_peers)
-
-                # build vitality (one row per store)
-                svi_df = build_store_vitality(
-                    df_period=df_peers,
-                    region_shops=meta,          # expects 'id' + 'store_display' (+ sqm_effective optional)
-                    store_key_col=store_key_col,
-                )
-
-                if svi_df is not None and not svi_df.empty:
-                    # rank inside peers
-                    svi_df["svi_score"] = pd.to_numeric(svi_df["svi_score"], errors="coerce")
-                    svi_df = svi_df.dropna(subset=["svi_score"]).sort_values("svi_score", ascending=False).reset_index(drop=True)
-                    svi_df["rank"] = np.arange(1, len(svi_df) + 1)
-
-                    # fetch this store row
-                    target_id = pd.Series([shop_id], dtype="Int64").iloc[0]
-                    row = svi_df.loc[pd.to_numeric(svi_df[store_key_col], errors="coerce").astype("Int64") == target_id]
-
-                    if not row.empty:
-                        store_svi_score = float(np.clip(row["svi_score"].iloc[0], 0, 100))
-                        store_svi_rank = int(row["rank"].iloc[0])
-                        store_svi_peer_n = int(len(svi_df))
-                        store_svi_status = row.get("svi_status", pd.Series([None])).iloc[0]
-                        store_svi_reason = row.get("reason_short", pd.Series([None])).iloc[0]
-                else:
-                    store_svi_error = "SVI DF empty (no vitality computed)."
+        loc_meta = locations_df.copy()
+        loc_meta["id"] = pd.to_numeric(loc_meta["id"], errors="coerce").astype("Int64")
+        if "sqm" in loc_meta.columns:
+            loc_meta["sqm"] = pd.to_numeric(loc_meta["sqm"], errors="coerce")
         else:
-            store_svi_error = "Peers DF empty (no peer data returned)."
+            loc_meta["sqm"] = np.nan
+
+        reg = region_map.copy() if region_map is not None else pd.DataFrame()
+        if not reg.empty:
+            reg["shop_id"] = pd.to_numeric(reg["shop_id"], errors="coerce").astype("Int64")
+            reg["sqm_override"] = pd.to_numeric(reg.get("sqm_override", np.nan), errors="coerce")
+
+        meta = loc_meta.merge(reg, left_on="id", right_on="shop_id", how="left")
+
+        meta["sqm_effective"] = np.where(
+            meta.get("sqm_override", pd.Series([np.nan] * len(meta))).notna(),
+            meta["sqm_override"],
+            meta["sqm"],
+        )
+    
+        meta["store_display"] = np.where(
+            meta.get("store_label", pd.Series([np.nan] * len(meta))).notna(),
+            meta["store_label"],
+            meta.get("name", meta["id"].astype(str)),
+        )
+
+        # ✅ store_region comes from meta (the merged truth)
+        row_meta = meta.loc[meta["id"] == pd.Series([shop_id], dtype="Int64").iloc[0]]
+        if not row_meta.empty:
+            r = row_meta.get("region", pd.Series([None])).iloc[0]
+            store_region = str(r) if (pd.notna(r) and str(r).strip() != "") else None
 
     except Exception as e:
-        store_svi_error = f"SVI build failed: {e}"
+        meta = pd.DataFrame()
+        store_svi_error = f"Meta build failed: {e}"
+
+    # 2) If we know the region, compute peer SVI for current period
+    if store_region and isinstance(meta, pd.DataFrame) and not meta.empty:
+        try:
+            peer_ids = (
+                meta.loc[meta["region"].astype(str) == str(store_region), "id"]
+                .dropna()
+                .astype(int)
+                .unique()
+                .tolist()
+            )
+
+            # Ensure selected store included
+            if shop_id not in peer_ids:
+                peer_ids.append(shop_id)
+
+            # If region only has 1 store, still allow SVI (rank 1/1) but it’s less meaningful
+            resp_peers = get_report(
+                peer_ids,
+                ["count_in", "turnover"],
+                period="date",
+                step="day",
+                source="shops",
+                form_date_from=start_cur.strftime("%Y-%m-%d"),
+                form_date_to=end_cur.strftime("%Y-%m-%d"),
+            )
+    
+            df_peers = normalize_vemcount_response(
+                resp_peers, kpi_keys=["count_in", "turnover"]
+            ).rename(columns={"count_in": "footfall", "turnover": "turnover"})
+
+            if df_peers is not None and not df_peers.empty:
+                df_peers["date"] = pd.to_datetime(df_peers["date"], errors="coerce")
+                df_peers = df_peers.dropna(subset=["date"])
+
+                # detect store key col in response
+                store_key_col = None
+                for cand in ["id", "shop_id", "location_id"]:
+                    if cand in df_peers.columns:
+                        store_key_col = cand
+                        break
+
+                if store_key_col is None:
+                    store_svi_error = "No store id column found in peers response (id/shop_id/location_id)."
+                else:
+                    # join meta into df_peers (sqm_effective + store_display)
+                    df_peers[store_key_col] = pd.to_numeric(df_peers[store_key_col], errors="coerce").astype("Int64")
+                    df_peers = df_peers.merge(
+                        meta[["id", "store_display", "sqm_effective"]],
+                        left_on=store_key_col,
+                        right_on="id",
+                        how="left",
+                    )
+                    df_peers["sqm_effective"] = pd.to_numeric(df_peers["sqm_effective"], errors="coerce")
+    
+                    # compute KPIs needed by SVI service
+                    df_peers = compute_daily_kpis(df_peers)
+    
+                    # build vitality (one row per store)
+                    svi_df = build_store_vitality(
+                        df_period=df_peers,
+                        region_shops=meta,          # expects 'id' + 'store_display' (+ sqm_effective optional)
+                        store_key_col=store_key_col,
+                    )
+    
+                    if svi_df is not None and not svi_df.empty:
+                        # rank inside peers
+                        svi_df["svi_score"] = pd.to_numeric(svi_df["svi_score"], errors="coerce")
+                        svi_df = svi_df.dropna(subset=["svi_score"]).sort_values("svi_score", ascending=False).reset_index(drop=True)
+                        svi_df["rank"] = np.arange(1, len(svi_df) + 1)
+    
+                        # fetch this store row
+                        target_id = pd.Series([shop_id], dtype="Int64").iloc[0]
+                        row = svi_df.loc[pd.to_numeric(svi_df[store_key_col], errors="coerce").astype("Int64") == target_id]
+    
+                        if not row.empty:
+                            store_svi_score = float(np.clip(row["svi_score"].iloc[0], 0, 100))
+                            store_svi_rank = int(row["rank"].iloc[0])
+                            store_svi_peer_n = int(len(svi_df))
+                            store_svi_status = row.get("svi_status", pd.Series([None])).iloc[0]
+                            store_svi_reason = row.get("reason_short", pd.Series([None])).iloc[0]
+                    else:
+                        store_svi_error = "SVI DF empty (no vitality computed)."
+            else:
+                store_svi_error = "Peers DF empty (no peer data returned)."
+    
+        except Exception as e:
+            store_svi_error = f"SVI build failed: {e}"
 
     # ---------------------------
     # Row: KPI cards (now includes SVI card)
