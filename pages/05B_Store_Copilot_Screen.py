@@ -128,24 +128,41 @@ PFM_BLUE = "#38BDF8"
 PFM_GRAY = "#6B7280"
 PFM_LINE = "#E5E7EB"
 PFM_DARK = "#111827"
+PFM_GREEN = "#22C55E"
+PFM_AMBER = "#F59E0B"
 
 # -------------
 # Format helpers
 # -------------
 def fmt_eur(x: float) -> str:
-    if pd.isna(x):
+    if x is None or pd.isna(x):
         return "-"
-    return f"€ {x:,.0f}".replace(",", ".")
+    return f"€ {float(x):,.0f}".replace(",", ".")
 
 def fmt_pct(x: float) -> str:
-    if pd.isna(x):
+    if x is None or pd.isna(x):
         return "-"
-    return f"{x:.1f}%".replace(".", ",")
+    return f"{float(x):.1f}%".replace(".", ",")
 
 def fmt_int(x: float) -> str:
-    if pd.isna(x):
+    if x is None or pd.isna(x):
         return "-"
-    return f"{x:,.0f}".replace(",", ".")
+    return f"{float(x):,.0f}".replace(",", ".")
+
+# ----------------------
+# SVI UI helpers (prominent card)
+# ----------------------
+def svi_style(score: float | None):
+    if score is None or pd.isna(score):
+        return {"label": "No score", "color": PFM_LINE, "emoji": "⚪", "hint": "Not enough data for a stable benchmark"}
+    s = float(score)
+    if s >= 75:
+        return {"label": "High performance", "color": PFM_GREEN, "emoji": "🟢", "hint": "Top tier vs regional peers"}
+    if s >= 60:
+        return {"label": "Good / stable", "color": PFM_PURPLE, "emoji": "🟣", "hint": "Solid performance vs peers"}
+    if s >= 45:
+        return {"label": "Attention required", "color": PFM_AMBER, "emoji": "🟠", "hint": "Below peers on key drivers"}
+    return {"label": "Under pressure", "color": PFM_RED, "emoji": "🔴", "hint": "Material gap vs regional peers"}
 
 # ----------------------
 # Region mapping (same as Region tool)
@@ -272,7 +289,6 @@ def fetch_visualcrossing_history(location_str: str, start_date, end_date) -> pd.
 def compute_daily_kpis(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
-    # ✅ make sure numeric
     for c in ["footfall", "turnover", "transactions"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -426,6 +442,7 @@ def build_store_ai_coach_text(
 
     return header + intro + foot_msg + omzet_msg + scenario_msg + peak_msg + action_msg
 
+
 # -------------
 # MAIN UI
 # -------------
@@ -472,10 +489,7 @@ def main():
     shop_label = st.sidebar.selectbox("Store", locations_df["label"].tolist())
     shop_row = locations_df[locations_df["label"] == shop_label].iloc[0].to_dict()
     shop_id = int(shop_row["id"])
-    sqm = float(shop_row.get("sqm", 0) or 0)
     postcode = shop_row.get("zip") or shop_row.get("postcode", "")
-    lat = float(shop_row.get("lat", 0) or 0)
-    lon = float(shop_row.get("lon", 0) or 0)
 
     # --- Period selector ---
     period_choice = st.sidebar.selectbox(
@@ -599,11 +613,10 @@ def main():
         pass
 
     # ---------------------------
-    # ✅ Build merged store meta (same philosophy as Region tool)
+    # Store meta (locations + regions)
     # ---------------------------
     region_map = load_region_mapping()
 
-    # Normalize ids
     locations_df = locations_df.copy()
     locations_df["id"] = pd.to_numeric(locations_df["id"], errors="coerce").astype("Int64")
 
@@ -616,7 +629,6 @@ def main():
         merged_meta["sqm_override"] = np.nan
         merged_meta["store_label"] = np.nan
 
-    # sqm_effective + store_display
     if "sqm" in merged_meta.columns:
         merged_meta["sqm_effective"] = np.where(
             merged_meta.get("sqm_override", pd.Series([np.nan] * len(merged_meta))).notna(),
@@ -635,25 +647,12 @@ def main():
     else:
         merged_meta["store_display"] = merged_meta.get("name", merged_meta["id"].astype(str))
 
-    merged_meta["region"] = merged_meta.get("region", np.nan).astype(str)
-
     # ---------------------------
-    # --- Fetch store data (this year, then slice locally) ---
+    # Fetch store data (this year, then slice locally)
     # ---------------------------
     with st.spinner("Fetching data via FastAPI..."):
-        metric_map = {
-            "count_in": "footfall",
-            "turnover": "turnover",
-            "sales_per_sqm": "sales_per_sqm",
-        }
-
-        resp_all = get_report(
-            [shop_id],
-            list(metric_map.keys()),
-            period="this_year",
-            step="day",
-            source="shops",
-        )
+        metric_map = {"count_in": "footfall", "turnover": "turnover", "sales_per_sqm": "sales_per_sqm"}
+        resp_all = get_report([shop_id], list(metric_map.keys()), period="this_year", step="day", source="shops")
         df_all_raw = normalize_vemcount_response(resp_all, kpi_keys=metric_map.keys()).rename(columns=metric_map)
 
     if df_all_raw.empty:
@@ -663,17 +662,14 @@ def main():
     df_all_raw["date"] = pd.to_datetime(df_all_raw["date"], errors="coerce")
     df_all_raw = df_all_raw.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
 
-    # detect store key col for this dataset
     store_key_col_all = None
     for cand in ["id", "shop_id", "location_id"]:
         if cand in df_all_raw.columns:
             store_key_col_all = cand
             break
-
     if store_key_col_all is None:
         st.error("No store id column found in report response (id/shop_id/location_id).")
         return
-
     df_all_raw[store_key_col_all] = pd.to_numeric(df_all_raw[store_key_col_all], errors="coerce").astype("Int64")
 
     # --- Forecast history (date range) ---
@@ -763,37 +759,29 @@ def main():
     if postcode4:
         cbs_stats = get_cbs_stats_for_postcode4(postcode4)
 
-    # --- KPI cards ---
+    # ---------------------------
+    # KPI cards + SVI
+    # ---------------------------
     st.subheader(f"{selected_client['brand']} – {shop_row['name']}")
 
-    foot_cur = df_cur["footfall"].sum() if "footfall" in df_cur.columns else 0
-    foot_prev = df_prev["footfall"].sum() if ("footfall" in df_prev.columns and not df_prev.empty) else 0
-    foot_delta = None
-    if foot_prev > 0:
-        foot_delta = f"{(foot_cur - foot_prev) / foot_prev * 100:+.1f}%"
+    foot_cur = float(df_cur["footfall"].sum()) if "footfall" in df_cur.columns else 0.0
+    foot_prev = float(df_prev["footfall"].sum()) if ("footfall" in df_prev.columns and not df_prev.empty) else 0.0
+    foot_delta = f"{(foot_cur - foot_prev) / foot_prev * 100:+.1f}%" if foot_prev > 0 else None
 
-    turn_cur = df_cur["turnover"].sum() if "turnover" in df_cur.columns else 0
-    turn_prev = df_prev["turnover"].sum() if ("turnover" in df_prev.columns and not df_prev.empty) else 0
-    turn_delta = None
-    if turn_prev > 0:
-        turn_delta = f"{(turn_cur - turn_prev) / turn_prev * 100:+.1f}%"
+    turn_cur = float(df_cur["turnover"].sum()) if "turnover" in df_cur.columns else 0.0
+    turn_prev = float(df_prev["turnover"].sum()) if ("turnover" in df_prev.columns and not df_prev.empty) else 0.0
+    turn_delta = f"{(turn_cur - turn_prev) / turn_prev * 100:+.1f}%" if turn_prev > 0 else None
 
-    spv_cur = df_cur["sales_per_visitor"].mean() if "sales_per_visitor" in df_cur.columns else np.nan
-    spv_prev = df_prev["sales_per_visitor"].mean() if ("sales_per_visitor" in df_prev.columns and not df_prev.empty) else np.nan
-    spv_delta = None
-    if pd.notna(spv_cur) and pd.notna(spv_prev) and spv_prev > 0:
-        spv_delta = f"{(spv_cur - spv_prev) / spv_prev * 100:+.1f}%"
+    spv_cur = float(df_cur["sales_per_visitor"].mean()) if "sales_per_visitor" in df_cur.columns else np.nan
+    spv_prev = float(df_prev["sales_per_visitor"].mean()) if ("sales_per_visitor" in df_prev.columns and not df_prev.empty) else np.nan
+    spv_delta = f"{(spv_cur - spv_prev) / spv_prev * 100:+.1f}%" if pd.notna(spv_cur) and pd.notna(spv_prev) and spv_prev > 0 else None
 
-    conv_cur = df_cur["conversion_rate"].mean() if "conversion_rate" in df_cur.columns else np.nan
-    conv_prev = df_prev["conversion_rate"].mean() if ("conversion_rate" in df_prev.columns and not df_prev.empty) else np.nan
-    conv_delta = None
-    if pd.notna(conv_cur) and pd.notna(conv_prev) and conv_prev > 0:
-        conv_delta = f"{(conv_cur - conv_prev) / conv_prev * 100:+.1f}%"
+    conv_cur = float(df_cur["conversion_rate"].mean()) if "conversion_rate" in df_cur.columns else np.nan
+    conv_prev = float(df_prev["conversion_rate"].mean()) if ("conversion_rate" in df_prev.columns and not df_prev.empty) else np.nan
+    conv_delta = f"{(conv_cur - conv_prev) / conv_prev * 100:+.1f}%" if pd.notna(conv_cur) and pd.notna(conv_prev) and conv_prev > 0 else None
 
     # ---------------------------
-    # ✅ SVI (reuse services/svi_service.py) — SVI-PROOF
-    #    Belangrijk: store_region komt uit meta (zelfde merge als peers),
-    #    niet uit een losse region_map lookup die kan falen door cache/mismatch.
+    # ✅ SVI (SVI-PROOF)
     # ---------------------------
     store_svi_score = None
     store_svi_rank = None
@@ -803,9 +791,7 @@ def main():
     store_svi_reason = None
     store_svi_error = None
 
-    region_map = load_region_mapping()
-
-    # 1) Build meta = locations + region mapping (same as Region tool approach)
+    meta = pd.DataFrame()
     try:
         loc_meta = locations_df.copy()
         loc_meta["id"] = pd.to_numeric(loc_meta["id"], errors="coerce").astype("Int64")
@@ -820,30 +806,25 @@ def main():
             reg["sqm_override"] = pd.to_numeric(reg.get("sqm_override", np.nan), errors="coerce")
 
         meta = loc_meta.merge(reg, left_on="id", right_on="shop_id", how="left")
-
         meta["sqm_effective"] = np.where(
             meta.get("sqm_override", pd.Series([np.nan] * len(meta))).notna(),
             meta["sqm_override"],
             meta["sqm"],
         )
-    
         meta["store_display"] = np.where(
             meta.get("store_label", pd.Series([np.nan] * len(meta))).notna(),
             meta["store_label"],
             meta.get("name", meta["id"].astype(str)),
         )
 
-        # ✅ store_region comes from meta (the merged truth)
         row_meta = meta.loc[meta["id"] == pd.Series([shop_id], dtype="Int64").iloc[0]]
         if not row_meta.empty:
             r = row_meta.get("region", pd.Series([None])).iloc[0]
-            store_region = str(r) if (pd.notna(r) and str(r).strip() != "") else None
+            store_region = str(r) if (pd.notna(r) and str(r).strip() != "" and str(r).strip().lower() != "nan") else None
 
     except Exception as e:
-        meta = pd.DataFrame()
         store_svi_error = f"Meta build failed: {e}"
 
-    # 2) If we know the region, compute peer SVI for current period
     if store_region and isinstance(meta, pd.DataFrame) and not meta.empty:
         try:
             peer_ids = (
@@ -853,12 +834,9 @@ def main():
                 .unique()
                 .tolist()
             )
-
-            # Ensure selected store included
             if shop_id not in peer_ids:
                 peer_ids.append(shop_id)
 
-            # If region only has 1 store, still allow SVI (rank 1/1) but it’s less meaningful
             resp_peers = get_report(
                 peer_ids,
                 ["count_in", "turnover"],
@@ -868,16 +846,14 @@ def main():
                 form_date_from=start_cur.strftime("%Y-%m-%d"),
                 form_date_to=end_cur.strftime("%Y-%m-%d"),
             )
-    
-            df_peers = normalize_vemcount_response(
-                resp_peers, kpi_keys=["count_in", "turnover"]
-            ).rename(columns={"count_in": "footfall", "turnover": "turnover"})
+            df_peers = normalize_vemcount_response(resp_peers, kpi_keys=["count_in", "turnover"]).rename(
+                columns={"count_in": "footfall", "turnover": "turnover"}
+            )
 
             if df_peers is not None and not df_peers.empty:
                 df_peers["date"] = pd.to_datetime(df_peers["date"], errors="coerce")
                 df_peers = df_peers.dropna(subset=["date"])
 
-                # detect store key col in response
                 store_key_col = None
                 for cand in ["id", "shop_id", "location_id"]:
                     if cand in df_peers.columns:
@@ -885,9 +861,8 @@ def main():
                         break
 
                 if store_key_col is None:
-                    store_svi_error = "No store id column found in peers response (id/shop_id/location_id)."
+                    store_svi_error = "No store id column in peers response (id/shop_id/location_id)."
                 else:
-                    # join meta into df_peers (sqm_effective + store_display)
                     df_peers[store_key_col] = pd.to_numeric(df_peers[store_key_col], errors="coerce").astype("Int64")
                     df_peers = df_peers.merge(
                         meta[["id", "store_display", "sqm_effective"]],
@@ -896,27 +871,23 @@ def main():
                         how="left",
                     )
                     df_peers["sqm_effective"] = pd.to_numeric(df_peers["sqm_effective"], errors="coerce")
-    
-                    # compute KPIs needed by SVI service
+
                     df_peers = compute_daily_kpis(df_peers)
-    
-                    # build vitality (one row per store)
+
                     svi_df = build_store_vitality(
                         df_period=df_peers,
-                        region_shops=meta,          # expects 'id' + 'store_display' (+ sqm_effective optional)
+                        region_shops=meta,
                         store_key_col=store_key_col,
                     )
-    
+
                     if svi_df is not None and not svi_df.empty:
-                        # rank inside peers
                         svi_df["svi_score"] = pd.to_numeric(svi_df["svi_score"], errors="coerce")
                         svi_df = svi_df.dropna(subset=["svi_score"]).sort_values("svi_score", ascending=False).reset_index(drop=True)
                         svi_df["rank"] = np.arange(1, len(svi_df) + 1)
-    
-                        # fetch this store row
+
                         target_id = pd.Series([shop_id], dtype="Int64").iloc[0]
                         row = svi_df.loc[pd.to_numeric(svi_df[store_key_col], errors="coerce").astype("Int64") == target_id]
-    
+
                         if not row.empty:
                             store_svi_score = float(np.clip(row["svi_score"].iloc[0], 0, 100))
                             store_svi_rank = int(row["rank"].iloc[0])
@@ -927,14 +898,14 @@ def main():
                         store_svi_error = "SVI DF empty (no vitality computed)."
             else:
                 store_svi_error = "Peers DF empty (no peer data returned)."
-    
+
         except Exception as e:
             store_svi_error = f"SVI build failed: {e}"
 
     # ---------------------------
-    # Row: KPI cards (now includes SVI card)
+    # KPI row (SVI prominent)
     # ---------------------------
-    col1, col2, col3, col4, col5 = st.columns([1, 1, 1, 1, 1.2])
+    col1, col2, col3, col4, col5 = st.columns([1, 1, 1, 1, 1.35])
 
     with col1:
         st.metric("Footfall (period)", fmt_int(foot_cur), delta=foot_delta)
@@ -948,46 +919,197 @@ def main():
             delta_val = None
             if avg_capture_prev and avg_capture_prev > 0:
                 delta_val = (avg_capture_cur - avg_capture_prev) / avg_capture_prev * 100
-            st.metric(
-                "Avg capture rate",
-                fmt_pct(avg_capture_cur),
-                delta=f"{delta_val:+.1f}%" if delta_val is not None else None,
-            )
+            st.metric("Avg capture rate", fmt_pct(avg_capture_cur), delta=f"{delta_val:+.1f}%" if delta_val is not None else None)
         else:
-            st.metric(
-                "Avg conversion",
-                fmt_pct(conv_cur) if pd.notna(conv_cur) else "-",
-                delta=conv_delta,
-            )
+            st.metric("Avg conversion", fmt_pct(conv_cur) if pd.notna(conv_cur) else "-", delta=conv_delta)
 
     with col5:
-        # ✅ SVI Scorecard (SVI-proof)
-        status_line = ""
-        if store_svi_status and store_svi_status not in ("None", "nan"):
-            status_line = f" · {store_svi_status}"
+        svi_meta = svi_style(store_svi_score)
+        svi_color = svi_meta["color"]
+        svi_label = svi_meta["label"]
+        svi_emoji = svi_meta["emoji"]
+        svi_hint = svi_meta["hint"]
+
+        # if service provides a status, show that instead of generic
+        if store_svi_status and str(store_svi_status).strip().lower() not in ("none", "nan", ""):
+            svi_label = str(store_svi_status)
+            # keep color based on score (still consistent)
+
+        score_txt = f"{store_svi_score:.0f}" if store_svi_score is not None else "—"
+        rank_txt = f"{store_svi_rank} / {store_svi_peer_n}" if (store_svi_rank and store_svi_peer_n) else "—"
 
         st.markdown(
             f"""
-            <div style="border:1px solid {PFM_LINE}; border-radius:14px; padding:0.85rem 1rem; background:white;">
-              <div style="color:{PFM_GRAY}; font-size:0.85rem; font-weight:700;">Store Vitality (SVI)</div>
-              <div style="color:{PFM_DARK}; font-size:1.45rem; font-weight:900; margin-top:0.2rem;">
-                {f"{store_svi_score:.0f}" if store_svi_score is not None else "—"} / 100
+            <div style="
+                border:1px solid {PFM_LINE};
+                border-left:10px solid {svi_color};
+                border-radius:16px;
+                padding:0.95rem 1.05rem;
+                background:white;
+                height: 124px;
+                display:flex;
+                flex-direction:column;
+                justify-content:center;
+            ">
+              <div style="display:flex; align-items:center; justify-content:space-between;">
+                <div style="color:{PFM_GRAY}; font-size:0.85rem; font-weight:800; letter-spacing:0.2px;">
+                  Store Vitality (SVI)
+                </div>
+                <div style="
+                    background:{svi_color}15;
+                    color:{svi_color};
+                    padding:0.18rem 0.55rem;
+                    border-radius:999px;
+                    font-size:0.80rem;
+                    font-weight:900;
+                ">
+                  {svi_emoji} {svi_label}
+                </div>
               </div>
-              <div style="color:{PFM_GRAY}; font-size:0.85rem; margin-top:0.25rem;">
-                Rank: {f"{store_svi_rank} / {store_svi_peer_n}" if (store_svi_rank and store_svi_peer_n) else "—"}
-                · benchmark vs regional peers
-                {f" · Region: {store_region}" if store_region else ""}
-                {status_line}
+
+              <div style="display:flex; align-items:baseline; gap:10px; margin-top:0.35rem;">
+                <div style="color:{PFM_DARK}; font-size:2.10rem; font-weight:950; line-height:1;">
+                  {score_txt}
+                </div>
+                <div style="color:{PFM_GRAY}; font-size:1.0rem; font-weight:900;">
+                  / 100
+                </div>
+              </div>
+
+              <div style="color:{PFM_GRAY}; font-size:0.85rem; margin-top:0.18rem;">
+                <b>Rank:</b> {rank_txt} · benchmark vs regional peers
+                {f" · <b>Region:</b> {store_region}" if store_region else ""}
+              </div>
+
+              <div style="color:{PFM_GRAY}; font-size:0.80rem; margin-top:0.10rem;">
+                {svi_hint}
               </div>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
-        if store_svi_reason and store_svi_reason not in ("None", "nan"):
+        if store_svi_reason and str(store_svi_reason).strip().lower() not in ("none", "nan", ""):
             st.caption(store_svi_reason)
 
-    # --- Weekly chart: street vs store + turnover + capture ---
+    # ---------------------------
+    # Forecast compute (once) -> used for Month outlook + overlay + forecast section
+    # ---------------------------
+    fc_res = None
+    hist_recent = pd.DataFrame()
+    fc = pd.DataFrame()
+    recent_foot = recent_turn = fut_foot = fut_turn = None
+
+    weather_cfg = None
+    if VISUALCROSSING_KEY and weather_location:
+        parts = weather_location.split(",")
+        city_part = parts[0].strip() if parts else weather_location
+        country = "Netherlands"
+        if len(parts) >= 2:
+            cc = parts[1].strip().upper()
+            country_map = {"NL": "Netherlands", "BE": "Belgium", "DE": "Germany", "FR": "France", "UK": "United Kingdom", "GB": "United Kingdom"}
+            country = country_map.get(cc, cc)
+        weather_cfg = {"mode": "city_country", "city": city_part, "country": country, "api_key": VISUALCROSSING_KEY}
+
+    try:
+        if forecast_mode == "Pro (LightGBM beta)":
+            fc_res = build_pro_footfall_turnover_forecast(
+                df_hist_raw,
+                horizon=14,
+                min_history_days=60,
+                weather_cfg=weather_cfg,
+                use_weather=bool(weather_cfg),
+            )
+        else:
+            fc_res = build_simple_footfall_turnover_forecast(df_hist_raw)
+
+        if isinstance(fc_res, dict) and fc_res.get("enough_history", False):
+            hist_recent = fc_res.get("hist_recent", pd.DataFrame())
+            fc = fc_res.get("forecast", pd.DataFrame())
+
+            recent_foot = fc_res.get("recent_footfall_sum")
+            recent_turn = fc_res.get("recent_turnover_sum")
+            fut_foot = fc_res.get("forecast_footfall_sum")
+            fut_turn = fc_res.get("forecast_turnover_sum")
+
+    except Exception:
+        fc_res = None
+
+    # ---------------------------
+    # ✅ Month outlook (UNDER KPI row)
+    # ---------------------------
+    st.markdown("### Month outlook (forecast + actual)")
+
+    month_start = datetime(today.year, today.month, 1).date()
+    if today.month == 12:
+        month_end = (datetime(today.year + 1, 1, 1).date() - timedelta(days=1))
+    else:
+        month_end = (datetime(today.year, today.month + 1, 1).date() - timedelta(days=1))
+
+    df_mtd = df_all_raw[(df_all_raw["date"].dt.date >= month_start) & (df_all_raw["date"].dt.date <= today)].copy()
+    df_mtd = compute_daily_kpis(df_mtd)
+
+    mtd_turnover = float(df_mtd["turnover"].sum()) if ("turnover" in df_mtd.columns and not df_mtd.empty) else 0.0
+    mtd_footfall = float(df_mtd["footfall"].sum()) if ("footfall" in df_mtd.columns and not df_mtd.empty) else 0.0
+
+    forecast_month_turn = None
+    forecast_month_foot = None
+    forecast_remaining_turn = None
+    forecast_remaining_foot = None
+    forecast_coverage_note = ""
+
+    try:
+        if isinstance(fc, pd.DataFrame) and not fc.empty and "footfall_forecast" in fc.columns and "turnover_forecast" in fc.columns:
+            fc_tmp = fc.copy()
+            fc_tmp["date"] = pd.to_datetime(fc_tmp["date"], errors="coerce").dt.date
+            fc_tmp = fc_tmp.dropna(subset=["date"])
+
+            rem_start = today + timedelta(days=1)
+            rem_days_total = (month_end - rem_start).days + 1 if rem_start <= month_end else 0
+
+            fc_rem = fc_tmp[(fc_tmp["date"] >= rem_start) & (fc_tmp["date"] <= month_end)].copy()
+
+            known_rem_foot = float(fc_rem["footfall_forecast"].sum()) if not fc_rem.empty else 0.0
+            known_rem_turn = float(fc_rem["turnover_forecast"].sum()) if not fc_rem.empty else 0.0
+            known_days = int(fc_rem["date"].nunique()) if not fc_rem.empty else 0
+
+            extra_days = max(0, rem_days_total - known_days)
+            if known_days > 0 and extra_days > 0:
+                avg_foot_per_day = known_rem_foot / known_days
+                avg_turn_per_day = known_rem_turn / known_days
+                extra_foot = avg_foot_per_day * extra_days
+                extra_turn = avg_turn_per_day * extra_days
+                forecast_coverage_note = f"Forecast covers {known_days}/{rem_days_total} remaining days → extrapolated +{extra_days} days."
+            else:
+                extra_foot = 0.0
+                extra_turn = 0.0
+                if rem_days_total > 0:
+                    forecast_coverage_note = f"Forecast covers {known_days}/{rem_days_total} remaining days."
+
+            forecast_remaining_foot = known_rem_foot + extra_foot
+            forecast_remaining_turn = known_rem_turn + extra_turn
+
+            forecast_month_foot = mtd_footfall + (forecast_remaining_foot or 0.0)
+            forecast_month_turn = mtd_turnover + (forecast_remaining_turn or 0.0)
+    except Exception:
+        pass
+
+    m1, m2, m3, m4 = st.columns([1, 1, 1, 1])
+    with m1:
+        st.metric("Turnover MTD (actual)", fmt_eur(mtd_turnover))
+    with m2:
+        st.metric("Turnover remaining (forecast)", fmt_eur(forecast_remaining_turn) if forecast_remaining_turn is not None else "—")
+    with m3:
+        st.metric("Turnover total month (forecast)", fmt_eur(forecast_month_turn) if forecast_month_turn is not None else "—")
+    with m4:
+        st.metric("Footfall remaining (forecast)", fmt_int(forecast_remaining_foot) if forecast_remaining_foot is not None else "—")
+
+    if forecast_coverage_note:
+        st.caption(forecast_coverage_note)
+
+    # ---------------------------
+    # Street vs store weekly chart
+    # ---------------------------
     st.markdown("### Street traffic vs store traffic (weekly demo)")
 
     if not capture_weekly.empty:
@@ -997,50 +1119,97 @@ def main():
         week_order = chart_df.sort_values("week_start")["week_label"].unique().tolist()
 
         fig_week = make_subplots(specs=[[{"secondary_y": True}]])
-
         fig_week.add_bar(x=chart_df["week_label"], y=chart_df["footfall"], name="Footfall (store)", marker_color=PFM_PURPLE, offsetgroup=0)
         fig_week.add_bar(x=chart_df["week_label"], y=chart_df["street_footfall"], name="Street traffic", marker_color=PFM_PEACH, opacity=0.7, offsetgroup=1)
         fig_week.add_bar(x=chart_df["week_label"], y=chart_df["turnover"], name="Turnover (€)", marker_color=PFM_PINK, opacity=0.7, offsetgroup=2)
-
         fig_week.add_trace(
             go.Scatter(x=chart_df["week_label"], y=chart_df["capture_rate"], name="Capture rate (%)", mode="lines+markers",
                        line=dict(color=PFM_RED, width=2)),
             secondary_y=True,
         )
-
         fig_week.update_xaxes(title_text="Week", categoryorder="array", categoryarray=week_order)
         fig_week.update_yaxes(title_text="Footfall / street / turnover", secondary_y=False)
         fig_week.update_yaxes(title_text="Capture rate (%)", secondary_y=True)
         fig_week.update_layout(barmode="group", height=350,
                                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
                                margin=dict(l=40, r=40, t=40, b=40))
-
         st.plotly_chart(fig_week, use_container_width=True)
     else:
         st.info("No Pathzz weekly demo data available for this period.")
 
-    # --- Daily chart ---
-    st.markdown("### Daily footfall & turnover")
+    # ---------------------------
+    # ✅ Daily chart with forecast overlay
+    # ---------------------------
+    st.markdown("### Daily footfall & turnover (incl. forecast overlay)")
+
     if "footfall" in df_cur.columns and "turnover" in df_cur.columns:
         daily_df = df_cur[["date", "footfall", "turnover"]].copy()
 
-        fig_daily = make_subplots(specs=[[{"secondary_y": True}]])
-        fig_daily.add_bar(x=daily_df["date"], y=daily_df["footfall"], name="Footfall", marker_color=PFM_PURPLE)
+        fc_plot = pd.DataFrame()
+        try:
+            if isinstance(fc, pd.DataFrame) and not fc.empty:
+                fc_plot = fc[["date", "footfall_forecast", "turnover_forecast"]].copy()
+                fc_plot["date"] = pd.to_datetime(fc_plot["date"], errors="coerce")
+                fc_plot = fc_plot.dropna(subset=["date"])
+        except Exception:
+            fc_plot = pd.DataFrame()
 
+        fig_daily = make_subplots(specs=[[{"secondary_y": True}]])
+
+        # Actuals
+        fig_daily.add_bar(
+            x=daily_df["date"],
+            y=daily_df["footfall"],
+            name="Footfall (actual)",
+            marker_color=PFM_PURPLE,
+            opacity=0.95
+        )
         fig_daily.add_trace(
-            go.Scatter(x=daily_df["date"], y=daily_df["turnover"], name="Turnover (€)",
-                       mode="lines+markers", line=dict(color=PFM_PEACH, width=2)),
+            go.Scatter(
+                x=daily_df["date"],
+                y=daily_df["turnover"],
+                name="Turnover (actual)",
+                mode="lines+markers",
+                line=dict(color=PFM_PEACH, width=2),
+            ),
             secondary_y=True,
         )
 
+        # Forecast overlay
+        if not fc_plot.empty:
+            fig_daily.add_bar(
+                x=fc_plot["date"],
+                y=fc_plot["footfall_forecast"],
+                name="Footfall (forecast)",
+                marker_color=PFM_PEACH,
+                opacity=0.45
+            )
+            fig_daily.add_trace(
+                go.Scatter(
+                    x=fc_plot["date"],
+                    y=fc_plot["turnover_forecast"],
+                    name="Turnover (forecast)",
+                    mode="lines+markers",
+                    line=dict(color=PFM_RED, width=2, dash="dash"),
+                ),
+                secondary_y=True,
+            )
+
         fig_daily.update_yaxes(title_text="Footfall", secondary_y=False)
         fig_daily.update_yaxes(title_text="Turnover (€)", secondary_y=True)
-        fig_daily.update_layout(height=350,
-                                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-                                margin=dict(l=40, r=40, t=20, b=40))
+        fig_daily.update_layout(
+            height=360,
+            barmode="overlay",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+            margin=dict(l=40, r=40, t=20, b=40)
+        )
         st.plotly_chart(fig_daily, use_container_width=True)
+    else:
+        st.info("Daily chart not available (missing footfall/turnover).")
 
-    # --- Weather vs footfall ---
+    # ---------------------------
+    # Weather vs footfall
+    # ---------------------------
     if not weather_df.empty:
         st.markdown("### Weather vs footfall (indicative)")
 
@@ -1073,63 +1242,32 @@ def main():
                                   margin=dict(l=40, r=40, t=20, b=40))
         st.plotly_chart(fig_weather, use_container_width=True)
 
-    # --- Forecast ---
+    # ---------------------------
+    # Forecast section (still shown, but uses the same computed fc_res)
+    # ---------------------------
     st.markdown("### Forecast: footfall & turnover (next 14 days)")
 
-    weather_cfg = None
-    if VISUALCROSSING_KEY and weather_location:
-        parts = weather_location.split(",")
-        city_part = parts[0].strip() if parts else weather_location
-        country = "Netherlands"
-        if len(parts) >= 2:
-            cc = parts[1].strip().upper()
-            country_map = {"NL": "Netherlands", "BE": "Belgium", "DE": "Germany", "FR": "France", "UK": "United Kingdom", "GB": "United Kingdom"}
-            country = country_map.get(cc, cc)
+    if not (isinstance(fc_res, dict) and fc_res.get("enough_history", False)):
+        st.info("Not enough historical data for a reliable forecast.")
+    else:
+        c_model = st.columns([3, 1])[1]
+        with c_model:
+            st.caption(f"Model: **{fc_res.get('model_type', '-') }**")
+            if fc_res.get("used_simple_fallback", False):
+                st.caption("Fallback → Simple DoW")
 
-        weather_cfg = {"mode": "city_country", "city": city_part, "country": country, "api_key": VISUALCROSSING_KEY}
+        c1, c2 = st.columns(2)
+        with c1:
+            delta_foot = f"{(float(fut_foot) - float(recent_foot)) / float(recent_foot) * 100:+.1f}%" if (recent_foot and float(recent_foot) > 0) else None
+            st.metric("Expected visitors (14d)", fmt_int(fut_foot), delta=delta_foot)
 
-    try:
-        if forecast_mode == "Pro (LightGBM beta)":
-            fc_res = build_pro_footfall_turnover_forecast(
-                df_hist_raw,
-                horizon=14,
-                min_history_days=60,
-                weather_cfg=weather_cfg,
-                use_weather=bool(weather_cfg),
-            )
-        else:
-            fc_res = build_simple_footfall_turnover_forecast(df_hist_raw)
+        with c2:
+            delta_turn = f"{(float(fut_turn) - float(recent_turn)) / float(recent_turn) * 100:+.1f}%" if (recent_turn and float(recent_turn) > 0) else None
+            st.metric("Expected turnover (14d)", fmt_eur(fut_turn), delta=delta_turn)
 
-        if not fc_res.get("enough_history", False):
-            st.info("Not enough historical data for a reliable forecast.")
-        else:
-            hist_recent = fc_res["hist_recent"]
-            fc = fc_res["forecast"]
-
-            recent_foot = fc_res["recent_footfall_sum"]
-            recent_turn = fc_res["recent_turnover_sum"]
-            fut_foot = fc_res["forecast_footfall_sum"]
-            fut_turn = fc_res["forecast_turnover_sum"]
-
-            c_model = st.columns([3, 1])[1]
-            with c_model:
-                st.caption(f"Model: **{fc_res['model_type']}**")
-                if fc_res.get("used_simple_fallback", False):
-                    st.caption("Fallback → Simple DoW")
-
-            c1, c2 = st.columns(2)
-            with c1:
-                delta_foot = f"{(fut_foot - recent_foot) / recent_foot * 100:+.1f}%" if recent_foot > 0 else None
-                st.metric("Expected visitors (14d)", fmt_int(fut_foot), delta=delta_foot)
-
-            with c2:
-                delta_turn = f"{(fut_turn - recent_turn) / recent_turn * 100:+.1f}%" if (not pd.isna(recent_turn) and recent_turn > 0) else None
-                st.metric("Expected turnover (14d)", fmt_eur(fut_turn), delta=delta_turn)
-
-            fig_fc = make_subplots(specs=[[{"secondary_y": True}]])
-            fig_fc.add_bar(x=hist_recent["date"], y=hist_recent["footfall"], name="Footfall (hist)", marker_color=PFM_PURPLE)
-            fig_fc.add_bar(x=fc["date"], y=fc["footfall_forecast"], name="Footfall (fc)", marker_color=PFM_PEACH)
-
+        fig_fc = make_subplots(specs=[[{"secondary_y": True}]])
+        if isinstance(hist_recent, pd.DataFrame) and not hist_recent.empty:
+            fig_fc.add_bar(x=hist_recent["date"], y=hist_recent.get("footfall"), name="Footfall (hist)", marker_color=PFM_PURPLE)
             if "turnover" in hist_recent.columns:
                 fig_fc.add_trace(
                     go.Scatter(x=hist_recent["date"], y=hist_recent["turnover"], name="Turnover (hist)", mode="lines",
@@ -1137,36 +1275,36 @@ def main():
                     secondary_y=True,
                 )
 
+        if isinstance(fc, pd.DataFrame) and not fc.empty:
+            fig_fc.add_bar(x=fc["date"], y=fc["footfall_forecast"], name="Footfall (fc)", marker_color=PFM_PEACH)
             fig_fc.add_trace(
                 go.Scatter(x=fc["date"], y=fc["turnover_forecast"], name="Turnover (fc)", mode="lines+markers",
                            line=dict(color=PFM_RED, width=2, dash="dash")),
                 secondary_y=True,
             )
 
-            fig_fc.update_yaxes(title_text="Footfall", secondary_y=False)
-            fig_fc.update_yaxes(title_text="Turnover (€)", secondary_y=True)
-            fig_fc.update_layout(height=350,
-                                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-                                 margin=dict(l=40, r=40, t=20, b=40))
-            st.plotly_chart(fig_fc, use_container_width=True)
+        fig_fc.update_yaxes(title_text="Footfall", secondary_y=False)
+        fig_fc.update_yaxes(title_text="Turnover (€)", secondary_y=True)
+        fig_fc.update_layout(height=350,
+                             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+                             margin=dict(l=40, r=40, t=20, b=40))
+        st.plotly_chart(fig_fc, use_container_width=True)
 
-            coach_text = build_store_ai_coach_text(
-                store_name=shop_row["name"],
-                recent_foot=recent_foot,
-                recent_turn=recent_turn,
-                fut_foot=fut_foot,
-                fut_turn=fut_turn,
-                spv_cur=spv_cur,
-                conv_cur=conv_cur,
-                fc=fc,
-            )
-            st.markdown(coach_text)
+        coach_text = build_store_ai_coach_text(
+            store_name=shop_row["name"],
+            recent_foot=recent_foot or 0,
+            recent_turn=recent_turn or 0,
+            fut_foot=fut_foot or 0,
+            fut_turn=fut_turn or 0,
+            spv_cur=spv_cur,
+            conv_cur=conv_cur,
+            fc=fc if isinstance(fc, pd.DataFrame) else pd.DataFrame(),
+        )
+        st.markdown(coach_text)
 
-    except Exception as e:
-        st.info("Forecast could not be computed (missing data / model / weather issue).")
-        st.exception(e)
-
-    # --- Debug ---
+    # ---------------------------
+    # Debug
+    # ---------------------------
     with st.expander("🔧 Debug"):
         st.write("Period choice:", period_choice)
         st.write("Current period:", start_cur, "→", end_cur)
@@ -1177,15 +1315,20 @@ def main():
         st.write("SVI status:", store_svi_status)
         st.write("SVI reason:", store_svi_reason)
         st.write("SVI error:", store_svi_error)
-        
+
         try:
-            st.write("Merged meta cols:", meta.columns.tolist() if isinstance(meta, pd.DataFrame) else None)
+            st.write("Meta cols:", meta.columns.tolist() if isinstance(meta, pd.DataFrame) else None)
             if isinstance(meta, pd.DataFrame) and not meta.empty:
                 st.write("Meta row (selected store):", meta.loc[meta["id"] == pd.Series([shop_id], dtype="Int64").iloc[0]].head(1))
         except Exception:
             pass
+
         st.write("Merged meta cols:", merged_meta.columns.tolist() if isinstance(merged_meta, pd.DataFrame) else "n/a")
-        st.write("Merged meta row (this store):", merged_meta[merged_meta["id"].astype("Int64") == pd.Series([shop_id], dtype="Int64").iloc[0]].head())
+        try:
+            st.write("Merged meta row (this store):", merged_meta[merged_meta["id"].astype("Int64") == pd.Series([shop_id], dtype="Int64").iloc[0]].head())
+        except Exception:
+            pass
+
         st.write("All daily (head):", df_all_raw.head())
         st.write("Current df (head):", df_cur.head())
         st.write("Prev df (head):", df_prev.head())
@@ -1194,11 +1337,12 @@ def main():
         st.write("CBS stats:", cbs_stats)
         st.write("Weather df (head):", weather_df.head())
         try:
-            st.write("Forecast model_type:", fc_res.get("model_type"))
-            st.write("Forecast used_simple_fallback:", fc_res.get("used_simple_fallback"))
-            st.write("Forecast head:", fc_res["forecast"].head())
+            st.write("Forecast model_type:", fc_res.get("model_type") if isinstance(fc_res, dict) else None)
+            st.write("Forecast used_simple_fallback:", fc_res.get("used_simple_fallback") if isinstance(fc_res, dict) else None)
+            st.write("Forecast head:", fc_res["forecast"].head() if isinstance(fc_res, dict) and "forecast" in fc_res else None)
         except Exception:
             st.write("Forecast object not available in this run.")
+
 
 if __name__ == "__main__":
     main()
