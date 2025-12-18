@@ -173,14 +173,31 @@ def month_bounds(d: datetime.date):
     return start, end
 
 def kpi_tile(label: str, value: str, sub: str = "", delta: str | None = None):
-    # eenvoudige “mooie” cards, zonder extra dependencies
+    # ✅ kleur delta: groen bij +, rood bij -, grijs anders
     delta_html = ""
-    if delta:
+    if delta and str(delta).strip():
+        d = str(delta).strip()
+
+        # determine color
+        if "+" in d:
+            c = "#16A34A"  # green
+            bg = "#DCFCE7"
+        elif "-" in d:
+            c = "#DC2626"  # red
+            bg = "#FEE2E2"
+        else:
+            c = PFM_GRAY
+            bg = "#F3F4F6"
+
         delta_html = f"""
-        <div style="margin-top:6px; color:{PFM_GRAY}; font-size:0.85rem;">
-          {delta}
+        <div style="margin-top:8px;">
+          <span style="display:inline-block; font-size:0.80rem; font-weight:800; color:{c};
+                       background:{bg}; padding:3px 10px; border-radius:999px;">
+            {d}
+          </span>
         </div>
         """
+
     st.markdown(
         f"""
         <div style="border:1px solid {PFM_LINE}; border-radius:14px; padding:0.9rem 1rem; background:white;">
@@ -1025,6 +1042,55 @@ def main():
     turnover_mtd = float(df_mtd["turnover"].sum()) if ("turnover" in df_mtd.columns and not df_mtd.empty) else np.nan
     footfall_mtd = float(df_mtd["footfall"].sum()) if ("footfall" in df_mtd.columns and not df_mtd.empty) else np.nan
 
+        # ✅ YoY comparison (same month last year)
+    turnover_mtd_ly = np.nan
+    turnover_month_ly_total = np.nan
+    yoy_mtd_delta = None
+    yoy_total_delta = None
+
+    try:
+        # last year same month bounds
+        ly_year = today.year - 1
+        m_start_ly = datetime(ly_year, today.month, 1).date()
+        # last day of that month last year
+        if today.month == 12:
+            next_start_ly = datetime(ly_year + 1, 1, 1).date()
+        else:
+            next_start_ly = datetime(ly_year, today.month + 1, 1).date()
+        m_end_ly = next_start_ly - timedelta(days=1)
+
+        # "MTD last year": same day-of-month if possible, otherwise last day of month
+        mtd_end_ly = datetime(ly_year, today.month, min(today.day, m_end_ly.day)).date()
+
+        resp_ly = get_report(
+            [shop_id],
+            ["count_in", "turnover"],
+            period="date",
+            step="day",
+            source="shops",
+            form_date_from=m_start_ly.strftime("%Y-%m-%d"),
+            form_date_to=m_end_ly.strftime("%Y-%m-%d"),
+        )
+        df_ly = normalize_vemcount_response(resp_ly, kpi_keys=["count_in", "turnover"]).rename(
+            columns={"count_in": "footfall", "turnover": "turnover"}
+        )
+        df_ly["date"] = pd.to_datetime(df_ly["date"], errors="coerce")
+        df_ly = df_ly.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
+
+        df_ly_mtd = df_ly[(df_ly["date"] >= pd.Timestamp(m_start_ly)) & (df_ly["date"] <= pd.Timestamp(mtd_end_ly))].copy()
+
+        turnover_mtd_ly = float(pd.to_numeric(df_ly_mtd.get("turnover", np.nan), errors="coerce").sum())
+        turnover_month_ly_total = float(pd.to_numeric(df_ly.get("turnover", np.nan), errors="coerce").sum())
+
+        if pd.notna(turnover_mtd) and pd.notna(turnover_mtd_ly) and turnover_mtd_ly > 0:
+            yoy_mtd_delta = (turnover_mtd - turnover_mtd_ly) / turnover_mtd_ly * 100
+
+        if pd.notna(turnover_total_fc) and pd.notna(turnover_month_ly_total) and turnover_month_ly_total > 0:
+            yoy_total_delta = (turnover_total_fc - turnover_month_ly_total) / turnover_month_ly_total * 100
+
+    except Exception:
+        pass
+
     # Forecast remaining within this month (from fc; horizon 14, so partial month is fine)
     turnover_rem_fc = np.nan
     footfall_rem_fc = np.nan
@@ -1041,14 +1107,38 @@ def main():
             coverage_text = f"Forecast covers {len(fc_month)}/{remaining_days} remaining days."
 
     mo1, mo2, mo3, mo4 = st.columns(4)
+
     with mo1:
-        kpi_tile("Turnover MTD (actual)", fmt_eur(turnover_mtd) if pd.notna(turnover_mtd) else "-", coverage_text)
+        kpi_tile(
+            "Turnover MTD (actual)",
+            fmt_eur(turnover_mtd) if pd.notna(turnover_mtd) else "-",
+            "vs same month last year",
+            f"Δ {yoy_mtd_delta:+.1f}%".replace(".", ",") if yoy_mtd_delta is not None else None,
+        )
+
     with mo2:
-        kpi_tile("Turnover remaining (forecast)", fmt_eur(turnover_rem_fc) if pd.notna(turnover_rem_fc) else "-", "")
+        kpi_tile(
+            "Turnover remaining (forecast)",
+            fmt_eur(turnover_rem_fc) if pd.notna(turnover_rem_fc) else "-",
+            coverage_text,
+            None,
+        )
+
     with mo3:
-        kpi_tile("Turnover total month (forecast)", fmt_eur(turnover_total_fc) if pd.notna(turnover_total_fc) else "-", "")
+        kpi_tile(
+            "Turnover total month (forecast)",
+            fmt_eur(turnover_total_fc) if pd.notna(turnover_total_fc) else "-",
+            "vs same month last year",
+            f"Δ {yoy_total_delta:+.1f}%".replace(".", ",") if yoy_total_delta is not None else None,
+        )
+
     with mo4:
-        kpi_tile("Footfall remaining (forecast)", fmt_int(footfall_rem_fc) if pd.notna(footfall_rem_fc) else "-", "")
+        kpi_tile(
+            "Footfall remaining (forecast)",
+            fmt_int(footfall_rem_fc) if pd.notna(footfall_rem_fc) else "-",
+            "",
+            None,
+        )
 
     # ---------------------------
     # ✅ Daily footfall & turnover (actual + forecast)
