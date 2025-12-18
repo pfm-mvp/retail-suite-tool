@@ -1288,8 +1288,8 @@ def main():
             return float(np.clip((float(val) / float(target)) * 100.0, 0, 120))
     
         # use: turnover forecast total for the month + current period conv/spv
-        turnover_prog = _pct(turnover_total_fc, turnover_target)
-        conv_prog = _pct(conv_cur, conv_target)
+        turnover_prog = _pct(turnover_total_fc, turnover_target_month)
+        conv_prog = _pct(conv_cur, conversion_target_pct)
         spv_prog = _pct(spv_cur, spv_target)
     
         # make rings readable & on-brand
