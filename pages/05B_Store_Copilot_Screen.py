@@ -1307,7 +1307,7 @@ def main():
         st.markdown(kpi_card_html(
             "Footfall remaining (forecast)",
             fmt_int(footfall_rem_fc),
-            sub="",
+            sub="Expected in-store traffic for the remainder of the month",
             delta_pct=None
         ), unsafe_allow_html=True)
     
