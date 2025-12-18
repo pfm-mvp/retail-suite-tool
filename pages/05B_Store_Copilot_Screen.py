@@ -1,4 +1,4 @@
-# pages/05_Retail_AI_Store_Copilot.py
+    # pages/05_Retail_AI_Store_Copilot.py
 
 import os
 import time
@@ -117,7 +117,7 @@ PFM_LINE = "#E5E7EB"
 PFM_DARK = "#111827"
 
 # Light purple for forecast bars (requested)
-PFM_PURPLE_LIGHT_RGBA = "rgba(118,33,129,0.18)"   # very light purple
+PFM_PURPLE_LIGHT_RGBA = "rgba(118,33,129,0.28)"   # very light purple
 PFM_PURPLE_LIGHT_LINE = "rgba(118,33,129,0.55)"   # slightly stronger for forecast line
 
 PFM_GREEN = "#22C55E"
@@ -1101,7 +1101,11 @@ def main():
 
         except Exception as e:
             store_svi_error = f"SVI build failed: {e}"
-
+    # ✅ sanitize dynamic values used inside unsafe HTML
+    _region_safe = html.escape(str(store_region)) if store_region else ""
+    _status_safe = html.escape(str(store_svi_status)) if store_svi_status else ""
+    _label_safe = html.escape(str(svi_ui["label"]))
+    
     svi_ui = svi_style(store_svi_score)
     svi_badge = f"""
       <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px;">
@@ -1114,7 +1118,9 @@ def main():
           <div class="kpi-sub">
             Rank: {f"{store_svi_rank} / {store_svi_peer_n}" if (store_svi_rank and store_svi_peer_n) else "—"}
             · benchmark vs regional peers
-            {f" · Region: {store_region}" if store_region else ""}
+            {f" · Region: {_region_safe}" if store_region else ""}
+            ...
+            {_status_safe if store_svi_status else _label_safe}
           </div>
         </div>
 
@@ -1178,7 +1184,10 @@ def main():
           </div>
         """, unsafe_allow_html=True)
         if store_svi_reason and store_svi_reason not in ("None", "nan"):
-            st.caption(store_svi_reason)
+            reason_txt = str(store_svi_reason)
+            # strip the most common html leakage
+            reason_txt = reason_txt.replace("</div>", "").replace("<div>", "").strip()
+            st.caption(reason_txt)
    
     # ---------------------------
     # ✅ Month outlook (forecast + actual) with YoY deltas + ring
@@ -1281,25 +1290,52 @@ def main():
         ), unsafe_allow_html=True)
     
     with cols_m[4]:
-        # ✅ 3-ring "Activity" (Turnover / Conversion / SPV)
+        # ✅ 3-ring "Activity" (Turnover / Conversion / SPV) — using frozen session targets
         def _pct(val, target):
             if target in (None, 0) or pd.isna(val):
                 return 0.0
             return float(np.clip((float(val) / float(target)) * 100.0, 0, 120))
     
-        # use: turnover forecast total for the month + current period conv/spv
+        # Use month total forecast for turnover progress
         turnover_prog = _pct(turnover_total_fc, turnover_target_month)
         conv_prog = _pct(conv_cur, conversion_target_pct)
         spv_prog = _pct(spv_cur, spv_target)
     
-        # make rings readable & on-brand
+        # Rings (outer → inner) with consistent colors
         fig_ring = go.Figure()
-        fig_ring.add_trace(go.Pie(values=[turnover_prog, 100-turnover_prog], hole=0.58,
-                                  marker=dict(colors=[PFM_RED, PFM_LINE]), textinfo="none", showlegend=False))
-        fig_ring.add_trace(go.Pie(values=[conv_prog, 100-conv_prog], hole=0.73,
-                                  marker=dict(colors=[PFM_PURPLE, PFM_LINE]), textinfo="none", showlegend=False))
-        fig_ring.add_trace(go.Pie(values=[spv_prog, 100-spv_prog], hole=0.86,
-                                  marker=dict(colors=[PFM_PEACH, PFM_LINE]), textinfo="none", showlegend=False))
+    
+        # Outer ring: Turnover (RED)
+        fig_ring.add_trace(go.Pie(
+            values=[turnover_prog, max(0, 100 - turnover_prog)],
+            hole=0.58,
+            marker=dict(colors=[PFM_RED, PFM_LINE]),
+            textinfo="none",
+            sort=False,
+            direction="clockwise",
+            showlegend=False,
+        ))
+    
+        # Middle ring: Conversion (PURPLE)
+        fig_ring.add_trace(go.Pie(
+            values=[conv_prog, max(0, 100 - conv_prog)],
+            hole=0.73,
+            marker=dict(colors=[PFM_PURPLE, PFM_LINE]),
+            textinfo="none",
+            sort=False,
+            direction="clockwise",
+            showlegend=False,
+        ))
+    
+        # Inner ring: SPV (PEACH)
+        fig_ring.add_trace(go.Pie(
+            values=[spv_prog, max(0, 100 - spv_prog)],
+            hole=0.86,
+            marker=dict(colors=[PFM_PEACH, PFM_LINE]),
+            textinfo="none",
+            sort=False,
+            direction="clockwise",
+            showlegend=False,
+        ))
     
         fig_ring.update_layout(
             height=190,
@@ -1307,12 +1343,20 @@ def main():
             annotations=[dict(
                 text="Targets",
                 x=0.5, y=0.5, showarrow=False,
-                font=dict(size=14, color=PFM_DARK)
-            )]
+                font=dict(size=14, color=PFM_DARK, family="sans-serif")
+            )],
         )
     
         st.plotly_chart(fig_ring, use_container_width=True)
-        st.caption(f"Turnover {turnover_prog:.0f}% · Conv {conv_prog:.0f}% · SPV {spv_prog:.0f}%")
+    
+        # ✅ Clear legend that matches ring colors
+        st.markdown(f"""
+        <div style="display:flex; gap:10px; flex-wrap:wrap; font-size:12px; color:{PFM_GRAY}; font-weight:700; margin-top:4px;">
+          <span><span style="display:inline-block;width:10px;height:10px;border-radius:99px;background:{PFM_RED};margin-right:6px;"></span>Turnover: {turnover_prog:.0f}%</span>
+          <span><span style="display:inline-block;width:10px;height:10px;border-radius:99px;background:{PFM_PURPLE};margin-right:6px;"></span>Conv: {conv_prog:.0f}%</span>
+          <span><span style="display:inline-block;width:10px;height:10px;border-radius:99px;background:{PFM_PEACH};margin-right:6px;"></span>SPV: {spv_prog:.0f}%</span>
+        </div>
+        """, unsafe_allow_html=True)
 
     # ---------------------------
     # ✅ Daily footfall & turnover (actual + forecast) — forecast bars light purple
