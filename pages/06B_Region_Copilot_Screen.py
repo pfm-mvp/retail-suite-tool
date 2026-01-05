@@ -6,7 +6,7 @@ import requests
 import streamlit as st
 import altair as alt
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 
 from helpers_clients import load_clients
 from helpers_normalize import normalize_vemcount_response
@@ -119,6 +119,7 @@ st.markdown(
         border-radius: 12px !important;
         padding: 0.65rem 1rem !important;
         font-weight: 800 !important;
+        width: 100% !important;
       }}
     </style>
     """,
@@ -142,6 +143,33 @@ def fmt_int(x: float) -> str:
     if pd.isna(x):
         return "-"
     return f"{x:,.0f}".replace(",", ".")
+
+# ----------------------
+# Period helpers
+# ----------------------
+def _period_range(choice: str) -> tuple[date, date]:
+    today = datetime.today().date()
+
+    presets: dict[str, tuple[date, date]] = {
+        "Kalenderjaar 2024": (date(2024, 1, 1), date(2024, 12, 31)),
+        "Kalenderjaar 2025": (date(2025, 1, 1), date(2025, 12, 31)),
+        "Q1 2024": (date(2024, 1, 1), date(2024, 3, 31)),
+        "Q2 2024": (date(2024, 4, 1), date(2024, 6, 30)),
+        "Q3 2024": (date(2024, 7, 1), date(2024, 9, 30)),
+        "Q4 2024": (date(2024, 10, 1), date(2024, 12, 31)),
+        "Q1 2025": (date(2025, 1, 1), date(2025, 3, 31)),
+        "Q2 2025": (date(2025, 4, 1), date(2025, 6, 30)),
+        "Q3 2025": (date(2025, 7, 1), date(2025, 9, 30)),
+        "Q4 2025": (date(2025, 10, 1), date(2025, 12, 31)),
+    }
+
+    if choice in presets:
+        return presets[choice]
+
+    # Default: last 26 weeks
+    end_period = today
+    start_period = today - timedelta(weeks=26)
+    return start_period, end_period
 
 # ----------------------
 # Region & API helpers
@@ -183,15 +211,29 @@ def get_locations_by_company(company_id: int) -> pd.DataFrame:
     return pd.DataFrame(data)
 
 @st.cache_data(ttl=600)
-def get_report(shop_ids, data_outputs, period: str, step: str = "day", source: str = "shops"):
+def get_report(
+    shop_ids,
+    data_outputs,
+    period: str,
+    step: str = "day",
+    source: str = "shops",
+    form_date_from: str | None = None,
+    form_date_to: str | None = None,
+):
     params: list[tuple[str, str]] = []
     for sid in shop_ids:
         params.append(("data", str(sid)))
     for dout in data_outputs:
         params.append(("data_output", dout))
+
     params.append(("period", period))
     params.append(("step", step))
     params.append(("source", source))
+
+    # ✅ Only for explicit date range
+    if period == "date" and form_date_from and form_date_to:
+        params.append(("form_date_from", form_date_from))
+        params.append(("form_date_to", form_date_to))
 
     resp = requests.post(REPORT_URL, params=params, timeout=90)
     resp.raise_for_status()
@@ -246,11 +288,6 @@ def fetch_region_street_traffic(region: str, start_date, end_date) -> pd.DataFra
 # Robust helpers (prevents KeyError 'region')
 # ----------------------
 def ensure_region_column(df: pd.DataFrame, merged_map: pd.DataFrame, store_key_col: str) -> pd.DataFrame:
-    """
-    Zorgt dat df een kolom 'region' heeft.
-    - vangt region_x / region_y af
-    - koppelt via merged_map[['id','region']] met dtype-safe merge
-    """
     if df is None or df.empty:
         return df
 
@@ -265,15 +302,12 @@ def ensure_region_column(df: pd.DataFrame, merged_map: pd.DataFrame, store_key_c
 
     if merged_map is None or merged_map.empty:
         return df
-
     if "id" not in merged_map.columns or "region" not in merged_map.columns:
         return df
 
     region_lookup = merged_map[["id", "region"]].drop_duplicates().copy()
-
     out = df.copy()
 
-    # dtype-safe join keys
     if store_key_col in out.columns:
         out[store_key_col] = pd.to_numeric(out[store_key_col], errors="coerce").astype("Int64")
         region_lookup["id"] = pd.to_numeric(region_lookup["id"], errors="coerce").astype("Int64")
@@ -345,9 +379,7 @@ def status_from_score(score: float):
 
 def gauge_chart(score_0_100: float, fill_color: str):
     score_0_100 = float(np.clip(score_0_100, 0, 100))
-    gauge_df = pd.DataFrame(
-        {"segment": ["filled", "empty"], "value": [score_0_100, max(0.0, 100.0 - score_0_100)]}
-    )
+    gauge_df = pd.DataFrame({"segment": ["filled", "empty"], "value": [score_0_100, max(0.0, 100.0 - score_0_100)]})
     arc = (
         alt.Chart(gauge_df)
         .mark_arc(innerRadius=62, outerRadius=82)
@@ -372,20 +404,17 @@ def gauge_chart(score_0_100: float, fill_color: str):
 # MAIN
 # ----------------------
 def main():
-    header_left, header_right = st.columns([2.2, 1.8])
-
-    with header_left:
-        st.markdown(
-            f"""
-            <div class="pfm-header">
-              <div>
-                <div class="pfm-title">PFM Region Performance Copilot</div>
-                <div class="pfm-sub">One-screen layout – snel lezen, weinig scrollen (macro optioneel onderaan)</div>
-              </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    st.markdown(
+        f"""
+        <div class="pfm-header">
+          <div>
+            <div class="pfm-title">PFM Region Performance Copilot</div>
+            <div class="pfm-sub">One-screen layout – snel lezen, weinig scrollen (macro optioneel onderaan)</div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     clients = load_clients("clients.json")
     clients_df = pd.DataFrame(clients)
@@ -394,17 +423,33 @@ def main():
         axis=1,
     )
 
-    with header_right:
-        c1, c2 = st.columns(2)
-        with c1:
-            client_label = st.selectbox("Retailer", clients_df["label"].tolist(), label_visibility="collapsed")
-        with c2:
-            period_choice = st.selectbox(
-                "Periode",
-                ["Kalenderjaar 2024", "Laatste 26 weken"],
-                index=0,
-                label_visibility="collapsed",
-            )
+    # ---- TOP BAR (everything in one row; always visible)
+    top = st.columns([1.7, 1.3, 1.2, 1.3, 1.3, 0.9])
+
+    with top[0]:
+        client_label = st.selectbox("Retailer", clients_df["label"].tolist())
+
+    period_options = [
+        "Kalenderjaar 2024",
+        "Q1 2024", "Q2 2024", "Q3 2024", "Q4 2024",
+        "Kalenderjaar 2025",
+        "Q1 2025", "Q2 2025", "Q3 2025", "Q4 2025",
+        "Laatste 26 weken",
+    ]
+    with top[1]:
+        period_choice = st.selectbox("Periode", period_options, index=0)
+
+    with top[2]:
+        region_placeholder = st.empty()
+
+    with top[3]:
+        compare_all_regions = st.toggle("Vergelijk met andere regio’s", value=True)
+
+    with top[4]:
+        show_macro = st.toggle("Toon macro (CBS/CCI)", value=False)
+
+    with top[5]:
+        run_btn = st.button("Analyseer", type="primary")
 
     selected_client = clients_df[clients_df["label"] == client_label].iloc[0].to_dict()
     company_id = int(selected_client["company_id"])
@@ -446,31 +491,20 @@ def main():
     else:
         merged["store_display"] = merged["name"] if "name" in merged.columns else merged["id"].astype(str)
 
-    # Region selector + analyse button
+    # Region selector rendered into placeholder
     available_regions = sorted(merged["region"].dropna().unique().tolist())
-    top_controls = st.columns([1.2, 1.2, 1.2, 1.4])
-    with top_controls[0]:
-        region_choice = st.selectbox("Regio", available_regions)
-    with top_controls[1]:
-        compare_all_regions = st.toggle("Vergelijk met andere regio’s", value=True)
-    with top_controls[2]:
-        show_macro = st.toggle("Toon macro (CBS/CCI)", value=False)
-    with top_controls[3]:
-        run_btn = st.button("Analyseer", type="primary")
+    if not available_regions:
+        st.warning("Geen regio’s gevonden in de mapping.")
+        return
+    with region_placeholder.container():
+        region_choice = st.selectbox("Regio", available_regions, index=0)
 
     if not run_btn:
         st.info("Selecteer retailer/regio/periode en klik op **Analyseer**.")
         return
 
-    # Period range (we filter locally)
-    today = datetime.today().date()
-    if period_choice == "Kalenderjaar 2024":
-        start_period = datetime(2024, 1, 1).date()
-        end_period = datetime(2024, 12, 31).date()
-    else:
-        end_period = today
-        start_period = today - timedelta(weeks=26)
-
+    # Period range (explicit)
+    start_period, end_period = _period_range(period_choice)
     start_ts = pd.Timestamp(start_period)
     end_ts = pd.Timestamp(end_period)
 
@@ -481,19 +515,20 @@ def main():
         st.warning(f"Geen winkels gevonden voor regio '{region_choice}'.")
         return
 
-    # For region compare, we need data for ALL shops
     all_shop_ids = merged["id"].dropna().astype(int).unique().tolist()
     fetch_ids = all_shop_ids if compare_all_regions else region_shop_ids
 
-    # Fetch report
+    # Fetch report (✅ real period via period="date")
     metric_map = {"count_in": "footfall", "turnover": "turnover"}
     with st.spinner("Data ophalen via FastAPI..."):
         resp = get_report(
             fetch_ids,
             list(metric_map.keys()),
-            period="this_year",   # we filter by date range below
+            period="date",
             step="day",
             source="shops",
+            form_date_from=start_period.strftime("%Y-%m-%d"),
+            form_date_to=end_period.strftime("%Y-%m-%d"),
         )
         df_raw = normalize_vemcount_response(resp, kpi_keys=metric_map.keys()).rename(columns=metric_map)
 
@@ -515,7 +550,7 @@ def main():
         st.error("Geen store-id kolom gevonden in de response (id/shop_id/location_id).")
         return
 
-    # Filter to selected period
+    # Filter to selected period (still safe; should already match)
     df_period_all = df_raw[(df_raw["date"] >= start_ts) & (df_raw["date"] <= end_ts)].copy()
     if df_period_all.empty:
         st.warning("Geen data in de geselecteerde periode.")
@@ -568,7 +603,6 @@ def main():
         store_key_col=store_key_col,
     )
 
-    # Ensure region exists on svi_all (this prevents KeyError later)
     svi_all = ensure_region_column(svi_all, merged, store_key_col) if isinstance(svi_all, pd.DataFrame) else pd.DataFrame()
 
     region_scores = pd.DataFrame()
@@ -588,12 +622,9 @@ def main():
             region_svi = float(np.clip(cur["region_svi"].iloc[0], 0, 100))
             region_status, region_color = status_from_score(region_svi)
 
-    # Prepare svi_region ONCE (reuse in two panels)
     svi_region = pd.DataFrame()
     if not svi_all.empty and "region" in svi_all.columns:
         svi_region = svi_all[svi_all["region"] == region_choice].copy()
-
-    # After: svi_region = svi_all[svi_all["region"] == region_choice].copy()
 
     if not svi_region.empty and "svi_score" in svi_region.columns:
         svi_region["svi_score"] = pd.to_numeric(svi_region["svi_score"], errors="coerce")
@@ -812,7 +843,6 @@ def main():
 
         macro_col1, macro_col2 = st.columns(2)
 
-        # Build regional monthly indices
         region_month = df_region.copy()
         region_month["month"] = region_month["date"].dt.to_period("M").dt.to_timestamp()
         region_month = (
@@ -956,11 +986,10 @@ def main():
 
             st.markdown("</div>", unsafe_allow_html=True)
 
-    # Optional debug expander (kept lightweight)
     with st.expander("🔧 Debug"):
         st.write("Retailer:", selected_client)
         st.write("Regio:", region_choice)
-        st.write("Periode:", start_period, "→", end_period)
+        st.write("Periode:", start_period, "→", end_period, f"({period_choice})")
         st.write("Compare all regions:", compare_all_regions)
         st.write("Store key col:", store_key_col)
         st.write("All shops:", len(all_shop_ids), "Region shops:", len(region_shop_ids))
