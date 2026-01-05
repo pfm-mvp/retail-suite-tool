@@ -450,9 +450,11 @@ def collapse_to_daily_store(df: pd.DataFrame, store_key_col: str) -> pd.DataFram
         out["conversion_rate"] = np.where(out["footfall"] > 0, out["transactions"] / out["footfall"] * 100.0, np.nan)
     if "turnover" in out.columns and "transactions" in out.columns:
         out["avg_basket_size"] = np.where(out["transactions"] > 0, out["turnover"] / out["transactions"], np.nan)
-    if "avg_basket_size" in out.columns and "sales_per_visitor" in out.columns and "avg_basket_size"].notna().any():
-        # sales_per_transaction already defined above (same as avg_basket_size), keep if provided
-        pass
+
+    # sales_per_transaction is in praktijk gelijk aan avg_basket_size (turnover / transactions)
+    # Als de API 'sales_per_transaction' al aanlevert, laten we die staan; anders vullen we hem.
+    if "sales_per_transaction" not in out.columns and "avg_basket_size" in out.columns:
+        out["sales_per_transaction"] = out["avg_basket_size"]
 
     return out
 
