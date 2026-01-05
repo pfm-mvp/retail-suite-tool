@@ -638,6 +638,53 @@ def main():
 
     locations_df["id"] = pd.to_numeric(locations_df["id"], errors="coerce").astype("Int64")
     merged = locations_df.merge(region_map, left_on="id", right_on="shop_id", how="inner")
+    # ----------------------
+# DEBUG: sqm availability
+# ----------------------
+with st.expander("🧱 Debug: SQM (location surface)"):
+    st.write("Columns in locations_df:", list(locations_df.columns))
+    st.write("Columns in merged:", list(merged.columns))
+
+    # Detect possible sqm columns
+    sqm_candidates = ["sqm", "sq_meter", "sq_meters", "square_meters", "area", "surface", "m2", "size"]
+    found_in_locations = [c for c in sqm_candidates if c in locations_df.columns]
+    found_in_merged = [c for c in sqm_candidates if c in merged.columns]
+
+    st.write("SQM candidates found in locations_df:", found_in_locations if found_in_locations else "None")
+    st.write("SQM candidates found in merged:", found_in_merged if found_in_merged else "None")
+
+    # Pick the column that will be used (same logic as script)
+    sqm_col = None
+    for cand in ["sqm", "sq_meter", "sq_meters", "square_meters"]:
+        if cand in merged.columns:
+            sqm_col = cand
+            break
+
+    st.write("sqm_col selected by script:", sqm_col if sqm_col else "None")
+
+    # Show counts and sample rows
+    show_cols = ["id", "name", "store_display", "region", "shop_id", "sqm_override"]
+    show_cols = [c for c in show_cols if c in merged.columns]
+
+    if sqm_col is not None:
+        merged["_sqm_raw"] = pd.to_numeric(merged[sqm_col], errors="coerce")
+        st.write("Non-null sqm raw (from locations):", int(merged["_sqm_raw"].notna().sum()), "/", int(len(merged)))
+        show_cols = show_cols + [sqm_col, "_sqm_raw"]
+
+    if "sqm_effective" in merged.columns:
+        merged["_sqm_effective_num"] = pd.to_numeric(merged["sqm_effective"], errors="coerce")
+        st.write("Non-null sqm_effective:", int(merged["_sqm_effective_num"].notna().sum()), "/", int(len(merged)))
+        show_cols = show_cols + ["sqm_effective", "_sqm_effective_num"]
+
+    # Unique store count + missing list
+    if "id" in merged.columns:
+        missing = merged[merged.get("sqm_effective", np.nan).isna()][["id"]].drop_duplicates()
+        st.write("Stores missing sqm_effective (first 30 ids):", missing["id"].astype(str).head(30).tolist())
+
+    st.dataframe(
+        merged[show_cols].drop_duplicates(subset=["id"]).head(20),
+        use_container_width=True
+    )
     if merged.empty:
         st.warning("Er zijn geen winkels met een regio-mapping voor deze retailer.")
         return
