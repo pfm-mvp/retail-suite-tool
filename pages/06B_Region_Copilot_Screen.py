@@ -778,11 +778,11 @@ def main():
         pathzz_weekly = pathzz_weekly.copy()
         pathzz_weekly["week_start"] = pd.to_datetime(pathzz_weekly["week_start"], errors="coerce")
         pathzz_weekly = pathzz_weekly.dropna(subset=["week_start"])
-    
+
         # ✅ CRUCIAAL: voorkom duplicates op week_start (oorzaak van “meerdere capture punten”)
         pathzz_weekly = (
             pathzz_weekly.groupby("week_start", as_index=False)
-               .agg(street_footfall=("street_footfall", "mean"))
+            .agg(street_footfall=("street_footfall", "mean"))
         )
 
     if not region_weekly.empty and not pathzz_weekly.empty:
@@ -1059,12 +1059,6 @@ def main():
         st.markdown("</div>", unsafe_allow_html=True)
 
     # ----------------------
-    # RESTORE: Macro (CBS/CCI) optioneel (zoals gisteren)
-    # ----------------------
-    # ----------------------
-    # MACRO (CBS/CCI) optioneel
-    # ----------------------
-    # ----------------------
     # MACRO (CBS/CCI) optioneel
     # ----------------------
     if show_macro:
@@ -1265,88 +1259,139 @@ def main():
                         base = float(base.iloc[0])
                         cci_df["cci_index"] = (cci_df["cci"] / base) * 100.0
 
-        # --- 3) Plot (maand/jaar zonder “dag”) ---
-        macro_col1, macro_col2 = st.columns(2)
-
-        def _macro_chart(lines_df: pd.DataFrame, title: str):
+        # --- 3) Dual-axis plot helper: regio links, CBS/CCI rechts ---
+        def _macro_chart_dual(
+            region_df: pd.DataFrame,
+            macro_df: pd.DataFrame,
+            title: str,
+            macro_label: str,
+        ):
             st.markdown(f'<div class="panel"><div class="panel-title">{title}</div>', unsafe_allow_html=True)
 
-            if lines_df is None or lines_df.empty:
+            has_region = region_df is not None and not region_df.empty
+            has_macro = macro_df is not None and not macro_df.empty
+
+            if not has_region and not has_macro:
                 st.info("Geen macro-data beschikbaar.")
                 st.markdown("</div>", unsafe_allow_html=True)
                 return
 
-            chart = (
-                alt.Chart(lines_df.dropna(subset=["date", "value"]))
-                .mark_line(point=True)
-                .encode(
-                    x=alt.X(
-                        "date:T",
-                        title="Maand",
-                        axis=alt.Axis(format="%b %Y", labelAngle=0),
-                    ),
-                    y=alt.Y("value:Q", title="Index (100 = eerste maand)"),
-                    color=alt.Color("series:N", title=""),
-                    tooltip=[
-                        alt.Tooltip("date:T", title="Maand", format="%b %Y"),
-                        alt.Tooltip("series:N", title="Reeks"),
-                        alt.Tooltip("value:Q", title="Index", format=".1f"),
-                    ],
+            layers = []
+
+            # Left axis: region series
+            if has_region:
+                r = region_df.dropna(subset=["date", "value"]).copy()
+                region_chart = (
+                    alt.Chart(r)
+                    .mark_line(point=True)
+                    .encode(
+                        x=alt.X(
+                            "date:T",
+                            title="Maand",
+                            axis=alt.Axis(format="%b %Y", labelAngle=0),
+                        ),
+                        y=alt.Y(
+                            "value:Q",
+                            title="Regio-index (100 = start)",
+                            scale=alt.Scale(zero=False),
+                        ),
+                        color=alt.Color("series:N", title=""),
+                        tooltip=[
+                            alt.Tooltip("date:T", title="Maand", format="%b %Y"),
+                            alt.Tooltip("series:N", title="Reeks"),
+                            alt.Tooltip("value:Q", title="Index", format=".1f"),
+                        ],
+                    )
                 )
-                .properties(height=260)
-            )
+                layers.append(region_chart)
+
+            # Right axis: macro series (single line)
+            if has_macro:
+                m = macro_df.dropna(subset=["date", "value"]).copy()
+                macro_chart = (
+                    alt.Chart(m)
+                    .mark_line(point=True, strokeDash=[6, 4], strokeWidth=2, color=PFM_DARK)
+                    .encode(
+                        x=alt.X("date:T", title="Maand"),
+                        y=alt.Y(
+                            "value:Q",
+                            title=macro_label,
+                            scale=alt.Scale(zero=False),
+                        ),
+                        tooltip=[
+                            alt.Tooltip("date:T", title="Maand", format="%b %Y"),
+                            alt.Tooltip("value:Q", title=macro_label, format=".1f"),
+                        ],
+                    )
+                )
+                layers.append(macro_chart)
+
+            chart = alt.layer(*layers).resolve_scale(y="independent").properties(height=260)
             st.altair_chart(chart, use_container_width=True)
             st.markdown("</div>", unsafe_allow_html=True)
 
-        # ---- CBS chart lines ----
-        lines = []
+        # --- 4) Build dataframes per chart (region = links, macro = rechts) ---
+        macro_col1, macro_col2 = st.columns(2)
+
+        # ---- CBS chart ----
+        region_lines = []
         if not region_month.empty:
             a = region_month.rename(columns={"month": "date"})[["date", "region_footfall_index"]].copy()
             a["series"] = "Regio footfall-index"
             a = a.rename(columns={"region_footfall_index": "value"})
-            lines.append(a)
+            region_lines.append(a[["date", "series", "value"]])
 
             b = region_month.rename(columns={"month": "date"})[["date", "region_turnover_index"]].copy()
             b["series"] = "Regio omzet-index"
             b = b.rename(columns={"region_turnover_index": "value"})
-            lines.append(b)
+            region_lines.append(b[["date", "series", "value"]])
 
+        region_df_cbs = pd.concat(region_lines, ignore_index=True) if region_lines else pd.DataFrame()
+
+        macro_df_cbs = pd.DataFrame()
         if not cbs_retail_month.empty and "cbs_retail_index" in cbs_retail_month.columns:
-            c = cbs_retail_month[["date", "cbs_retail_index"]].copy()
-            c["series"] = "CBS detailhandelindex"
-            c = c.rename(columns={"cbs_retail_index": "value"})
-            lines.append(c)
-
-        macro_df_cbs = pd.concat(lines, ignore_index=True) if lines else pd.DataFrame()
+            macro_df_cbs = cbs_retail_month[["date", "cbs_retail_index"]].copy()
+            macro_df_cbs["value"] = pd.to_numeric(macro_df_cbs["cbs_retail_index"], errors="coerce")
+            macro_df_cbs = macro_df_cbs[["date", "value"]].dropna()
 
         with macro_col1:
-            _macro_chart(macro_df_cbs, "CBS detailhandelindex vs Regio")
+            _macro_chart_dual(
+                region_df=region_df_cbs,
+                macro_df=macro_df_cbs,
+                title="CBS detailhandelindex vs Regio",
+                macro_label="CBS index (100 = start)",
+            )
 
-        # ---- CCI chart lines ----
-        lines = []
-        if not cci_df.empty and "cci_index" in cci_df.columns:
-            c = cci_df[["date", "cci_index"]].copy()
-            c["series"] = "Consumentenvertrouwen-index"
-            c = c.rename(columns={"cci_index": "value"})
-            lines.append(c)
-
+        # ---- CCI chart ----
+        region_lines = []
         if not region_month.empty:
             a = region_month.rename(columns={"month": "date"})[["date", "region_footfall_index"]].copy()
             a["series"] = "Regio footfall-index"
             a = a.rename(columns={"region_footfall_index": "value"})
-            lines.append(a)
+            region_lines.append(a[["date", "series", "value"]])
 
             b = region_month.rename(columns={"month": "date"})[["date", "region_turnover_index"]].copy()
             b["series"] = "Regio omzet-index"
             b = b.rename(columns={"region_turnover_index": "value"})
-            lines.append(b)
+            region_lines.append(b[["date", "series", "value"]])
 
-        macro_df_cci = pd.concat(lines, ignore_index=True) if lines else pd.DataFrame()
+        region_df_cci = pd.concat(region_lines, ignore_index=True) if region_lines else pd.DataFrame()
+
+        macro_df_cci = pd.DataFrame()
+        if not cci_df.empty and "cci_index" in cci_df.columns:
+            macro_df_cci = cci_df[["date", "cci_index"]].copy()
+            macro_df_cci["value"] = pd.to_numeric(macro_df_cci["cci_index"], errors="coerce")
+            macro_df_cci = macro_df_cci[["date", "value"]].dropna()
 
         with macro_col2:
-            _macro_chart(macro_df_cci, "Consumentenvertrouwen (CCI) vs Regio")
+            _macro_chart_dual(
+                region_df=region_df_cci,
+                macro_df=macro_df_cci,
+                title="Consumentenvertrouwen (CCI) vs Regio",
+                macro_label="CCI index (100 = start)",
+            )
 
-        # --- 4) Macro debug (super handig totdat het stabiel is) ---
+        # --- 5) Macro debug ---
         with st.expander("🔧 Debug macro (CBS/CCI)"):
             st.write("Macro window:", macro_start, "→", macro_end)
             st.write("months_back used:", months_back)
@@ -1391,41 +1436,6 @@ def main():
         st.write("df_norm head:", df_norm.head())
         st.write("df_daily_store head:", df_daily_store.head())
         st.write("df_region_daily head:", df_region_daily.head())
-        st.write("Macro window:", macro_start, "→", macro_end)
-        st.write("months_back used:", months_back)
-    
-        # ---- RAW retail ----
-        st.subheader("CBS Retail RAW")
-        st.write("retail_series len:", len(retail_series) if isinstance(retail_series, list) else type(retail_series))
-        if isinstance(retail_series, list) and retail_series:
-            raw_retail = pd.DataFrame(retail_series)
-            st.write("raw_retail columns:", raw_retail.columns.tolist())
-            if "period" in raw_retail.columns:
-                st.write("raw period head/tail:", raw_retail["period"].head(3).tolist(), "…", raw_retail["period"].tail(3).tolist())
-            st.dataframe(raw_retail.head(10))
-    
-        if not cbs_retail_month.empty:
-            st.write("CBS parsed min/max:", cbs_retail_month["date"].min(), "→", cbs_retail_month["date"].max())
-            st.dataframe(cbs_retail_month.head(10))
-        else:
-            st.warning("CBS parsed dataframe is EMPTY after parsing/filtering.")
-    
-        # ---- RAW cci ----
-        st.subheader("CCI RAW")
-        st.write("cci_series len:", len(cci_series) if isinstance(cci_series, list) else type(cci_series))
-        if isinstance(cci_series, list) and cci_series:
-            raw_cci = pd.DataFrame(cci_series)
-            st.write("raw_cci columns:", raw_cci.columns.tolist())
-            if "period" in raw_cci.columns:
-                st.write("raw period head/tail:", raw_cci["period"].head(3).tolist(), "…", raw_cci["period"].tail(3).tolist())
-            st.dataframe(raw_cci.head(10))
-    
-        if not cci_df.empty:
-            st.write("CCI parsed min/max:", cci_df["date"].min(), "→", cci_df["date"].max())
-            st.dataframe(cci_df.head(10))
-        else:
-            st.warning("CCI parsed dataframe is EMPTY after parsing/filtering.")
-
 
 if __name__ == "__main__":
     main()
