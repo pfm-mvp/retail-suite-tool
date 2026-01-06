@@ -249,8 +249,9 @@ def get_report(
     if period == "date":
         if date_from is None or date_to is None:
             raise ValueError("period='date' requires date_from and date_to")
-        params.append(("date_from", str(date_from)))
-        params.append(("date_to", str(date_to)))
+        # ✅ matcht jouw Render/FastAPI wrapper (werkend gisteren)
+        params.append(("form_date_from", str(date_from)))
+        params.append(("form_date_to", str(date_to)))
 
     resp = requests.post(REPORT_URL, params=params, timeout=120)
     resp.raise_for_status()
