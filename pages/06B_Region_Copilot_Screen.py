@@ -779,10 +779,10 @@ def main():
         pathzz_weekly["week_start"] = pd.to_datetime(pathzz_weekly["week_start"], errors="coerce")
         pathzz_weekly = pathzz_weekly.dropna(subset=["week_start"])
 
-        # ✅ CRUCIAAL: voorkom duplicates op week_start (oorzaak van “meerdere capture punten”)
+        # ✅ CRUCIAAL: voorkom duplicates op week_start
         pathzz_weekly = (
             pathzz_weekly.groupby("week_start", as_index=False)
-            .agg(street_footfall=("street_footfall", "mean"))
+               .agg(street_footfall=("street_footfall", "mean"))
         )
 
     if not region_weekly.empty and not pathzz_weekly.empty:
@@ -795,14 +795,6 @@ def main():
             np.nan,
         )
         avg_capture = float(capture_weekly["capture_rate"].mean())
-
-        if not capture_weekly.empty:
-            capture_weekly["capture_rate"] = np.where(
-                capture_weekly["street_footfall"] > 0,
-                capture_weekly["footfall"] / capture_weekly["street_footfall"] * 100.0,
-                np.nan,
-            )
-            avg_capture = float(capture_weekly["capture_rate"].mean())
 
     # SVI
     svi_all = build_store_vitality(
@@ -857,7 +849,7 @@ def main():
         kpi_card("Capture", (fmt_pct(avg_capture) if not pd.isna(avg_capture) else "-"), "Regio totaal (Pathzz)")
 
     # ----------------------
-    # RESTORE: Weekly + region compare + vitality gauge (zoals gisteren)
+    # Weekly + region compare + vitality gauge
     # ----------------------
     r2_a, r2_b, r2_c = st.columns([1.7, 1.05, 0.75])
 
@@ -967,7 +959,7 @@ def main():
         st.markdown("</div>", unsafe_allow_html=True)
 
     # ----------------------
-    # RESTORE: Ranking + Opportunities (zoals gisteren)
+    # Ranking + Opportunities
     # ----------------------
     r3_left, r3_right = st.columns([1.45, 1.15])
 
@@ -1022,6 +1014,9 @@ def main():
         else:
             opp = opp_base.copy()
             opp["profit_potential_year"] = pd.to_numeric(opp["profit_potential_year"], errors="coerce")
+            if "profit_potential_period" in opp.columns:
+                opp["profit_potential_period"] = pd.to_numeric(opp["profit_potential_period"], errors="coerce")
+
             opp = opp.dropna(subset=["profit_potential_year"])
             opp = opp[opp["profit_potential_year"] > 0].copy()
 
@@ -1034,11 +1029,11 @@ def main():
                     alt.Chart(topn)
                     .mark_bar(cornerRadiusEnd=4, color=PFM_RED)
                     .encode(
-                        x=alt.X("profit_potential_year:Q", title="€ / jaar", axis=alt.Axis(format=",.0f")),
+                        x=alt.X("profit_potential_year:Q", title="Indicatieve potentie (€ / jaar)", axis=alt.Axis(format=",.0f")),
                         y=alt.Y("store_display:N", sort="-x", title=None),
                         tooltip=[
                             alt.Tooltip("store_display:N", title="Winkel"),
-                            alt.Tooltip("profit_potential_year:Q", title="Potentie € / jaar", format=",.0f"),
+                            alt.Tooltip("profit_potential_year:Q", title="Indicatieve potentie € / jaar", format=",.0f"),
                             alt.Tooltip("opportunity_driver:N", title="Driver"),
                             alt.Tooltip("reason_short:N", title="Toelichting"),
                         ],
@@ -1047,12 +1042,20 @@ def main():
                 )
                 st.altair_chart(opp_chart, use_container_width=True)
 
-                total_top5 = float(topn["profit_potential_year"].head(5).sum())
-                st.markdown(f"**Top 5 samen:** {fmt_eur(total_top5)} / jaar")
+                # ✅ NEW: period vs year + clear wording
+                total_top5_period = float(topn["profit_potential_period"].head(5).sum()) if "profit_potential_period" in topn.columns else np.nan
+                total_top5_year = float(topn["profit_potential_year"].head(5).sum())
+
+                if not pd.isna(total_top5_period):
+                    st.markdown(f"**Top 5 potentie (in gekozen periode):** {fmt_eur(total_top5_period)}")
+                st.markdown(f"**Indicatief geannualiseerd:** {fmt_eur(total_top5_year)} / jaar")
+                st.caption(
+                    "Let op: dit is geen ‘extra omzet gegarandeerd’, maar een indicatie van upside als onderliggende drivers structureel verbeteren (SVI/benchmark)."
+                )
 
                 st.caption("Hoe dit wordt berekend:")
                 if (topn.get("opportunity_driver") == "SVI profit potential").any():
-                    st.caption("• Primair: `profit_potential_period` uit Store Vitality (SVI) → geannualiseerd.")
+                    st.caption("• Primair: `profit_potential_period` uit Store Vitality (SVI) → geannualiseerd voor vergelijkbaarheid.")
                 else:
                     st.caption("• Fallback: uplift naar benchmark **SPV (top quartile)** × **footfall** → geannualiseerd.")
 
@@ -1259,139 +1262,162 @@ def main():
                         base = float(base.iloc[0])
                         cci_df["cci_index"] = (cci_df["cci"] / base) * 100.0
 
-        # --- 3) Dual-axis plot helper: regio links, CBS/CCI rechts ---
+        # ----------------------
+        # ✅ Dual-axis macro chart helper (region on left, macro on right)
+        # ✅ Update: macro line has legend item (CBS/CCI) via series+color encoding
+        # ----------------------
         def _macro_chart_dual(
-            region_df: pd.DataFrame,
+            region_month_df: pd.DataFrame,
             macro_df: pd.DataFrame,
+            macro_series_name: str,
             title: str,
             macro_label: str,
         ):
             st.markdown(f'<div class="panel"><div class="panel-title">{title}</div>', unsafe_allow_html=True)
 
-            has_region = region_df is not None and not region_df.empty
-            has_macro = macro_df is not None and not macro_df.empty
-
-            if not has_region and not has_macro:
-                st.info("Geen macro-data beschikbaar.")
+            if region_month_df is None or region_month_df.empty:
+                st.info("Geen regio maanddata beschikbaar.")
                 st.markdown("</div>", unsafe_allow_html=True)
                 return
 
-            layers = []
+            # region long
+            reg = region_month_df.rename(columns={"month": "date"}).copy()
+            region_long = []
+            if "region_footfall_index" in reg.columns:
+                a = reg[["date", "region_footfall_index"]].copy()
+                a["series"] = "Regio footfall-index"
+                a = a.rename(columns={"region_footfall_index": "value"})
+                region_long.append(a)
+            if "region_turnover_index" in reg.columns:
+                b = reg[["date", "region_turnover_index"]].copy()
+                b["series"] = "Regio omzet-index"
+                b = b.rename(columns={"region_turnover_index": "value"})
+                region_long.append(b)
 
-            # Left axis: region series
-            if has_region:
-                r = region_df.dropna(subset=["date", "value"]).copy()
-                region_chart = (
-                    alt.Chart(r)
-                    .mark_line(point=True)
-                    .encode(
-                        x=alt.X(
-                            "date:T",
-                            title="Maand",
-                            axis=alt.Axis(format="%b %Y", labelAngle=0),
+            region_long_df = pd.concat(region_long, ignore_index=True) if region_long else pd.DataFrame()
+            region_long_df["value"] = pd.to_numeric(region_long_df["value"], errors="coerce")
+
+            # macro df must be: date, series, value
+            m = pd.DataFrame()
+            if macro_df is not None and not macro_df.empty:
+                m = macro_df.copy()
+                if "series" not in m.columns:
+                    m["series"] = macro_series_name
+                m["value"] = pd.to_numeric(m["value"], errors="coerce")
+
+            # scales for independent y-axes
+            reg_min = float(region_long_df["value"].min()) if not region_long_df.empty else 0.0
+            reg_max = float(region_long_df["value"].max()) if not region_long_df.empty else 100.0
+            reg_pad = (reg_max - reg_min) * 0.10 if reg_max > reg_min else 10.0
+
+            mac_min = float(m["value"].min()) if not m.empty else 0.0
+            mac_max = float(m["value"].max()) if not m.empty else 100.0
+            mac_pad = (mac_max - mac_min) * 0.10 if mac_max > mac_min else 5.0
+
+            base = alt.Chart(region_long_df.dropna(subset=["date", "value"]))
+
+            region_chart = (
+                base.mark_line(point=True, strokeWidth=2)
+                .encode(
+                    x=alt.X(
+                        "date:T",
+                        title="Maand",
+                        axis=alt.Axis(format="%b %Y", labelAngle=0),
+                    ),
+                    y=alt.Y(
+                        "value:Q",
+                        title="Regio index (100 = start)",
+                        scale=alt.Scale(domain=[reg_min - reg_pad, reg_max + reg_pad], zero=False),
+                    ),
+                    color=alt.Color(
+                        "series:N",
+                        scale=alt.Scale(
+                            domain=["Regio footfall-index", "Regio omzet-index"],
+                            range=[PFM_PURPLE, "#7FB7FF"],
                         ),
-                        y=alt.Y(
-                            "value:Q",
-                            title="Regio-index (100 = start)",
-                            scale=alt.Scale(zero=False),
-                        ),
-                        color=alt.Color("series:N", title=""),
-                        tooltip=[
-                            alt.Tooltip("date:T", title="Maand", format="%b %Y"),
-                            alt.Tooltip("series:N", title="Reeks"),
-                            alt.Tooltip("value:Q", title="Index", format=".1f"),
-                        ],
-                    )
+                        legend=alt.Legend(title="Regio"),
+                    ),
+                    tooltip=[
+                        alt.Tooltip("date:T", title="Maand", format="%b %Y"),
+                        alt.Tooltip("series:N", title="Reeks"),
+                        alt.Tooltip("value:Q", title="Index", format=".1f"),
+                    ],
                 )
-                layers.append(region_chart)
+            )
 
-            # Right axis: macro series (single line)
-            if has_macro:
-                m = macro_df.dropna(subset=["date", "value"]).copy()
-                macro_chart = (
-                    alt.Chart(m)
-                    .mark_line(point=True, strokeDash=[6, 4], strokeWidth=2, color=PFM_DARK)
-                    .encode(
-                        x=alt.X("date:T", title="Maand"),
-                        y=alt.Y(
-                            "value:Q",
-                            title=macro_label,
-                            scale=alt.Scale(zero=False),
+            if m.empty:
+                st.altair_chart(region_chart.properties(height=260), use_container_width=True)
+                st.caption("Geen macro data beschikbaar om te plotten.")
+                st.markdown("</div>", unsafe_allow_html=True)
+                return
+
+            # ✅ Macro chart: use series+color encoding so legend appears
+            macro_chart = (
+                alt.Chart(m.dropna(subset=["date", "value"]))
+                .mark_line(point=True, strokeDash=[6, 4], strokeWidth=2)
+                .encode(
+                    x=alt.X("date:T", title="Maand"),
+                    y=alt.Y(
+                        "value:Q",
+                        title=macro_label,
+                        scale=alt.Scale(domain=[mac_min - mac_pad, mac_max + mac_pad], zero=False),
+                        axis=alt.Axis(orient="right"),
+                    ),
+                    color=alt.Color(
+                        "series:N",
+                        scale=alt.Scale(
+                            domain=[macro_series_name],
+                            range=[PFM_DARK],
                         ),
-                        tooltip=[
-                            alt.Tooltip("date:T", title="Maand", format="%b %Y"),
-                            alt.Tooltip("value:Q", title=macro_label, format=".1f"),
-                        ],
-                    )
+                        legend=alt.Legend(title="Macro"),
+                    ),
+                    tooltip=[
+                        alt.Tooltip("date:T", title="Maand", format="%b %Y"),
+                        alt.Tooltip("series:N", title="Reeks"),
+                        alt.Tooltip("value:Q", title=macro_label, format=".1f"),
+                    ],
                 )
-                layers.append(macro_chart)
+            )
 
-            chart = alt.layer(*layers).resolve_scale(y="independent").properties(height=260)
+            chart = alt.layer(region_chart, macro_chart).resolve_scale(y="independent").properties(height=260)
             st.altair_chart(chart, use_container_width=True)
+
             st.markdown("</div>", unsafe_allow_html=True)
 
-        # --- 4) Build dataframes per chart (region = links, macro = rechts) ---
-        macro_col1, macro_col2 = st.columns(2)
-
-        # ---- CBS chart ----
-        region_lines = []
-        if not region_month.empty:
-            a = region_month.rename(columns={"month": "date"})[["date", "region_footfall_index"]].copy()
-            a["series"] = "Regio footfall-index"
-            a = a.rename(columns={"region_footfall_index": "value"})
-            region_lines.append(a[["date", "series", "value"]])
-
-            b = region_month.rename(columns={"month": "date"})[["date", "region_turnover_index"]].copy()
-            b["series"] = "Regio omzet-index"
-            b = b.rename(columns={"region_turnover_index": "value"})
-            region_lines.append(b[["date", "series", "value"]])
-
-        region_df_cbs = pd.concat(region_lines, ignore_index=True) if region_lines else pd.DataFrame()
-
+        # Build macro dfs: (date, series, value)
         macro_df_cbs = pd.DataFrame()
         if not cbs_retail_month.empty and "cbs_retail_index" in cbs_retail_month.columns:
             macro_df_cbs = cbs_retail_month[["date", "cbs_retail_index"]].copy()
             macro_df_cbs["value"] = pd.to_numeric(macro_df_cbs["cbs_retail_index"], errors="coerce")
-            macro_df_cbs = macro_df_cbs[["date", "value"]].dropna()
-
-        with macro_col1:
-            _macro_chart_dual(
-                region_df=region_df_cbs,
-                macro_df=macro_df_cbs,
-                title="CBS detailhandelindex vs Regio",
-                macro_label="CBS index (100 = start)",
-            )
-
-        # ---- CCI chart ----
-        region_lines = []
-        if not region_month.empty:
-            a = region_month.rename(columns={"month": "date"})[["date", "region_footfall_index"]].copy()
-            a["series"] = "Regio footfall-index"
-            a = a.rename(columns={"region_footfall_index": "value"})
-            region_lines.append(a[["date", "series", "value"]])
-
-            b = region_month.rename(columns={"month": "date"})[["date", "region_turnover_index"]].copy()
-            b["series"] = "Regio omzet-index"
-            b = b.rename(columns={"region_turnover_index": "value"})
-            region_lines.append(b[["date", "series", "value"]])
-
-        region_df_cci = pd.concat(region_lines, ignore_index=True) if region_lines else pd.DataFrame()
+            macro_df_cbs["series"] = "CBS detailhandelindex"
+            macro_df_cbs = macro_df_cbs[["date", "series", "value"]].dropna()
 
         macro_df_cci = pd.DataFrame()
         if not cci_df.empty and "cci_index" in cci_df.columns:
             macro_df_cci = cci_df[["date", "cci_index"]].copy()
             macro_df_cci["value"] = pd.to_numeric(macro_df_cci["cci_index"], errors="coerce")
-            macro_df_cci = macro_df_cci[["date", "value"]].dropna()
+            macro_df_cci["series"] = "Consumentenvertrouwen (CCI)"
+            macro_df_cci = macro_df_cci[["date", "series", "value"]].dropna()
 
+        macro_col1, macro_col2 = st.columns(2)
+        with macro_col1:
+            _macro_chart_dual(
+                region_month_df=region_month,
+                macro_df=macro_df_cbs,
+                macro_series_name="CBS detailhandelindex",
+                title="CBS detailhandelindex vs Regio",
+                macro_label="CBS index (100 = start)",
+            )
         with macro_col2:
             _macro_chart_dual(
-                region_df=region_df_cci,
+                region_month_df=region_month,
                 macro_df=macro_df_cci,
+                macro_series_name="Consumentenvertrouwen (CCI)",
                 title="Consumentenvertrouwen (CCI) vs Regio",
                 macro_label="CCI index (100 = start)",
             )
 
-        # --- 5) Macro debug ---
+        # --- Macro debug
         with st.expander("🔧 Debug macro (CBS/CCI)"):
             st.write("Macro window:", macro_start, "→", macro_end)
             st.write("months_back used:", months_back)
@@ -1436,6 +1462,7 @@ def main():
         st.write("df_norm head:", df_norm.head())
         st.write("df_daily_store head:", df_daily_store.head())
         st.write("df_region_daily head:", df_region_daily.head())
+
 
 if __name__ == "__main__":
     main()
