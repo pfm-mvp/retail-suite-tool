@@ -1162,7 +1162,8 @@ def main():
 
         # --- 2) CBS / CCI ophalen + filter op macro window ---
         months_back = int(((macro_end.year - macro_start.year) * 12 + (macro_end.month - macro_start.month)) + 6)
-        months_back = max(18, min(60, months_back))  # sane bounds
+        months_back = max(60, months_back)   # altijd minimaal 60 maanden terug
+        months_back = min(240, months_back)  # safety cap: 20 jaar
 
         # -------- CBS Retail (robust) --------
         cbs_retail_month = pd.DataFrame()
@@ -1390,6 +1391,40 @@ def main():
         st.write("df_norm head:", df_norm.head())
         st.write("df_daily_store head:", df_daily_store.head())
         st.write("df_region_daily head:", df_region_daily.head())
+        st.write("Macro window:", macro_start, "→", macro_end)
+        st.write("months_back used:", months_back)
+    
+        # ---- RAW retail ----
+        st.subheader("CBS Retail RAW")
+        st.write("retail_series len:", len(retail_series) if isinstance(retail_series, list) else type(retail_series))
+        if isinstance(retail_series, list) and retail_series:
+            raw_retail = pd.DataFrame(retail_series)
+            st.write("raw_retail columns:", raw_retail.columns.tolist())
+            if "period" in raw_retail.columns:
+                st.write("raw period head/tail:", raw_retail["period"].head(3).tolist(), "…", raw_retail["period"].tail(3).tolist())
+            st.dataframe(raw_retail.head(10))
+    
+        if not cbs_retail_month.empty:
+            st.write("CBS parsed min/max:", cbs_retail_month["date"].min(), "→", cbs_retail_month["date"].max())
+            st.dataframe(cbs_retail_month.head(10))
+        else:
+            st.warning("CBS parsed dataframe is EMPTY after parsing/filtering.")
+    
+        # ---- RAW cci ----
+        st.subheader("CCI RAW")
+        st.write("cci_series len:", len(cci_series) if isinstance(cci_series, list) else type(cci_series))
+        if isinstance(cci_series, list) and cci_series:
+            raw_cci = pd.DataFrame(cci_series)
+            st.write("raw_cci columns:", raw_cci.columns.tolist())
+            if "period" in raw_cci.columns:
+                st.write("raw period head/tail:", raw_cci["period"].head(3).tolist(), "…", raw_cci["period"].tail(3).tolist())
+            st.dataframe(raw_cci.head(10))
+    
+        if not cci_df.empty:
+            st.write("CCI parsed min/max:", cci_df["date"].min(), "→", cci_df["date"].max())
+            st.dataframe(cci_df.head(10))
+        else:
+            st.warning("CCI parsed dataframe is EMPTY after parsing/filtering.")
 
 
 if __name__ == "__main__":
