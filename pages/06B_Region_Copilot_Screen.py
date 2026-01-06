@@ -1063,12 +1063,16 @@ def main():
     # ----------------------
     if show_macro:
         st.markdown("## Macro-context (optioneel)")
-        st.caption("Macro toont altijd het héle jaar van de geselecteerde periode.")
+        # ✅ Macro window = 12 maanden terug vanaf eind van je geselecteerde periode (veel beter voor correlatie)
+        st.caption("Macro toont een window rondom je geselecteerde periode (standaard: 12 maanden terug t/m einddatum).")
 
-        macro_start = date(macro_year, 1, 1)
-        macro_end = date(macro_year, 12, 31)
+        macro_end = end_period
+        macro_start = max(date(2018, 1, 1), (end_period - timedelta(days=365)))
 
         df_region_year = df_daily_store[df_daily_store["region"] == region_choice].copy()
+        df_region_year["date"] = pd.to_datetime(df_region_year["date"], errors="coerce")
+        df_region_year = df_region_year.dropna(subset=["date"])
+
         df_region_year = df_region_year[
             (df_region_year["date"] >= pd.Timestamp(macro_start)) &
             (df_region_year["date"] <= pd.Timestamp(macro_end))
