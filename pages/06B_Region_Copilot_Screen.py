@@ -1364,7 +1364,7 @@ def main():
                     ),
                     color=alt.Color(
                         "series:N",
-                        scale=alt.Scale(domain=[macro_series_name], range=["#111827"]),  # <- zwart
+                        scale=alt.Scale(domain=[macro_series_name], range=["#000000"]),  # <- zwart
                         legend=alt.Legend(title="Macro"),
                     ),
                     tooltip=[
