@@ -1104,25 +1104,50 @@ def main():
 
         with macro_col1:
             st.markdown('<div class="panel"><div class="panel-title">CBS detailhandelindex vs Regio</div>', unsafe_allow_html=True)
+
+            # ✅ months_back afstemmen op macro window + buffer
+            months_back = max(
+                18,
+                int(((pd.Timestamp(macro_end) - pd.Timestamp(macro_start)).days / 30.4)) + 3
+            )
+
             try:
-                retail_series = get_retail_index(months_back=24)
+                retail_series = get_retail_index(months_back=months_back)
             except Exception:
                 retail_series = []
 
             cbs_retail_month = pd.DataFrame()
             if retail_series:
                 cbs_retail_df = pd.DataFrame(retail_series)
+
+                # period -> datetime (15e van de maand)
                 cbs_retail_df["date"] = pd.to_datetime(
-                    cbs_retail_df["period"].str[:4] + "-" + cbs_retail_df["period"].str[-2:] + "-15",
+                    cbs_retail_df["period"].astype(str).str[:4] + "-" + cbs_retail_df["period"].astype(str).str[-2:] + "-15",
                     errors="coerce",
                 )
                 cbs_retail_df = cbs_retail_df.dropna(subset=["date"])
+
+                # ✅ filter naar macro window (vult grafiek + houdt correlatie relevant)
+                cbs_retail_df = cbs_retail_df[
+                    (cbs_retail_df["date"] >= pd.Timestamp(macro_start)) &
+                    (cbs_retail_df["date"] <= pd.Timestamp(macro_end))
+                ].copy()
+
+                # maandgemiddelde (voor het geval je meerdere reeksen/observaties krijgt)
                 cbs_retail_month = cbs_retail_df.groupby("date", as_index=False)["retail_value"].mean()
+
+                # indexeer op eerste non-null
                 if not cbs_retail_month.empty and cbs_retail_month["retail_value"].notna().any():
                     base = cbs_retail_month["retail_value"].dropna().iloc[0]
-                    cbs_retail_month["cbs_retail_index"] = np.where(base != 0, cbs_retail_month["retail_value"] / base * 100.0, np.nan)
+                    cbs_retail_month["cbs_retail_index"] = np.where(
+                        base != 0,
+                        cbs_retail_month["retail_value"] / base * 100.0,
+                        np.nan
+                    )
 
             lines = []
+
+            # ✅ regio-indexen (footfall/omzet) over hetzelfde macro window
             if not region_month.empty:
                 a = region_month.rename(columns={"month": "date"})[["date", "region_footfall_index"]].copy()
                 a["series"] = "Regio footfall-index"
@@ -1134,6 +1159,7 @@ def main():
                 b = b.rename(columns={"region_turnover_index": "value"})
                 lines.append(b)
 
+            # ✅ CBS index lijn
             if not cbs_retail_month.empty and "cbs_retail_index" in cbs_retail_month.columns:
                 c = cbs_retail_month[["date", "cbs_retail_index"]].copy()
                 c["series"] = "CBS detailhandelindex"
@@ -1141,9 +1167,16 @@ def main():
                 lines.append(c)
 
             if lines:
-                macro_df = pd.concat(lines, ignore_index=True)
+                macro_df = pd.concat(lines, ignore_index=True).dropna(subset=["date"])
+
+                # ✅ safety: nogmaals window filter (kan nooit kwaad)
+                macro_df = macro_df[
+                    (macro_df["date"] >= pd.Timestamp(macro_start)) &
+                    (macro_df["date"] <= pd.Timestamp(macro_end))
+                ].copy()
+        
                 macro = (
-                    alt.Chart(macro_df.dropna(subset=["date"]))
+                    alt.Chart(macro_df)
                     .mark_line(point=True)
                     .encode(
                         x=alt.X("date:T", title="Maand"),
@@ -1160,49 +1193,75 @@ def main():
                 st.altair_chart(macro, use_container_width=True)
             else:
                 st.info("Geen macro-lijnen beschikbaar.")
+        
             st.markdown("</div>", unsafe_allow_html=True)
 
         with macro_col2:
             st.markdown('<div class="panel"><div class="panel-title">Consumentenvertrouwen (CCI) vs Regio</div>', unsafe_allow_html=True)
+        
+            # ✅ months_back afstemmen op macro window + buffer
+            months_back = max(
+                18,
+                int(((pd.Timestamp(macro_end) - pd.Timestamp(macro_start)).days / 30.4)) + 3
+            )
+        
             try:
-                cci_series = get_cci_series(months_back=24)
+                cci_series = get_cci_series(months_back=months_back)
             except Exception:
                 cci_series = []
-
+        
             cci_df = pd.DataFrame()
             if cci_series:
                 cci_df = pd.DataFrame(cci_series)
+        
                 cci_df["date"] = pd.to_datetime(
-                    cci_df["period"].str[:4] + "-" + cci_df["period"].str[-2:] + "-15",
+                    cci_df["period"].astype(str).str[:4] + "-" + cci_df["period"].astype(str).str[-2:] + "-15",
                     errors="coerce",
                 )
                 cci_df = cci_df.dropna(subset=["date"])
+        
+                # ✅ filter naar macro window
+                cci_df = cci_df[
+                    (cci_df["date"] >= pd.Timestamp(macro_start)) &
+                    (cci_df["date"] <= pd.Timestamp(macro_end))
+                ].copy()
+        
                 if not cci_df.empty and cci_df["cci"].notna().any():
                     base = cci_df["cci"].dropna().iloc[0]
                     cci_df["cci_index"] = np.where(base != 0, cci_df["cci"] / base * 100.0, np.nan)
-
+        
             lines = []
+        
+            # ✅ CCI index lijn
             if not cci_df.empty and "cci_index" in cci_df.columns:
                 c = cci_df[["date", "cci_index"]].copy()
                 c["series"] = "Consumentenvertrouwen-index"
                 c = c.rename(columns={"cci_index": "value"})
                 lines.append(c)
-
+        
+            # ✅ regio-indexen (footfall/omzet)
             if not region_month.empty:
                 a = region_month.rename(columns={"month": "date"})[["date", "region_footfall_index"]].copy()
                 a["series"] = "Regio footfall-index"
                 a = a.rename(columns={"region_footfall_index": "value"})
                 lines.append(a)
-
+        
                 b = region_month.rename(columns={"month": "date"})[["date", "region_turnover_index"]].copy()
                 b["series"] = "Regio omzet-index"
                 b = b.rename(columns={"region_turnover_index": "value"})
                 lines.append(b)
-
+        
             if lines:
-                macro_df = pd.concat(lines, ignore_index=True)
+                macro_df = pd.concat(lines, ignore_index=True).dropna(subset=["date"])
+        
+                # ✅ safety window filter
+                macro_df = macro_df[
+                    (macro_df["date"] >= pd.Timestamp(macro_start)) &
+                    (macro_df["date"] <= pd.Timestamp(macro_end))
+                ].copy()
+        
                 cc = (
-                    alt.Chart(macro_df.dropna(subset=["date"]))
+                    alt.Chart(macro_df)
                     .mark_line(point=True)
                     .encode(
                         x=alt.X("date:T", title="Maand"),
@@ -1219,6 +1278,7 @@ def main():
                 st.altair_chart(cc, use_container_width=True)
             else:
                 st.info("Geen CCI-data beschikbaar.")
+        
             st.markdown("</div>", unsafe_allow_html=True)
 
     # ----------------------
