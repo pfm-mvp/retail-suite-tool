@@ -1351,7 +1351,6 @@ def main():
                 st.markdown("</div>", unsafe_allow_html=True)
                 return
 
-            # ✅ Macro chart: use series+color encoding so legend appears
             macro_chart = (
                 alt.Chart(m.dropna(subset=["date", "value"]))
                 .mark_line(point=True, strokeDash=[6, 4], strokeWidth=2)
@@ -1365,10 +1364,7 @@ def main():
                     ),
                     color=alt.Color(
                         "series:N",
-                        scale=alt.Scale(
-                            domain=[macro_series_name],
-                            range=[PFM_DARK],
-                        ),
+                        scale=alt.Scale(domain=[macro_series_name], range=["#111827"]),  # <- zwart
                         legend=alt.Legend(title="Macro"),
                     ),
                     tooltip=[
