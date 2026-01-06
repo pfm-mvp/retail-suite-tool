@@ -758,10 +758,43 @@ def main():
 
     capture_weekly = pd.DataFrame()
     avg_capture = np.nan
+
+    if not region_weekly.empty:
+        region_weekly = region_weekly.copy()
+        region_weekly["week_start"] = pd.to_datetime(region_weekly["week_start"], errors="coerce")
+        region_weekly = region_weekly.dropna(subset=["week_start"])
+
+        # ✅ force 1 row per week (region total)
+        region_weekly = (
+            region_weekly.groupby("week_start", as_index=False)
+            .agg(
+                footfall=("footfall", "sum"),
+                turnover=("turnover", "sum") if "turnover" in region_weekly.columns else ("footfall", "sum"),
+                transactions=("transactions", "sum") if "transactions" in region_weekly.columns else ("footfall", "sum"),
+            )
+        )
+
+    if not pathzz_weekly.empty:
+        pathzz_weekly = pathzz_weekly.copy()
+        pathzz_weekly["week_start"] = pd.to_datetime(pathzz_weekly["week_start"], errors="coerce")
+        pathzz_weekly = pathzz_weekly.dropna(subset=["week_start"])
+    
+        # ✅ CRUCIAAL: voorkom duplicates op week_start (oorzaak van “meerdere capture punten”)
+        pathzz_weekly = (
+            pathzz_weekly.groupby("week_start", as_index=False)
+               .agg(street_footfall=("street_footfall", "mean"))
+        )
+
     if not region_weekly.empty and not pathzz_weekly.empty:
-        region_weekly["week_start"] = pd.to_datetime(region_weekly["week_start"])
-        pathzz_weekly["week_start"] = pd.to_datetime(pathzz_weekly["week_start"])
         capture_weekly = pd.merge(region_weekly, pathzz_weekly, on="week_start", how="inner")
+
+    if not capture_weekly.empty:
+        capture_weekly["capture_rate"] = np.where(
+            capture_weekly["street_footfall"] > 0,
+            capture_weekly["footfall"] / capture_weekly["street_footfall"] * 100.0,
+            np.nan,
+        )
+        avg_capture = float(capture_weekly["capture_rate"].mean())
 
         if not capture_weekly.empty:
             capture_weekly["capture_rate"] = np.where(
