@@ -661,29 +661,20 @@ def main():
     all_shop_ids = merged["id"].dropna().astype(int).unique().tolist()
     fetch_ids = all_shop_ids if compare_all_regions else region_shop_ids
 
-    # Requested metrics (plus base)
-    metric_map = {
-        "count_in": "footfall",
-        "turnover": "turnover",
-        "transactions": "transactions",
-        "sales_per_visitor": "sales_per_visitor",
-        "conversion_rate": "conversion_rate",
-        "avg_basket_size": "avg_basket_size",
-        "sales_per_sqm": "sales_per_sqm",
-        "sales_per_transaction": "sales_per_transaction",
-    }
+    # Fetch report (HISTORICAL SAFE)
+    metric_map = {"count_in": "footfall", "turnover": "turnover"}  # laat even exact staan zoals je had
 
     with st.spinner("Data ophalen via FastAPI..."):
         resp = get_report(
             fetch_ids,
             list(metric_map.keys()),
-            period="date",
+            period="date",              # ✅ i.p.v. this_year / this_month etc.
             step="day",
             source="shops",
-            date_from=start_period,
-            date_to=end_period,
+            date_from=start_period,     # ✅ jouw geselecteerde start (2024-..)
+            date_to=end_period,         # ✅ jouw geselecteerde end (2024-..)
         )
-        df_norm = normalize_vemcount_response(resp, kpi_keys=metric_map.keys()).rename(columns=metric_map)
+        df_raw = normalize_vemcount_response(resp, kpi_keys=metric_map.keys()).rename(columns=metric_map)
 
     if df_norm.empty:
         st.warning("Geen data ontvangen voor de gekozen selectie.")
