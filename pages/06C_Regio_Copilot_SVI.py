@@ -494,24 +494,60 @@ def build_region_svi_v2(
             "sales_per_transaction": 0.15,  # proxy for upsell intensity (not true UPT)
         }
 
-    needed_cols = {"footfall", "turnover", "transactions", "sales_per_sqm", "conversion_rate", "avg_basket_size", "sales_per_transaction"}
-    # df_daily_store might miss some, but we can derive many. We'll keep robust.
+    if df_daily_store is None or df_daily_store.empty:
+        return {"region_svi": np.nan, "components": pd.DataFrame(), "benchmarks": {}}
 
-    # Add region mapping
-    join_cols = ["id", "region", "sqm_effective"]
-    tmp_map = merged[join_cols].drop_duplicates().copy()
-
+    # --- IMPORTANT FIX ---
+    # df_daily_store heeft in jouw flow vaak al region (en sqm_effective) na een eerdere merge.
+    # Als we hier opnieuw mergen met region, krijg je region_x/region_y en verdwijnt "region".
     d = df_daily_store.copy()
-    d = d.merge(tmp_map, left_on=store_key_col, right_on="id", how="left")
 
-    # region subset + company subset (same period)
+    # Only merge mapping if region is missing OR sqm_effective missing
+    needs_region = "region" not in d.columns
+    needs_sqm = "sqm_effective" not in d.columns
+
+    if (needs_region or needs_sqm) and merged is not None and not merged.empty:
+        join_cols = ["id"]
+        if needs_region and "region" in merged.columns:
+            join_cols.append("region")
+        if needs_sqm and "sqm_effective" in merged.columns:
+            join_cols.append("sqm_effective")
+
+        tmp_map = merged[join_cols].drop_duplicates().copy()
+
+        d = d.merge(tmp_map, left_on=store_key_col, right_on="id", how="left")
+
+    # Coalesce region if it became region_x/region_y (or if df already had region and merge created suffixes)
+    if "region" not in d.columns:
+        if "region_x" in d.columns and "region_y" in d.columns:
+            d["region"] = d["region_x"].combine_first(d["region_y"])
+        elif "region_x" in d.columns:
+            d["region"] = d["region_x"]
+        elif "region_y" in d.columns:
+            d["region"] = d["region_y"]
+
+    # Same for sqm_effective if needed
+    if "sqm_effective" not in d.columns:
+        if "sqm_effective_x" in d.columns and "sqm_effective_y" in d.columns:
+            d["sqm_effective"] = pd.to_numeric(d["sqm_effective_x"], errors="coerce").combine_first(
+                pd.to_numeric(d["sqm_effective_y"], errors="coerce")
+            )
+        elif "sqm_effective_x" in d.columns:
+            d["sqm_effective"] = pd.to_numeric(d["sqm_effective_x"], errors="coerce")
+        elif "sqm_effective_y" in d.columns:
+            d["sqm_effective"] = pd.to_numeric(d["sqm_effective_y"], errors="coerce")
+
+    # Guard
+    if "region" not in d.columns:
+        # Hard fail-safe: return empty rather than crashing
+        return {"region_svi": np.nan, "components": pd.DataFrame(), "benchmarks": {"error": "region_missing"}}
+
     d_reg = d[d["region"] == region_choice].copy()
     d_all = d.copy()
 
     if d_reg.empty or d_all.empty:
         return {"region_svi": np.nan, "components": pd.DataFrame(), "benchmarks": {}}
 
-    # Aggregate per period (sum/mean)
     def _agg_period(df_: pd.DataFrame) -> dict:
         out = {}
         foot = float(df_["footfall"].sum()) if "footfall" in df_.columns else np.nan
@@ -526,39 +562,29 @@ def build_region_svi_v2(
         out["avg_basket_size"] = (turn / trans) if (pd.notna(turn) and pd.notna(trans) and trans > 0) else np.nan
         out["sales_per_visitor"] = (turn / foot) if (pd.notna(turn) and pd.notna(foot) and foot > 0) else np.nan
 
-        # sales_per_sqm: sum turnover / sum sqm_effective (approx; works at region/company level)
         sqm = pd.to_numeric(df_.get("sqm_effective", np.nan), errors="coerce")
         sqm_sum = float(sqm.dropna().drop_duplicates().sum()) if sqm.notna().any() else np.nan
         out["sales_per_sqm"] = (turn / sqm_sum) if (pd.notna(turn) and pd.notna(sqm_sum) and sqm_sum > 0) else np.nan
 
-        # proxy: sales per transaction
         out["sales_per_transaction"] = out["avg_basket_size"]
-
         return out
 
     reg_vals = _agg_period(d_reg)
     all_vals = _agg_period(d_all)
 
-    # capture_rate: use capture_weekly avg (region only). Company benchmark uses all regions capture? Not available.
-    # We’ll benchmark capture vs company capture computed from available capture_weekly? Not possible. So we use:
-    # - ratio vs 100 baseline (neutral) if no company capture benchmark
-    # - OR optional: use median capture from capture_weekly if you merged all regions (not present).
+    # capture_rate uses capture_weekly mean for region
     reg_capture = np.nan
     if capture_weekly is not None and not capture_weekly.empty and "capture_rate" in capture_weekly.columns:
         reg_capture = float(pd.to_numeric(capture_weekly["capture_rate"], errors="coerce").dropna().mean())
     reg_vals["capture_rate"] = reg_capture
-    all_vals["capture_rate"] = np.nan  # unknown
+    all_vals["capture_rate"] = np.nan  # company capture benchmark unknown
 
-    # Benchmarks:
-    # For most metrics: benchmark = company (same period)
-    # For capture: benchmark fallback = 100 ratio baseline (so score = 50-ish)
     components = []
     for k, w in weights.items():
         v_reg = reg_vals.get(k, np.nan)
         v_bench = all_vals.get(k, np.nan)
 
         if k == "capture_rate":
-            # Benchmark unknown: use neutral ratio 100, but still show the real capture value.
             ratio = 100.0
             bench = np.nan
         else:
@@ -584,9 +610,7 @@ def build_region_svi_v2(
     if comp_df.empty or comp_df["score_0_100"].dropna().empty:
         region_svi = np.nan
     else:
-        # Weighted average on available components only
-        tmp = comp_df.copy()
-        tmp = tmp.dropna(subset=["score_0_100", "weight"])
+        tmp = comp_df.dropna(subset=["score_0_100", "weight"]).copy()
         wsum = float(tmp["weight"].sum()) if not tmp.empty else 0.0
         region_svi = float((tmp["score_0_100"] * tmp["weight"]).sum() / wsum) if wsum > 0 else np.nan
 
