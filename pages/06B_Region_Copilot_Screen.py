@@ -1064,10 +1064,24 @@ def main():
     if show_macro:
         st.markdown("## Macro-context (optioneel)")
         # ✅ Macro window = 12 maanden terug vanaf eind van je geselecteerde periode (veel beter voor correlatie)
-        st.caption("Macro toont een window rondom je geselecteerde periode (standaard: 12 maanden terug t/m einddatum).")
-
+        st.caption("Macro toont: 1 jaar terug vanaf start van je geselecteerde periode t/m einddatum.")
+        
+        def shift_year(d: date, years: int) -> date:
+            """Shift jaar, met safe fallback voor schrikkeldagen."""
+            try:
+                return d.replace(year=d.year + years)
+            except ValueError:
+                # bv 29 feb -> 28 feb
+                return d.replace(month=2, day=28, year=d.year + years)
+        
         macro_end = end_period
-        macro_start = max(date(2018, 1, 1), (end_period - timedelta(days=365)))
+        
+        # ✅ Macro-window = 1 jaar terug vanaf START van je geselecteerde periode t/m einddatum
+        # Voor Q2 2024: 2023-04-01 → 2024-06-30
+        macro_start = shift_year(start_period, -1)
+        
+        # safety cap (optioneel)
+        macro_start = max(date(2018, 1, 1), macro_start)
 
         df_region_year = df_daily_store[df_daily_store["region"] == region_choice].copy()
         df_region_year["date"] = pd.to_datetime(df_region_year["date"], errors="coerce")
@@ -1107,9 +1121,9 @@ def main():
 
             # ✅ months_back afstemmen op macro window + buffer
             months_back = max(
-                18,
-                int(((pd.Timestamp(macro_end) - pd.Timestamp(macro_start)).days / 30.4)) + 3
-            )
+                24,
+                int(((pd.Timestamp(macro_end) - pd.Timestamp(macro_start)).days / 30.4)) + 6
+            )    
 
             try:
                 retail_series = get_retail_index(months_back=months_back)
