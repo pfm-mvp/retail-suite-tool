@@ -491,33 +491,38 @@ def build_region_svi_v2(
             "capture_rate": 0.15,
             "conversion_rate": 0.20,
             "avg_basket_size": 0.20,
-            "sales_per_transaction": 0.15,  # proxy for upsell intensity (not true UPT)
+            "sales_per_transaction": 0.15,  # proxy for upsell intensity (niet echte UPT)
         }
 
     if df_daily_store is None or df_daily_store.empty:
         return {"region_svi": np.nan, "components": pd.DataFrame(), "benchmarks": {}}
 
-    # --- IMPORTANT FIX ---
-    # df_daily_store heeft in jouw flow vaak al region (en sqm_effective) na een eerdere merge.
-    # Als we hier opnieuw mergen met region, krijg je region_x/region_y en verdwijnt "region".
     d = df_daily_store.copy()
 
-    # Only merge mapping if region is missing OR sqm_effective missing
-    needs_region = "region" not in d.columns
-    needs_sqm = "sqm_effective" not in d.columns
+    # ---------------------------------------------------------
+    # ✅ FIX 1: Zorg ALTIJD dat er een 'region' kolom bestaat
+    # Gebruik jouw bestaande helper (die regelt ook region_x/region_y situaties)
+    # ---------------------------------------------------------
+    try:
+        d = ensure_region_column(d, merged, store_key_col)
+    except Exception:
+        pass
 
-    if (needs_region or needs_sqm) and merged is not None and not merged.empty:
-        join_cols = ["id"]
-        if needs_region and "region" in merged.columns:
-            join_cols.append("region")
-        if needs_sqm and "sqm_effective" in merged.columns:
-            join_cols.append("sqm_effective")
+    # Als region nog steeds niet bestaat: probeer automatisch de beste kandidaat-kolom te vinden
+    if "region" not in d.columns:
+        region_like = [c for c in d.columns if str(c).lower().startswith("region")]
+        if region_like:
+            d["region"] = d[region_like[0]]
 
-        tmp_map = merged[join_cols].drop_duplicates().copy()
+    # Als region nog steeds niet bestaat: laatste poging -> merge met mapping op id
+    if "region" not in d.columns and merged is not None and not merged.empty:
+        if "id" in merged.columns and "region" in merged.columns and store_key_col in d.columns:
+            tmp_map = merged[["id", "region"]].drop_duplicates().copy()
+            tmp_map["id"] = pd.to_numeric(tmp_map["id"], errors="coerce").astype("Int64")
+            d[store_key_col] = pd.to_numeric(d[store_key_col], errors="coerce").astype("Int64")
+            d = d.merge(tmp_map, left_on=store_key_col, right_on="id", how="left")
 
-        d = d.merge(tmp_map, left_on=store_key_col, right_on="id", how="left")
-
-    # Coalesce region if it became region_x/region_y (or if df already had region and merge created suffixes)
+    # Coalesce als merge suffixes heeft gemaakt
     if "region" not in d.columns:
         if "region_x" in d.columns and "region_y" in d.columns:
             d["region"] = d["region_x"].combine_first(d["region_y"])
@@ -526,21 +531,13 @@ def build_region_svi_v2(
         elif "region_y" in d.columns:
             d["region"] = d["region_y"]
 
-    # Same for sqm_effective if needed
-    if "sqm_effective" not in d.columns:
-        if "sqm_effective_x" in d.columns and "sqm_effective_y" in d.columns:
-            d["sqm_effective"] = pd.to_numeric(d["sqm_effective_x"], errors="coerce").combine_first(
-                pd.to_numeric(d["sqm_effective_y"], errors="coerce")
-            )
-        elif "sqm_effective_x" in d.columns:
-            d["sqm_effective"] = pd.to_numeric(d["sqm_effective_x"], errors="coerce")
-        elif "sqm_effective_y" in d.columns:
-            d["sqm_effective"] = pd.to_numeric(d["sqm_effective_y"], errors="coerce")
-
-    # Guard
+    # Guard: als het nu nóg niet bestaat -> stop netjes (geen KeyError)
     if "region" not in d.columns:
-        # Hard fail-safe: return empty rather than crashing
-        return {"region_svi": np.nan, "components": pd.DataFrame(), "benchmarks": {"error": "region_missing"}}
+        return {
+            "region_svi": np.nan,
+            "components": pd.DataFrame(),
+            "benchmarks": {"error": "region_missing_in_df_daily_store", "cols": d.columns.tolist()},
+        }
 
     d_reg = d[d["region"] == region_choice].copy()
     d_all = d.copy()
@@ -548,37 +545,45 @@ def build_region_svi_v2(
     if d_reg.empty or d_all.empty:
         return {"region_svi": np.nan, "components": pd.DataFrame(), "benchmarks": {}}
 
+    # -----------------------------
+    # Aggregations (period totals)
+    # -----------------------------
     def _agg_period(df_: pd.DataFrame) -> dict:
         out = {}
-        foot = float(df_["footfall"].sum()) if "footfall" in df_.columns else np.nan
-        turn = float(df_["turnover"].sum()) if "turnover" in df_.columns else np.nan
-        trans = float(df_["transactions"].sum()) if "transactions" in df_.columns else np.nan
+        foot = float(pd.to_numeric(df_.get("footfall", 0), errors="coerce").fillna(0).sum())
+        turn = float(pd.to_numeric(df_.get("turnover", 0), errors="coerce").fillna(0).sum())
+        trans = float(pd.to_numeric(df_.get("transactions", 0), errors="coerce").fillna(0).sum())
 
         out["footfall"] = foot
         out["turnover"] = turn
         out["transactions"] = trans
 
-        out["conversion_rate"] = (trans / foot * 100.0) if (pd.notna(trans) and pd.notna(foot) and foot > 0) else np.nan
-        out["avg_basket_size"] = (turn / trans) if (pd.notna(turn) and pd.notna(trans) and trans > 0) else np.nan
-        out["sales_per_visitor"] = (turn / foot) if (pd.notna(turn) and pd.notna(foot) and foot > 0) else np.nan
+        out["conversion_rate"] = (trans / foot * 100.0) if foot > 0 else np.nan
+        out["avg_basket_size"] = (turn / trans) if trans > 0 else np.nan
+        out["sales_per_visitor"] = (turn / foot) if foot > 0 else np.nan
 
         sqm = pd.to_numeric(df_.get("sqm_effective", np.nan), errors="coerce")
         sqm_sum = float(sqm.dropna().drop_duplicates().sum()) if sqm.notna().any() else np.nan
-        out["sales_per_sqm"] = (turn / sqm_sum) if (pd.notna(turn) and pd.notna(sqm_sum) and sqm_sum > 0) else np.nan
+        out["sales_per_sqm"] = (turn / sqm_sum) if (pd.notna(sqm_sum) and sqm_sum > 0) else np.nan
 
+        # proxy
         out["sales_per_transaction"] = out["avg_basket_size"]
         return out
 
     reg_vals = _agg_period(d_reg)
     all_vals = _agg_period(d_all)
 
-    # capture_rate uses capture_weekly mean for region
+    # capture_rate: mean over window (region weekly merge)
     reg_capture = np.nan
     if capture_weekly is not None and not capture_weekly.empty and "capture_rate" in capture_weekly.columns:
         reg_capture = float(pd.to_numeric(capture_weekly["capture_rate"], errors="coerce").dropna().mean())
+
     reg_vals["capture_rate"] = reg_capture
     all_vals["capture_rate"] = np.nan  # company capture benchmark unknown
 
+    # -----------------------------
+    # Build component scores
+    # -----------------------------
     components = []
     for k, w in weights.items():
         v_reg = reg_vals.get(k, np.nan)
@@ -588,9 +593,9 @@ def build_region_svi_v2(
             ratio = 100.0
             bench = np.nan
         else:
-            if pd.notna(v_reg) and pd.notna(v_bench) and v_bench != 0:
-                ratio = (v_reg / v_bench) * 100.0
-                bench = v_bench
+            if pd.notna(v_reg) and pd.notna(v_bench) and float(v_bench) != 0.0:
+                ratio = (float(v_reg) / float(v_bench)) * 100.0
+                bench = float(v_bench)
             else:
                 ratio = np.nan
                 bench = v_bench
