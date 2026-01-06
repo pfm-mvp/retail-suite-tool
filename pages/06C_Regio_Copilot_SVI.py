@@ -1,4 +1,4 @@
-# pages/06C_Region_Copilot_V2.py
+# pages/06C_Region_Copilot_V2_DRILLDOWN.py
 
 import numpy as np
 import pandas as pd
@@ -17,13 +17,12 @@ from services.cbs_service import (
     get_cci_series,
     get_retail_index,
 )
-from services.svi_service import build_store_vitality
 
 # ----------------------
 # Page config
 # ----------------------
 st.set_page_config(
-    page_title="PFM Region Copilot v2 (Regio)",
+    page_title="PFM Region Copilot v2 (Regio + Drilldown)",
     layout="wide"
 )
 
@@ -140,6 +139,14 @@ st.markdown(
         border-radius: 12px !important;
         padding: 0.65rem 1rem !important;
         font-weight: 800 !important;
+      }}
+      .small-note {{
+        color: {PFM_GRAY};
+        font-size: 0.80rem;
+        line-height: 1.25rem;
+      }}
+      .divider {{
+        height: 0.65rem;
       }}
     </style>
     """,
@@ -382,7 +389,7 @@ def collapse_to_daily_store(df: pd.DataFrame, store_key_col: str) -> pd.DataFram
 
     out = out.groupby(group_cols, as_index=False).agg(agg)
 
-    # recompute derived metrics robustly
+    # recompute derived metrics robustly (prefer truth from sums)
     if "turnover" in out.columns and "footfall" in out.columns:
         out["sales_per_visitor"] = np.where(out["footfall"] > 0, out["turnover"] / out["footfall"], np.nan)
     if "transactions" in out.columns and "footfall" in out.columns:
@@ -394,7 +401,7 @@ def collapse_to_daily_store(df: pd.DataFrame, store_key_col: str) -> pd.DataFram
     return out
 
 # ----------------------
-# Weekly (region) for capture chart (as in v1)
+# Weekly (region) for capture chart
 # ----------------------
 def aggregate_weekly_region(df_region_daily: pd.DataFrame) -> pd.DataFrame:
     if df_region_daily is None or df_region_daily.empty:
@@ -460,10 +467,6 @@ def enrich_merged_with_sqm_from_df_norm(merged: pd.DataFrame, df_norm: pd.DataFr
 # SVI v2 (Explainable)
 # ----------------------
 def _ratio_to_score_0_100(ratio: float, floor: float = 70.0, cap: float = 130.0) -> float:
-    """
-    ratio in percent (100 = benchmark). Map to 0-100 with clipping.
-    floor/cap keep it stable.
-    """
     if pd.isna(ratio):
         return np.nan
     r = float(np.clip(ratio, floor, cap))
@@ -477,21 +480,13 @@ def build_region_svi_v2(
     capture_weekly: pd.DataFrame,
     weights: dict | None = None,
 ) -> dict:
-    """
-    Returns:
-      {
-        "region_svi": float,
-        "components": DataFrame (component_name, score, ratio, value, benchmark),
-        "benchmarks": dict,
-      }
-    """
     if weights is None:
         weights = {
             "sales_per_sqm": 0.30,
             "capture_rate": 0.15,
             "conversion_rate": 0.20,
             "avg_basket_size": 0.20,
-            "sales_per_transaction": 0.15,  # proxy for upsell intensity (niet echte UPT)
+            "sales_per_transaction": 0.15,
         }
 
     if df_daily_store is None or df_daily_store.empty:
@@ -499,22 +494,16 @@ def build_region_svi_v2(
 
     d = df_daily_store.copy()
 
-    # ---------------------------------------------------------
-    # ✅ FIX 1: Zorg ALTIJD dat er een 'region' kolom bestaat
-    # Gebruik jouw bestaande helper (die regelt ook region_x/region_y situaties)
-    # ---------------------------------------------------------
     try:
         d = ensure_region_column(d, merged, store_key_col)
     except Exception:
         pass
 
-    # Als region nog steeds niet bestaat: probeer automatisch de beste kandidaat-kolom te vinden
     if "region" not in d.columns:
         region_like = [c for c in d.columns if str(c).lower().startswith("region")]
         if region_like:
             d["region"] = d[region_like[0]]
 
-    # Als region nog steeds niet bestaat: laatste poging -> merge met mapping op id
     if "region" not in d.columns and merged is not None and not merged.empty:
         if "id" in merged.columns and "region" in merged.columns and store_key_col in d.columns:
             tmp_map = merged[["id", "region"]].drop_duplicates().copy()
@@ -522,7 +511,6 @@ def build_region_svi_v2(
             d[store_key_col] = pd.to_numeric(d[store_key_col], errors="coerce").astype("Int64")
             d = d.merge(tmp_map, left_on=store_key_col, right_on="id", how="left")
 
-    # Coalesce als merge suffixes heeft gemaakt
     if "region" not in d.columns:
         if "region_x" in d.columns and "region_y" in d.columns:
             d["region"] = d["region_x"].combine_first(d["region_y"])
@@ -531,7 +519,6 @@ def build_region_svi_v2(
         elif "region_y" in d.columns:
             d["region"] = d["region_y"]
 
-    # Guard: als het nu nóg niet bestaat -> stop netjes (geen KeyError)
     if "region" not in d.columns:
         return {
             "region_svi": np.nan,
@@ -545,9 +532,6 @@ def build_region_svi_v2(
     if d_reg.empty or d_all.empty:
         return {"region_svi": np.nan, "components": pd.DataFrame(), "benchmarks": {}}
 
-    # -----------------------------
-    # Aggregations (period totals)
-    # -----------------------------
     def _agg_period(df_: pd.DataFrame) -> dict:
         out = {}
         foot = float(pd.to_numeric(df_.get("footfall", 0), errors="coerce").fillna(0).sum())
@@ -566,14 +550,12 @@ def build_region_svi_v2(
         sqm_sum = float(sqm.dropna().drop_duplicates().sum()) if sqm.notna().any() else np.nan
         out["sales_per_sqm"] = (turn / sqm_sum) if (pd.notna(sqm_sum) and sqm_sum > 0) else np.nan
 
-        # proxy
         out["sales_per_transaction"] = out["avg_basket_size"]
         return out
 
     reg_vals = _agg_period(d_reg)
     all_vals = _agg_period(d_all)
 
-    # capture_rate: mean over window (region weekly merge)
     reg_capture = np.nan
     if capture_weekly is not None and not capture_weekly.empty and "capture_rate" in capture_weekly.columns:
         reg_capture = float(pd.to_numeric(capture_weekly["capture_rate"], errors="coerce").dropna().mean())
@@ -581,9 +563,6 @@ def build_region_svi_v2(
     reg_vals["capture_rate"] = reg_capture
     all_vals["capture_rate"] = np.nan  # company capture benchmark unknown
 
-    # -----------------------------
-    # Build component scores
-    # -----------------------------
     components = []
     for k, w in weights.items():
         v_reg = reg_vals.get(k, np.nan)
@@ -644,13 +623,6 @@ def build_opportunities_v2_one_lever(
     store_name_col: str = "store_display",
     min_days: int = 20,
 ) -> pd.DataFrame:
-    """
-    Returns per store:
-    - driver (Conversion uplift OR SPV uplift)
-    - theoretical_upside_period
-    - theoretical_upside_year (annualised from selected period)
-    - confidence (based on #days)
-    """
     if df_region_daily is None or df_region_daily.empty:
         return pd.DataFrame()
 
@@ -658,7 +630,6 @@ def build_opportunities_v2_one_lever(
     d["date"] = pd.to_datetime(d["date"], errors="coerce")
     d = d.dropna(subset=["date"])
 
-    # Aggregate store-period
     g = (
         d.groupby([store_key_col, store_name_col], as_index=False)
         .agg(
@@ -676,15 +647,12 @@ def build_opportunities_v2_one_lever(
     g["avg_basket_size"] = np.where(g["transactions"] > 0, g["turnover"] / g["transactions"], np.nan)
     g["sales_per_visitor"] = np.where(g["footfall"] > 0, g["turnover"] / g["footfall"], np.nan)
 
-    # Region medians (targets)
     conv_target = float(pd.to_numeric(g["conversion_rate"], errors="coerce").dropna().median()) if g["conversion_rate"].notna().any() else np.nan
     spv_target = float(pd.to_numeric(g["sales_per_visitor"], errors="coerce").dropna().median()) if g["sales_per_visitor"].notna().any() else np.nan
 
-    # Annualisation factor
     period_days = int(d["date"].nunique())
     year_factor = (365.0 / period_days) if period_days > 0 else 1.0
 
-    # Confidence score
     def conf(dcount: int) -> str:
         if dcount >= 60:
             return "●●●●●"
@@ -707,21 +675,18 @@ def build_opportunities_v2_one_lever(
         spv = float(r["sales_per_visitor"]) if pd.notna(r["sales_per_visitor"]) else np.nan
         atv = float(r["avg_basket_size"]) if pd.notna(r["avg_basket_size"]) else np.nan
 
-        # 1 lever logic:
         driver = None
         upside_period = 0.0
 
-        # If conversion below median => conversion lever
         if pd.notna(conv_target) and pd.notna(conv) and conv < conv_target and foot > 0 and pd.notna(atv):
             delta_pp = conv_target - conv
             extra_transactions = (delta_pp / 100.0) * foot
             upside_period = extra_transactions * atv
-            driver = f"Conversion → median (+{delta_pp:.1f}pp)"
-        # Else if SPV below median => SPV lever
+            driver = f"Conversion → regio-median (+{delta_pp:.1f}pp)"
         elif pd.notna(spv_target) and pd.notna(spv) and spv < spv_target and foot > 0:
             delta_spv = spv_target - spv
             upside_period = delta_spv * foot
-            driver = f"SPV → median (+{delta_spv:.2f} €/visitor)"
+            driver = f"SPV → regio-median (+{delta_spv:.2f} €/visitor)"
         else:
             continue
 
@@ -745,9 +710,6 @@ def build_opportunities_v2_one_lever(
 # Macro helper: dual axis chart
 # ----------------------
 def dual_axis_macro_chart(df: pd.DataFrame, title: str, left_series: list[str], right_series: list[str]):
-    """
-    df columns: date, series, value
-    """
     st.markdown(f'<div class="panel"><div class="panel-title">{title}</div>', unsafe_allow_html=True)
 
     if df is None or df.empty:
@@ -755,11 +717,9 @@ def dual_axis_macro_chart(df: pd.DataFrame, title: str, left_series: list[str], 
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
-    # Split
     left = df[df["series"].isin(left_series)].copy()
     right = df[df["series"].isin(right_series)].copy()
 
-    # Color mapping (CBS/CCI black)
     domain = left_series + right_series
     range_ = []
     for s in domain:
@@ -774,7 +734,6 @@ def dual_axis_macro_chart(df: pd.DataFrame, title: str, left_series: list[str], 
 
     color_scale = alt.Scale(domain=domain, range=range_)
 
-    # Left axis
     left_chart = (
         alt.Chart(left)
         .mark_line(point=True, strokeWidth=2)
@@ -790,7 +749,6 @@ def dual_axis_macro_chart(df: pd.DataFrame, title: str, left_series: list[str], 
         )
     )
 
-    # Right axis (separate scale + axis on right)
     right_chart = (
         alt.Chart(right)
         .mark_line(point=True, strokeWidth=2)
@@ -811,6 +769,190 @@ def dual_axis_macro_chart(df: pd.DataFrame, title: str, left_series: list[str], 
     st.markdown("</div>", unsafe_allow_html=True)
 
 # ----------------------
+# NEW: Drilldown helpers
+# ----------------------
+def safe_div(a: float, b: float) -> float:
+    if b is None or pd.isna(b) or float(b) == 0.0:
+        return np.nan
+    if a is None or pd.isna(a):
+        return np.nan
+    return float(a) / float(b)
+
+def compute_period_kpis(df: pd.DataFrame, sqm_sum_mode: str = "unique") -> dict:
+    """
+    df is a slice already containing:
+      footfall, turnover, transactions, sqm_effective (optional)
+    sqm_sum_mode:
+      - "unique": sum unique sqm_effective values (good for region/company)
+      - "single": take first sqm_effective (good for single store slice)
+    """
+    if df is None or df.empty:
+        return {}
+
+    foot = float(pd.to_numeric(df.get("footfall", 0), errors="coerce").fillna(0).sum())
+    turn = float(pd.to_numeric(df.get("turnover", 0), errors="coerce").fillna(0).sum())
+    trans = float(pd.to_numeric(df.get("transactions", 0), errors="coerce").fillna(0).sum())
+
+    sqm_val = np.nan
+    if "sqm_effective" in df.columns:
+        sqm = pd.to_numeric(df["sqm_effective"], errors="coerce")
+        if sqm_sum_mode == "single":
+            sqm_val = float(sqm.dropna().iloc[0]) if sqm.dropna().shape[0] else np.nan
+        else:
+            sqm_val = float(sqm.dropna().drop_duplicates().sum()) if sqm.dropna().shape[0] else np.nan
+
+    conv = (trans / foot * 100.0) if foot > 0 else np.nan
+    atv = (turn / trans) if trans > 0 else np.nan
+    spv = (turn / foot) if foot > 0 else np.nan
+    spm2 = (turn / sqm_val) if (pd.notna(sqm_val) and sqm_val > 0) else np.nan
+
+    return {
+        "footfall": foot,
+        "turnover": turn,
+        "transactions": trans,
+        "conversion_rate": conv,
+        "avg_basket_size": atv,
+        "sales_per_visitor": spv,
+        "sales_per_sqm": spm2,
+    }
+
+def daily_aggregate(df: pd.DataFrame, level_label: str, store_key_col: str | None = None) -> pd.DataFrame:
+    """
+    Return daily time series with derived KPIs based on sums (not averages).
+    df should include date, footfall, turnover, transactions, sqm_effective (+ store_key if needed).
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    d = df.copy()
+    d["date"] = pd.to_datetime(d["date"], errors="coerce")
+    d = d.dropna(subset=["date"])
+
+    # daily sums
+    agg_cols = {}
+    for c in ["footfall", "turnover", "transactions"]:
+        if c in d.columns:
+            agg_cols[c] = "sum"
+
+    if "sqm_effective" in d.columns:
+        # region/company: sum unique sqm across stores per day (stores fixed, so duplicates exist)
+        # We'll compute per date: sum unique sqm per store first, then sum.
+        if store_key_col and store_key_col in d.columns:
+            tmp = d[[store_key_col, "date", "sqm_effective"]].copy()
+            tmp[store_key_col] = pd.to_numeric(tmp[store_key_col], errors="coerce")
+            tmp["sqm_effective"] = pd.to_numeric(tmp["sqm_effective"], errors="coerce")
+            tmp = tmp.dropna(subset=[store_key_col, "date", "sqm_effective"])
+            sqm_day = (
+                tmp.groupby(["date", store_key_col], as_index=False)["sqm_effective"].first()
+                .groupby("date", as_index=False)["sqm_effective"].sum()
+                .rename(columns={"sqm_effective": "sqm_sum"})
+            )
+        else:
+            sqm_day = (
+                d.groupby("date", as_index=False)["sqm_effective"]
+                .apply(lambda s: pd.to_numeric(s, errors="coerce").dropna().drop_duplicates().sum())
+                .reset_index()
+                .rename(columns={0: "sqm_sum"})
+            )
+    else:
+        sqm_day = pd.DataFrame()
+
+    out = d.groupby("date", as_index=False).agg(agg_cols) if agg_cols else pd.DataFrame()
+    if out.empty:
+        return pd.DataFrame()
+
+    if not sqm_day.empty:
+        out = out.merge(sqm_day, on="date", how="left")
+    else:
+        out["sqm_sum"] = np.nan
+
+    out["conversion_rate"] = np.where(out["footfall"] > 0, (out["transactions"] / out["footfall"]) * 100.0, np.nan)
+    out["avg_basket_size"] = np.where(out["transactions"] > 0, out["turnover"] / out["transactions"], np.nan)
+    out["sales_per_visitor"] = np.where(out["footfall"] > 0, out["turnover"] / out["footfall"], np.nan)
+    out["sales_per_sqm"] = np.where(out["sqm_sum"] > 0, out["turnover"] / out["sqm_sum"], np.nan)
+
+    out["level"] = level_label
+    return out.sort_values("date")
+
+def melt_metrics(df: pd.DataFrame, metric_keys: list[str]) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    keep = ["date", "level"] + [k for k in metric_keys if k in df.columns]
+    d = df[keep].copy()
+    long = d.melt(id_vars=["date", "level"], var_name="metric", value_name="value")
+    return long
+
+def metric_label(m: str) -> str:
+    mapping = {
+        "footfall": "Footfall",
+        "turnover": "Omzet",
+        "transactions": "Transacties",
+        "conversion_rate": "Conversie (%)",
+        "sales_per_visitor": "SPV (€ / visitor)",
+        "avg_basket_size": "ATV (€)",
+        "sales_per_sqm": "Sales / m² (€)",
+    }
+    return mapping.get(m, m)
+
+def metric_axis_format(m: str) -> str:
+    if m in ["turnover"]:
+        return ",.0f"
+    if m in ["footfall", "transactions"]:
+        return ",.0f"
+    if m in ["sales_per_visitor", "avg_basket_size", "sales_per_sqm"]:
+        return ",.2f"
+    if m in ["conversion_rate"]:
+        return ".2f"
+    return ",.2f"
+
+def make_trend_chart(long_df: pd.DataFrame, metric: str):
+    if long_df is None or long_df.empty:
+        st.info("Geen trenddata beschikbaar.")
+        return
+
+    d = long_df[long_df["metric"] == metric].dropna(subset=["value"]).copy()
+    if d.empty:
+        st.info("Geen waarden voor deze metric.")
+        return
+
+    # color mapping: Store = purple, Region = red-ish, Company = gray
+    levels = d["level"].unique().tolist()
+    domain = []
+    range_ = []
+    for lv in ["Store", "Regio", "Company"]:
+        if lv in levels:
+            domain.append(lv)
+            if lv == "Store":
+                range_.append(PFM_PURPLE)
+            elif lv == "Regio":
+                range_.append(PFM_RED)
+            else:
+                range_.append(PFM_GRAY)
+
+    chart = (
+        alt.Chart(d)
+        .mark_line(point=False, strokeWidth=2)
+        .encode(
+            x=alt.X("date:T", title=None),
+            y=alt.Y("value:Q", title=metric_label(metric), axis=alt.Axis(format=metric_axis_format(metric))),
+            color=alt.Color("level:N", scale=alt.Scale(domain=domain, range=range_), title=None),
+            tooltip=[
+                alt.Tooltip("date:T", title="Datum"),
+                alt.Tooltip("level:N", title="Niveau"),
+                alt.Tooltip("value:Q", title=metric_label(metric), format=metric_axis_format(metric)),
+            ],
+        )
+        .properties(height=260)
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+def score_vs_benchmark(value: float, bench: float, floor_ratio=70.0, cap_ratio=130.0) -> float:
+    if pd.isna(value) or pd.isna(bench) or float(bench) == 0.0:
+        return np.nan
+    ratio = (float(value) / float(bench)) * 100.0
+    return _ratio_to_score_0_100(ratio, floor=floor_ratio, cap=cap_ratio)
+
+# ----------------------
 # MAIN
 # ----------------------
 def main():
@@ -823,8 +965,8 @@ def main():
             f"""
             <div class="pfm-header">
               <div>
-                <div class="pfm-title">PFM Region Performance Copilot <span class="pill">v2</span></div>
-                <div class="pfm-sub">Regio-level upgrade: explainable SVI + realistische opportunities + macro context</div>
+                <div class="pfm-title">PFM Region Performance Copilot <span class="pill">v2</span> <span class="pill">+ Drilldown</span></div>
+                <div class="pfm-sub">Regio upgrade + store drilldown (Store vs Regio vs Company) + metric trends</div>
               </div>
             </div>
             """,
@@ -891,11 +1033,11 @@ def main():
     with top_controls[0]:
         region_choice = st.selectbox("Regio", available_regions)
     with top_controls[1]:
-        compare_all_regions = st.toggle("Vergelijk met andere regio’s", value=True)
-    with top_controls[2]:
         show_macro = st.toggle("Toon macro (CBS/CCI)", value=True)
-    with top_controls[3]:
+    with top_controls[2]:
         show_quadrant = st.toggle("Toon quadrant", value=True)
+    with top_controls[3]:
+        show_store_drilldown = st.toggle("Toon store drilldown", value=True)
     with top_controls[4]:
         run_btn = st.button("Analyseer", type="primary")
 
@@ -908,9 +1050,6 @@ def main():
     end_period = periods[period_choice].end
     macro_year = periods[period_choice].macro_year
 
-    start_ts = pd.Timestamp(start_period)
-    end_ts = pd.Timestamp(end_period)
-
     region_shops = merged[merged["region"] == region_choice].copy()
     region_shop_ids = region_shops["id"].dropna().astype(int).unique().tolist()
     if not region_shop_ids:
@@ -919,13 +1058,10 @@ def main():
 
     all_shop_ids = merged["id"].dropna().astype(int).unique().tolist()
 
-    # v2 choice:
-    # We always fetch ALL shops for correct company benchmark (SVI vs company average).
-    # The compare toggle still controls the region-compare chart visibility (not the fetch).
+    # Always fetch ALL shops for correct company benchmark (SVI + drilldown comparisons)
     fetch_ids = all_shop_ids
 
-    # --- Metrics: expand so we can compute region-level drivers properly
-    # NOTE: even if API doesn't return some, normalize + collapse recompute derived metrics robustly.
+    # Metrics (transactions key is "transactions")
     metric_map = {
         "count_in": "footfall",
         "turnover": "turnover",
@@ -971,7 +1107,6 @@ def main():
             with st.expander("🔧 Debug request (params)"):
                 st.write("REPORT_URL:", REPORT_URL)
                 st.write("Params:", params_preview)
-                st.write("Period choice:", period_choice)
                 st.write("start/end:", start_period, end_period)
             return
         except requests.exceptions.RequestException as e:
@@ -979,7 +1114,6 @@ def main():
             with st.expander("🔧 Debug request (params)"):
                 st.write("REPORT_URL:", REPORT_URL)
                 st.write("Params:", params_preview)
-                st.write("Period choice:", period_choice)
                 st.write("start/end:", start_period, end_period)
             return
 
@@ -990,9 +1124,6 @@ def main():
         with st.expander("🔧 Debug response keys"):
             if isinstance(resp, dict):
                 st.write("Top-level keys:", list(resp.keys()))
-                st.write("Response snippet:", {k: resp[k] for k in list(resp.keys())[:5]})
-            else:
-                st.write("Response type:", type(resp))
             st.write("Params:", params_preview)
         return
 
@@ -1049,7 +1180,7 @@ def main():
         st.warning("Geen data voor geselecteerde regio binnen de periode.")
         with st.expander("🔧 Debug join coverage"):
             st.write("Region choice:", region_choice)
-            st.write("Unique regions in df_daily_store:", sorted(df_daily_store["region"].dropna().unique().tolist()))
+            st.write("Unique regions:", sorted(df_daily_store["region"].dropna().unique().tolist()))
             st.write(df_daily_store[[store_key_col, "id", "region", "store_display"]].head(20))
         return
 
@@ -1065,7 +1196,7 @@ def main():
     atv = (turn_total / trans_total) if trans_total > 0 else np.nan
 
     # ----------------------
-    # Capture weekly chart data (unchanged logic)
+    # Capture weekly chart data
     # ----------------------
     region_weekly = aggregate_weekly_region(df_region_daily)
     pathzz_weekly = fetch_region_street_traffic(region=region_choice, start_date=start_period, end_date=end_period)
@@ -1151,7 +1282,7 @@ def main():
     with k5:
         kpi_card("Capture", fmt_pct(avg_capture), "Regio totaal (Pathzz)")
 
-    st.markdown("<div class='muted'>Tip: v2 gebruikt company-benchmark (zelfde periode) voor SVI-context. Capture wordt getoond als absolute waarde (benchmark volgt later als we meer Pathzz-scope toevoegen).</div>", unsafe_allow_html=True)
+    st.markdown("<div class='muted'>Tip: v2 gebruikt company-benchmark (zelfde periode) voor SVI-context. Capture wordt getoond als absolute waarde (benchmark volgt later als Pathzz-scope breder is).</div>", unsafe_allow_html=True)
 
     # ----------------------
     # Row: Weekly + SVI v2 + breakdown
@@ -1242,8 +1373,6 @@ def main():
             b["component_name"] = b["component"].apply(nice_component_name)
             b["score"] = pd.to_numeric(b["score_0_100"], errors="coerce")
             b["ratio"] = pd.to_numeric(b["ratio_vs_benchmark"], errors="coerce")
-
-            # Sort by "weakest first"
             b = b.sort_values("score", ascending=True)
 
             bar = (
@@ -1252,14 +1381,7 @@ def main():
                 .encode(
                     x=alt.X("score:Q", title="Score (0–100)", scale=alt.Scale(domain=[0, 100])),
                     y=alt.Y("component_name:N", sort="-x", title=None),
-                    color=alt.Color(
-                        "component_name:N",
-                        scale=alt.Scale(
-                            domain=b["component_name"].tolist(),
-                            range=[PFM_AMBER] * len(b),
-                        ),
-                        legend=None,
-                    ),
+                    color=alt.value(PFM_AMBER),
                     tooltip=[
                         alt.Tooltip("component_name:N", title="Component"),
                         alt.Tooltip("score:Q", title="Score", format=".0f"),
@@ -1270,7 +1392,7 @@ def main():
             )
             st.altair_chart(bar, use_container_width=True)
 
-            st.caption("Interpretatie: lage score = grootste hefboom. Capture krijgt later een echte benchmark zodra Pathzz over alle regio’s beschikbaar is.")
+            st.caption("Interpretatie: lage score = grootste hefboom. Capture krijgt later een echte benchmark zodra Pathzz breder beschikbaar is.")
         st.markdown("</div>", unsafe_allow_html=True)
 
     # ----------------------
@@ -1297,8 +1419,6 @@ def main():
             st.info("Nog geen opportunities gevonden (of te weinig dagen data per store).")
         else:
             topn = opp_v2.sort_values("theoretical_upside_year", ascending=False).head(8).copy()
-
-            # chart
             chart_df = topn.copy()
             chart_df["upside"] = pd.to_numeric(chart_df["theoretical_upside_year"], errors="coerce")
 
@@ -1323,9 +1443,8 @@ def main():
             total_top5 = float(topn["theoretical_upside_year"].head(5).sum())
             st.markdown(f"**Top 5 samen (theoretical, annualised):** {fmt_eur(total_top5)} / jaar")
 
-            st.caption("Hoe dit wordt berekend (simpel & uitlegbaar):")
-            st.caption("• Per winkel: óf **conversion uplift naar regio-median** óf **SPV uplift naar regio-median**.")
-            st.caption("• Upside wordt berekend op huidig volume (footfall) en daarna geannualiseerd vanuit de gekozen periode.")
+            st.caption("• Per winkel: óf conversion uplift naar regio-median óf SPV uplift naar regio-median.")
+            st.caption("• Upside berekend op huidig volume (footfall) en geannualiseerd vanuit de gekozen periode.")
 
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1352,226 +1471,271 @@ def main():
         st.markdown("</div>", unsafe_allow_html=True)
 
     # ----------------------
-# STORE DRILLDOWN (v1) — within selected region
-# ----------------------
-st.markdown("## Store drilldown (pilot)")
+    # NEW: STORE DRILLDOWN (v2)
+    # ----------------------
+    if show_store_drilldown:
+        st.markdown("<div class='divider'></div>", unsafe_allow_html=True)
+        st.markdown("## Store drilldown (v2)")
 
-# Build store list for this region (human labels)
-stores_in_region = (
-    merged[merged["region"] == region_choice][["id", "store_display"]]
-    .dropna(subset=["id"])
-    .drop_duplicates()
-    .sort_values("store_display")
-)
-
-if stores_in_region.empty:
-    st.info("Geen winkels gevonden voor deze regio.")
-else:
-    c_sd1, c_sd2, c_sd3 = st.columns([1.6, 1.0, 1.4])
-    with c_sd1:
-        store_pick = st.selectbox(
-            "Kies winkel",
-            stores_in_region.apply(lambda r: f"{int(r['id'])} — {r['store_display']}", axis=1).tolist(),
+        # Stores in this region
+        store_list = (
+            merged[merged["region"] == region_choice][["id", "store_display"]]
+            .dropna(subset=["id"])
+            .drop_duplicates()
+            .sort_values("store_display")
         )
-    with c_sd2:
-        show_store_compare = st.toggle("Toon benchmark (regio & company)", value=True)
-    with c_sd3:
-        st.caption("Tip: drilldown gebruikt dezelfde periode als boven.")
+        store_options = store_list.apply(lambda r: f"{r['store_display']} (ID {int(r['id'])})", axis=1).tolist()
+        default_idx = 0 if store_options else None
 
-    store_id = int(store_pick.split("—")[0].strip())
+        dcol1, dcol2, dcol3 = st.columns([1.6, 1.2, 1.2])
+        with dcol1:
+            store_choice_label = st.selectbox("Selecteer winkel", store_options, index=default_idx if default_idx is not None else 0)
+        with dcol2:
+            metric_choices = st.multiselect(
+                "Metrics",
+                ["footfall", "turnover", "transactions", "conversion_rate", "sales_per_visitor", "avg_basket_size", "sales_per_sqm"],
+                default=["turnover", "conversion_rate", "sales_per_visitor"],
+            )
+        with dcol3:
+            show_best_worst = st.toggle("Toon best/worst days", value=True)
 
-    # Store data (same period window as region)
-    d_store = df_daily_store[df_daily_store["id"] == store_id].copy()
-    d_store["date"] = pd.to_datetime(d_store["date"], errors="coerce")
-    d_store = d_store.dropna(subset=["date"])
-    d_store = d_store[(d_store["date"] >= pd.Timestamp(start_period)) & (d_store["date"] <= pd.Timestamp(end_period))].copy()
-
-    if d_store.empty:
-        st.warning("Geen store-data voor deze periode.")
-    else:
-        # Robust coercion for optional KPIs
-        for c in [
-            "footfall", "turnover", "transactions",
-            "conversion_rate", "avg_basket_size",
-            "sales_per_visitor", "sales_per_transaction",
-            "sales_per_sqm",
-        ]:
-            if c in d_store.columns:
-                d_store[c] = pd.to_numeric(d_store[c], errors="coerce")
-
-        # Ensure derived KPIs (if missing or partly missing)
-        if "sales_per_visitor" not in d_store.columns and {"turnover", "footfall"}.issubset(d_store.columns):
-            d_store["sales_per_visitor"] = np.where(d_store["footfall"] > 0, d_store["turnover"] / d_store["footfall"], np.nan)
-
-        if "transactions" in d_store.columns and "conversion_rate" not in d_store.columns and "footfall" in d_store.columns:
-            d_store["conversion_rate"] = np.where(d_store["footfall"] > 0, d_store["transactions"] / d_store["footfall"] * 100.0, np.nan)
-
-        if "avg_basket_size" not in d_store.columns and {"turnover", "transactions"}.issubset(d_store.columns):
-            d_store["avg_basket_size"] = np.where(d_store["transactions"] > 0, d_store["turnover"] / d_store["transactions"], np.nan)
-
-        if "sales_per_transaction" not in d_store.columns and "avg_basket_size" in d_store.columns:
-            d_store["sales_per_transaction"] = d_store["avg_basket_size"]
-
-        # sales_per_sqm only if sqm_effective exists
-        sqm_eff = (
-            merged.loc[merged["id"] == store_id, "sqm_effective"].astype(float).dropna()
-            if "sqm_effective" in merged.columns else pd.Series(dtype=float)
-        )
-        sqm_val = float(sqm_eff.iloc[0]) if len(sqm_eff) else np.nan
-        if "sales_per_sqm" not in d_store.columns and pd.notna(sqm_val) and "turnover" in d_store.columns:
-            d_store["sales_per_sqm"] = np.where(sqm_val > 0, d_store["turnover"] / sqm_val, np.nan)
-
-        # Aggregates (period)
-        store_foot = float(d_store["footfall"].sum()) if "footfall" in d_store.columns else np.nan
-        store_turn = float(d_store["turnover"].sum()) if "turnover" in d_store.columns else np.nan
-        store_tx   = float(d_store["transactions"].sum()) if "transactions" in d_store.columns else np.nan
-
-        store_conv = np.nan
-        if pd.notna(store_tx) and pd.notna(store_foot) and store_foot > 0:
-            store_conv = (store_tx / store_foot) * 100.0
-
-        store_atv = np.nan
-        if pd.notna(store_turn) and pd.notna(store_tx) and store_tx > 0:
-            store_atv = store_turn / store_tx
-
-        store_spv = np.nan
-        if pd.notna(store_turn) and pd.notna(store_foot) and store_foot > 0:
-            store_spv = store_turn / store_foot
-
-        store_spsqm = np.nan
-        if pd.notna(store_turn) and pd.notna(sqm_val) and sqm_val > 0:
-            store_spsqm = store_turn / sqm_val
-
-        # Benchmarks (optional)
-        if show_store_compare:
-            d_region = df_region_daily.copy()
-            d_company = df_daily_store.copy()
-
-            # region aggregates
-            r_foot = float(d_region["footfall"].sum()) if "footfall" in d_region.columns else np.nan
-            r_turn = float(d_region["turnover"].sum()) if "turnover" in d_region.columns else np.nan
-            r_tx   = float(d_region["transactions"].sum()) if "transactions" in d_region.columns else np.nan
-
-            r_conv = (r_tx / r_foot * 100.0) if pd.notna(r_tx) and pd.notna(r_foot) and r_foot > 0 else np.nan
-            r_atv  = (r_turn / r_tx) if pd.notna(r_turn) and pd.notna(r_tx) and r_tx > 0 else np.nan
-            r_spv  = (r_turn / r_foot) if pd.notna(r_turn) and pd.notna(r_foot) and r_foot > 0 else np.nan
-
-            # company aggregates (same period)
-            d_company["date"] = pd.to_datetime(d_company["date"], errors="coerce")
-            d_company = d_company.dropna(subset=["date"])
-            d_company = d_company[(d_company["date"] >= pd.Timestamp(start_period)) & (d_company["date"] <= pd.Timestamp(end_period))].copy()
-
-            c_foot = float(d_company["footfall"].sum()) if "footfall" in d_company.columns else np.nan
-            c_turn = float(d_company["turnover"].sum()) if "turnover" in d_company.columns else np.nan
-            c_tx   = float(d_company["transactions"].sum()) if "transactions" in d_company.columns else np.nan
-
-            c_conv = (c_tx / c_foot * 100.0) if pd.notna(c_tx) and pd.notna(c_foot) and c_foot > 0 else np.nan
-            c_atv  = (c_turn / c_tx) if pd.notna(c_turn) and pd.notna(c_tx) and c_tx > 0 else np.nan
-            c_spv  = (c_turn / c_foot) if pd.notna(c_turn) and pd.notna(c_foot) and c_foot > 0 else np.nan
+        if not store_options:
+            st.info("Geen stores gevonden voor drilldown in deze regio.")
         else:
-            r_conv = r_atv = r_spv = np.nan
-            c_conv = c_atv = c_spv = np.nan
+            # Parse store_id from label
+            # label format: "<name> (ID 123)"
+            try:
+                store_id = int(store_choice_label.split("(ID")[-1].replace(")", "").strip())
+            except Exception:
+                store_id = int(store_list["id"].iloc[0])
 
-        # KPI cards row (store)
-        s1, s2, s3, s4, s5 = st.columns([1, 1, 1, 1, 1])
-        with s1:
-            kpi_card("Store Footfall", fmt_int(store_foot), "Winkel · periode")
-        with s2:
-            kpi_card("Store Omzet", fmt_eur(store_turn), "Winkel · periode")
-        with s3:
-            kpi_card("Conversion", (fmt_pct(store_conv) if not pd.isna(store_conv) else "-"), "Transacties / bezoekers")
-        with s4:
-            kpi_card("ATV", (fmt_eur_2(store_atv) if not pd.isna(store_atv) else "-"), "Omzet / transactie")
-        with s5:
-            kpi_card("Sales / m²", (fmt_eur_2(store_spsqm) if not pd.isna(store_spsqm) else "-"), (f"sqm: {fmt_int(sqm_val)}" if pd.notna(sqm_val) else "sqm onbekend"))
-
-        # Trend chart: turnover + footfall + conversion (independent scales)
-        st.markdown('<div class="panel"><div class="panel-title">Store trend (dag) — omzet/footfall + conversie</div>', unsafe_allow_html=True)
-
-        plot_df = d_store[["date"]].copy()
-        for c in ["turnover", "footfall", "conversion_rate"]:
-            if c in d_store.columns:
-                plot_df[c] = d_store[c].values
-
-        # Fallback conversion_rate from store_conv daily if missing but transactions exists
-        if "conversion_rate" not in plot_df.columns and {"transactions", "footfall"}.issubset(d_store.columns):
-            plot_df["conversion_rate"] = np.where(d_store["footfall"] > 0, d_store["transactions"] / d_store["footfall"] * 100.0, np.nan)
-
-        lines = []
-        if "turnover" in plot_df.columns:
-            a = plot_df[["date", "turnover"]].rename(columns={"turnover": "value"})
-            a["series"] = "Omzet"
-            lines.append(a)
-        if "footfall" in plot_df.columns:
-            b = plot_df[["date", "footfall"]].rename(columns={"footfall": "value"})
-            b["series"] = "Footfall"
-            lines.append(b)
-
-        base_long = pd.concat(lines, ignore_index=True) if lines else pd.DataFrame()
-
-        bar_or_line = (
-            alt.Chart(base_long.dropna(subset=["date", "value"]))
-            .mark_line(point=False)
-            .encode(
-                x=alt.X("date:T", title=None, axis=alt.Axis(format="%d %b")),
-                y=alt.Y("value:Q", title="", axis=alt.Axis(format=",.0f")),
-                color=alt.Color(
-                    "series:N",
-                    scale=alt.Scale(domain=["Omzet", "Footfall"], range=[PFM_RED, PFM_PURPLE]),
-                    legend=alt.Legend(title=""),
-                ),
-                tooltip=[
-                    alt.Tooltip("date:T", title="Datum", format="%d %b %Y"),
-                    alt.Tooltip("series:N", title="Reeks"),
-                    alt.Tooltip("value:Q", title="Waarde", format=",.0f"),
-                ],
+            df_store_daily = df_daily_store[df_daily_store[store_key_col].astype("Int64") == store_id].copy()
+            df_store_daily = df_store_daily.merge(
+                merged[["id", "store_display", "region", "sqm_effective"]].drop_duplicates(),
+                left_on=store_key_col,
+                right_on="id",
+                how="left",
             )
-        )
 
-        if "conversion_rate" in plot_df.columns:
-            conv_line = (
-                alt.Chart(plot_df.dropna(subset=["date", "conversion_rate"]))
-                .mark_line(point=True, strokeDash=[6, 4], color="#111111")  # zwart
-                .encode(
-                    x=alt.X("date:T", title=None),
-                    y=alt.Y("conversion_rate:Q", title="Conversie %"),
-                    tooltip=[
-                        alt.Tooltip("date:T", title="Datum", format="%d %b %Y"),
-                        alt.Tooltip("conversion_rate:Q", title="Conversie", format=".1f"),
-                    ],
-                )
-            )
-            st.altair_chart(
-                alt.layer(bar_or_line, conv_line).resolve_scale(y="independent").properties(height=260),
-                use_container_width=True,
-            )
-        else:
-            st.altair_chart(bar_or_line.properties(height=260), use_container_width=True)
+            if df_store_daily.empty:
+                st.warning("Geen store-data gevonden in de gekozen periode.")
+            else:
+                # Company slice: all stores (already in df_daily_store)
+                df_company_daily = df_daily_store.copy()
 
-        st.markdown("</div>", unsafe_allow_html=True)
+                # Ensure region exists for all
+                try:
+                    df_company_daily = ensure_region_column(df_company_daily, merged, store_key_col)
+                except Exception:
+                    pass
 
-        # Benchmark mini-table (optional)
-        if show_store_compare:
-            st.markdown('<div class="panel"><div class="panel-title">Benchmark snapshot (zelfde periode)</div>', unsafe_allow_html=True)
+                # Region slice: selected region
+                df_region_daily_2 = df_company_daily[df_company_daily["region"] == region_choice].copy()
 
-            bench = pd.DataFrame(
-                [
-                    ["Store", store_spv, store_conv, store_atv],
-                    ["Regio", r_spv, r_conv, r_atv],
-                    ["Company", c_spv, c_conv, c_atv],
-                ],
-                columns=["Level", "SPV", "Conversion", "ATV"],
-            )
-            bench["SPV"] = bench["SPV"].apply(lambda x: fmt_eur_2(x) if pd.notna(x) else "-")
-            bench["Conversion"] = bench["Conversion"].apply(lambda x: fmt_pct(x) if pd.notna(x) else "-")
-            bench["ATV"] = bench["ATV"].apply(lambda x: fmt_eur_2(x) if pd.notna(x) else "-")
+                # Enrich sqm for company/region/store (needed for daily_aggregate sales/m²)
+                # company/region already have sqm_effective because df_daily_store merge earlier
+                # store also has sqm_effective from merge
 
-            st.dataframe(bench, use_container_width=True, hide_index=True)
-            st.caption("Benchmark is puur context: zelfde periode, geaggregeerd. Geen ‘target’ tenzij jij die toevoegt.")
-            st.markdown("</div>", unsafe_allow_html=True)
+                # Period KPIs
+                store_kpis = compute_period_kpis(df_store_daily, sqm_sum_mode="single")
+                region_kpis = compute_period_kpis(df_region_daily_2, sqm_sum_mode="unique")
+                company_kpis = compute_period_kpis(df_company_daily, sqm_sum_mode="unique")
+
+                st.markdown(f"### {store_kpis.get('store_display', '')}".strip())
+
+                # KPI cards: Store vs Region vs Company (same row)
+                cA, cB, cC = st.columns([1, 1, 1])
+                with cA:
+                    st.markdown('<div class="panel"><div class="panel-title">Store (periode)</div>', unsafe_allow_html=True)
+                    kpi_card("Footfall", fmt_int(store_kpis.get("footfall", np.nan)), "Store · periode")
+                    kpi_card("Omzet", fmt_eur(store_kpis.get("turnover", np.nan)), "Store · periode")
+                    kpi_card("Conversie", fmt_pct(store_kpis.get("conversion_rate", np.nan)), "Transacties / bezoekers")
+                    kpi_card("ATV", fmt_eur_2(store_kpis.get("avg_basket_size", np.nan)), "Omzet / transactie")
+                    kpi_card("Sales / m²", fmt_eur_2(store_kpis.get("sales_per_sqm", np.nan)), "Omzet / m²")
+                    st.markdown("</div>", unsafe_allow_html=True)
+
+                with cB:
+                    st.markdown('<div class="panel"><div class="panel-title">Regio benchmark</div>', unsafe_allow_html=True)
+                    kpi_card("Footfall", fmt_int(region_kpis.get("footfall", np.nan)), "Regio · periode")
+                    kpi_card("Omzet", fmt_eur(region_kpis.get("turnover", np.nan)), "Regio · periode")
+                    kpi_card("Conversie", fmt_pct(region_kpis.get("conversion_rate", np.nan)), "Transacties / bezoekers")
+                    kpi_card("ATV", fmt_eur_2(region_kpis.get("avg_basket_size", np.nan)), "Omzet / transactie")
+                    kpi_card("Sales / m²", fmt_eur_2(region_kpis.get("sales_per_sqm", np.nan)), "Omzet / m²")
+                    st.markdown("</div>", unsafe_allow_html=True)
+
+                with cC:
+                    st.markdown('<div class="panel"><div class="panel-title">Company benchmark</div>', unsafe_allow_html=True)
+                    kpi_card("Footfall", fmt_int(company_kpis.get("footfall", np.nan)), "Company · periode")
+                    kpi_card("Omzet", fmt_eur(company_kpis.get("turnover", np.nan)), "Company · periode")
+                    kpi_card("Conversie", fmt_pct(company_kpis.get("conversion_rate", np.nan)), "Transacties / bezoekers")
+                    kpi_card("ATV", fmt_eur_2(company_kpis.get("avg_basket_size", np.nan)), "Omzet / transactie")
+                    kpi_card("Sales / m²", fmt_eur_2(company_kpis.get("sales_per_sqm", np.nan)), "Omzet / m²")
+                    st.markdown("</div>", unsafe_allow_html=True)
+
+                # Quick deltas / lever scan
+                st.markdown("<div class='divider'></div>", unsafe_allow_html=True)
+                st.markdown("### Lever scan — waar zit het gat?")
+
+                # Scores vs Region + Company
+                lever_rows = []
+                for m in ["conversion_rate", "avg_basket_size", "sales_per_visitor", "sales_per_sqm"]:
+                    v_store = store_kpis.get(m, np.nan)
+                    v_reg = region_kpis.get(m, np.nan)
+                    v_cmp = company_kpis.get(m, np.nan)
+
+                    score_reg = score_vs_benchmark(v_store, v_reg)
+                    score_cmp = score_vs_benchmark(v_store, v_cmp)
+
+                    # "gap" as percent vs benchmark
+                    gap_reg = ((v_store / v_reg) * 100.0 - 100.0) if (pd.notna(v_store) and pd.notna(v_reg) and v_reg != 0) else np.nan
+                    gap_cmp = ((v_store / v_cmp) * 100.0 - 100.0) if (pd.notna(v_store) and pd.notna(v_cmp) and v_cmp != 0) else np.nan
+
+                    lever_rows.append({
+                        "metric": metric_label(m),
+                        "store": v_store,
+                        "region": v_reg,
+                        "company": v_cmp,
+                        "gap_vs_region_%": gap_reg,
+                        "gap_vs_company_%": gap_cmp,
+                        "score_vs_region": score_reg,
+                        "score_vs_company": score_cmp,
+                    })
+
+                lever_df = pd.DataFrame(lever_rows)
+
+                l1, l2 = st.columns([1.1, 1.2])
+                with l1:
+                    st.markdown('<div class="panel"><div class="panel-title">Scores (0–100)</div>', unsafe_allow_html=True)
+                    # altair bar: lowest scores first (biggest lever)
+                    tmp = lever_df.copy()
+                    tmp["weakness"] = tmp["score_vs_region"]
+                    tmp = tmp.dropna(subset=["weakness"])
+                    if tmp.empty:
+                        st.info("Onvoldoende data om scores te berekenen.")
+                    else:
+                        tmp = tmp.sort_values("weakness", ascending=True)
+                        bar = (
+                            alt.Chart(tmp)
+                            .mark_bar(cornerRadiusEnd=4)
+                            .encode(
+                                x=alt.X("weakness:Q", title="Score vs Regio (0–100)", scale=alt.Scale(domain=[0, 100])),
+                                y=alt.Y("metric:N", sort="-x", title=None),
+                                color=alt.value(PFM_AMBER),
+                                tooltip=[
+                                    alt.Tooltip("metric:N", title="Metric"),
+                                    alt.Tooltip("weakness:Q", title="Score vs Regio", format=".0f"),
+                                    alt.Tooltip("score_vs_company:Q", title="Score vs Company", format=".0f"),
+                                    alt.Tooltip("gap_vs_region_%:Q", title="Gap vs Regio (%)", format=".1f"),
+                                    alt.Tooltip("gap_vs_company_%:Q", title="Gap vs Company (%)", format=".1f"),
+                                ],
+                            )
+                            .properties(height=240)
+                        )
+                        st.altair_chart(bar, use_container_width=True)
+
+                    st.caption("Lager = grotere hefboom. Scores zijn ratio-gebaseerd en geclipped (70–130% → 0–100).")
+                    st.markdown("</div>", unsafe_allow_html=True)
+
+                with l2:
+                    st.markdown('<div class="panel"><div class="panel-title">Store vs Regio vs Company (tabel)</div>', unsafe_allow_html=True)
+                    t = lever_df.copy()
+                    # pretty formatting
+                    def _fmt_val(metric_name, v):
+                        if "Conversie" in metric_name:
+                            return fmt_pct(v)
+                        if "ATV" in metric_name or "Sales / m²" in metric_name or "SPV" in metric_name:
+                            return fmt_eur_2(v)
+                        return str(v)
+
+                    t["Store"] = t.apply(lambda r: _fmt_val(r["metric"], r["store"]), axis=1)
+                    t["Regio"] = t.apply(lambda r: _fmt_val(r["metric"], r["region"]), axis=1)
+                    t["Company"] = t.apply(lambda r: _fmt_val(r["metric"], r["company"]), axis=1)
+                    t["Gap vs Regio"] = t["gap_vs_region_%"].apply(lambda x: "-" if pd.isna(x) else f"{x:+.1f}%".replace(".", ","))
+                    t["Gap vs Company"] = t["gap_vs_company_%"].apply(lambda x: "-" if pd.isna(x) else f"{x:+.1f}%".replace(".", ","))
+                    t = t[["metric", "Store", "Regio", "Company", "Gap vs Regio", "Gap vs Company"]].rename(columns={"metric": "Metric"})
+                    st.dataframe(t, use_container_width=True, hide_index=True)
+                    st.markdown("</div>", unsafe_allow_html=True)
+
+                # Trend charts
+                st.markdown("<div class='divider'></div>", unsafe_allow_html=True)
+                st.markdown("### Trends — Store vs Regio vs Company (daily)")
+
+                store_ts = daily_aggregate(df_store_daily, "Store", store_key_col=store_key_col)
+                region_ts = daily_aggregate(df_region_daily_2, "Regio", store_key_col=store_key_col)
+                company_ts = daily_aggregate(df_company_daily, "Company", store_key_col=store_key_col)
+
+                ts = pd.concat([store_ts, region_ts, company_ts], ignore_index=True)
+                long = melt_metrics(ts, metric_choices)
+
+                tcol1, tcol2 = st.columns([1, 1])
+                left_metrics = metric_choices[0::2]
+                right_metrics = metric_choices[1::2]
+
+                with tcol1:
+                    st.markdown('<div class="panel"><div class="panel-title">Trend charts (1)</div>', unsafe_allow_html=True)
+                    if not left_metrics:
+                        st.info("Kies minimaal één metric.")
+                    else:
+                        for m in left_metrics:
+                            st.markdown(f"**{metric_label(m)}**")
+                            make_trend_chart(long, m)
+                    st.markdown("</div>", unsafe_allow_html=True)
+
+                with tcol2:
+                    st.markdown('<div class="panel"><div class="panel-title">Trend charts (2)</div>', unsafe_allow_html=True)
+                    if not right_metrics:
+                        st.info("Kies extra metrics links.")
+                    else:
+                        for m in right_metrics:
+                            st.markdown(f"**{metric_label(m)}**")
+                            make_trend_chart(long, m)
+                    st.markdown("</div>", unsafe_allow_html=True)
+
+                # Best/Worst days (optional)
+                if show_best_worst:
+                    st.markdown("<div class='divider'></div>", unsafe_allow_html=True)
+                    st.markdown("### Best / worst days (store)")
+
+                    s = store_ts.copy()
+                    if s.empty:
+                        st.info("Geen store timeseries.")
+                    else:
+                        # pick a “performance metric” for ranking (default: turnover)
+                        rank_metric = "turnover" if "turnover" in s.columns else "sales_per_visitor"
+                        s2 = s[["date", rank_metric, "footfall", "transactions", "conversion_rate", "sales_per_visitor", "avg_basket_size", "sales_per_sqm"]].copy()
+                        s2 = s2.dropna(subset=[rank_metric])
+                        if s2.empty:
+                            st.info("Onvoldoende data om best/worst dagen te tonen.")
+                        else:
+                            best = s2.sort_values(rank_metric, ascending=False).head(5).copy()
+                            worst = s2.sort_values(rank_metric, ascending=True).head(5).copy()
+
+                            def _fmt_row(df_):
+                                out = df_.copy()
+                                out["date"] = out["date"].dt.date.astype(str)
+                                out["turnover"] = out["turnover"].apply(fmt_eur) if "turnover" in out.columns else out.get("turnover", "-")
+                                out["footfall"] = out["footfall"].apply(fmt_int) if "footfall" in out.columns else out.get("footfall", "-")
+                                out["transactions"] = out["transactions"].apply(fmt_int) if "transactions" in out.columns else out.get("transactions", "-")
+                                out["conversion_rate"] = out["conversion_rate"].apply(fmt_pct) if "conversion_rate" in out.columns else out.get("conversion_rate", "-")
+                                out["sales_per_visitor"] = out["sales_per_visitor"].apply(fmt_eur_2) if "sales_per_visitor" in out.columns else out.get("sales_per_visitor", "-")
+                                out["avg_basket_size"] = out["avg_basket_size"].apply(fmt_eur_2) if "avg_basket_size" in out.columns else out.get("avg_basket_size", "-")
+                                out["sales_per_sqm"] = out["sales_per_sqm"].apply(fmt_eur_2) if "sales_per_sqm" in out.columns else out.get("sales_per_sqm", "-")
+                                cols = ["date", "turnover", "footfall", "transactions", "conversion_rate", "sales_per_visitor", "avg_basket_size", "sales_per_sqm"]
+                                cols = [c for c in cols if c in out.columns]
+                                return out[cols]
+
+                            b1, b2 = st.columns(2)
+                            with b1:
+                                st.markdown('<div class="panel"><div class="panel-title">Top 5 days</div>', unsafe_allow_html=True)
+                                st.dataframe(_fmt_row(best), use_container_width=True, hide_index=True)
+                                st.markdown("</div>", unsafe_allow_html=True)
+                            with b2:
+                                st.markdown('<div class="panel"><div class="panel-title">Bottom 5 days</div>', unsafe_allow_html=True)
+                                st.dataframe(_fmt_row(worst), use_container_width=True, hide_index=True)
+                                st.markdown("</div>", unsafe_allow_html=True)
 
     # ----------------------
-    # Macro context (CBS/CCI) with dual axis + legend + black macro lines
+    # Macro context (CBS/CCI)
     # ----------------------
     if show_macro:
         st.markdown("## Macro-context (CBS/CCI)")
@@ -1581,7 +1745,6 @@ else:
 
         st.caption(f"Macro toont: {macro_start} → {macro_end} (1 jaar terug vanaf start van je periode t/m einddatum).")
 
-        # --- 1) Macro fetch: region shops only (for region index)
         macro_metric_map = {"count_in": "footfall", "turnover": "turnover", "transactions": "transactions"}
 
         macro_params_preview = build_report_params(
@@ -1654,24 +1817,16 @@ else:
             region_month["region_turnover_index"] = index_from_first_nonzero(region_month["region_turnover"])
             region_month["region_footfall_index"] = index_from_first_nonzero(region_month["region_footfall"])
 
-        # --- CBS / CCI fetch
         months_back = int(((macro_end.year - macro_start.year) * 12 + (macro_end.month - macro_start.month)) + 6)
         months_back = max(60, months_back)
         months_back = min(240, months_back)
 
         # CBS retail
         cbs_retail_month = pd.DataFrame()
-        retail_series = []
         try:
             retail_series = get_retail_index(months_back=months_back)
         except Exception:
             retail_series = []
-
-        if not retail_series:
-            try:
-                retail_series = get_retail_index(months_back=60)
-            except Exception:
-                retail_series = []
 
         if retail_series:
             raw = pd.DataFrame(retail_series)
@@ -1709,17 +1864,10 @@ else:
 
         # CCI
         cci_df = pd.DataFrame()
-        cci_series = []
         try:
             cci_series = get_cci_series(months_back=months_back)
         except Exception:
             cci_series = []
-
-        if not cci_series:
-            try:
-                cci_series = get_cci_series(months_back=60)
-            except Exception:
-                cci_series = []
 
         if cci_series:
             raw = pd.DataFrame(cci_series)
@@ -1754,7 +1902,6 @@ else:
                         base = float(base.iloc[0])
                         cci_df["cci_index"] = (cci_df["cci"] / base) * 100.0
 
-        # Build macro lines
         macro_lines = []
 
         if not region_month.empty:
@@ -1812,69 +1959,20 @@ else:
                 right_series=["CCI consumentenvertrouwen"],
             )
 
-        # quick interpretation label (under/over vs macro)
-        st.markdown('<div class="panel"><div class="panel-title">Interpretatie (simpel)</div>', unsafe_allow_html=True)
-        msg = "Onvoldoende data voor interpretatie."
-        if not region_month.empty:
-            # Compare last available month between region turnover index and CBS retail (if exists)
-            last_month = region_month["month"].max()
-            reg_last = region_month.loc[region_month["month"] == last_month, "region_turnover_index"]
-            reg_last = float(reg_last.iloc[0]) if not reg_last.empty else np.nan
-
-            cbs_last = np.nan
-            if not cbs_retail_month.empty and "cbs_retail_index" in cbs_retail_month.columns:
-                cbs_last_row = cbs_retail_month[cbs_retail_month["date"] == pd.Timestamp(last_month)]
-                if not cbs_last_row.empty:
-                    cbs_last = float(cbs_last_row["cbs_retail_index"].iloc[0])
-
-            if pd.notna(reg_last) and pd.notna(cbs_last):
-                if reg_last > cbs_last + 2:
-                    msg = f"🟢 Regio omzet-index ({reg_last:.0f}) ligt **boven** CBS ({cbs_last:.0f}) → regio lijkt te **outperformen**."
-                elif reg_last < cbs_last - 2:
-                    msg = f"🔴 Regio omzet-index ({reg_last:.0f}) ligt **onder** CBS ({cbs_last:.0f}) → regio lijkt **achter te blijven**."
-                else:
-                    msg = f"🟡 Regio omzet-index ({reg_last:.0f}) ligt ongeveer **in lijn** met CBS ({cbs_last:.0f})."
-
-        st.markdown(f"<div class='muted'>{msg}</div>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-
-        with st.expander("🔧 Debug macro (v2)"):
-            st.write("Macro window:", macro_start, "→", macro_end)
-            st.write("months_back used:", months_back)
-            st.write("Region_month rows:", len(region_month))
-            if not region_month.empty:
-                st.write("Region_month min/max:", region_month["month"].min(), region_month["month"].max())
-                st.dataframe(region_month.head(10))
-            st.write("CBS rows:", len(cbs_retail_month))
-            if not cbs_retail_month.empty:
-                st.write("CBS min/max:", cbs_retail_month["date"].min(), cbs_retail_month["date"].max())
-                st.dataframe(cbs_retail_month.head(10))
-            st.write("CCI rows:", len(cci_df))
-            if not cci_df.empty:
-                st.write("CCI min/max:", cci_df["date"].min(), cci_df["date"].max())
-                st.dataframe(cci_df.head(10))
-
     # ----------------------
-    # Quadrant (SVI vs Market performance proxy)
+    # Quadrant (SVI vs Performance proxy)
     # ----------------------
     if show_quadrant:
         st.markdown("## Regio quadrant (v2)")
 
-        # Build region-level SVI v2 for all regions (same period) using df_daily_store + capture not available for others.
-        # We'll approximate: capture neutral for others (as in v2), still useful for relative view.
         regs = sorted(merged["region"].dropna().unique().tolist())
         rows = []
 
-        # market proxy: region turnover index change over macro window (first vs last)
-        # We'll compute quickly if macro region_month exists; otherwise fallback to NaN.
-        # For all regions we don't have macro fetch, so we only show SVI axis as primary.
         for r in regs:
-            # region subset
             drr = df_daily_store[df_daily_store["region"] == r].copy()
             if drr.empty:
                 continue
 
-            # Build minimal capture_weekly placeholder
             dummy_capture = pd.DataFrame()
             out = build_region_svi_v2(
                 df_daily_store=df_daily_store,
@@ -1885,8 +1983,6 @@ else:
             )
             svi = out.get("region_svi", np.nan)
 
-            # Market proxy: use simple period turnover growth vs company (not true market) -> placeholder.
-            # We'll use turnover per visitor vs company: if above, mark "outperform".
             bench = out.get("benchmarks", {}).get("company", {})
             regb = out.get("benchmarks", {}).get("region", {})
             reg_spv = regb.get("sales_per_visitor", np.nan)
@@ -1907,8 +2003,7 @@ else:
             quad["x"] = pd.to_numeric(quad["svi_v2"], errors="coerce")
             quad["y"] = pd.to_numeric(quad["perf_vs_company_spv"], errors="coerce")
 
-            # y label explanation
-            st.caption("Y-as is een pragmatische proxy: SPV (sales/visitor) vs company benchmark (100 = gelijk). Macro ‘market-outperform’ per regio volgt later zodra macro window per regio automatisch wordt opgehaald.")
+            st.caption("Y-as is een pragmatische proxy: SPV (sales/visitor) vs company benchmark (100 = gelijk).")
 
             chart = (
                 alt.Chart(quad.dropna(subset=["x", "y"]))
@@ -1934,30 +2029,20 @@ else:
     # ----------------------
     # Debug
     # ----------------------
-    with st.expander("🔧 Debug (v2)"):
+    with st.expander("🔧 Debug (v2 + drilldown)"):
         st.write("Retailer:", selected_client)
         st.write("Regio:", region_choice)
         st.write("Periode:", start_period, "→", end_period, f"({period_choice})")
         st.write("Macro year:", macro_year)
-        st.write("Compare all regions toggle:", compare_all_regions)
-        st.write("Fetch ids used:", len(fetch_ids), "(we fetch ALL for benchmark correctness)")
         st.write("Store key col:", store_key_col)
         st.write("All shops:", len(all_shop_ids), "Region shops:", len(region_shop_ids))
         st.write("REPORT_URL:", REPORT_URL)
         st.write("Params used:", params_preview)
-
         st.write("Merged columns:", merged.columns.tolist())
-        st.write("Detected base sqm column:", sqm_col)
-        st.write("sqm_effective non-null:", int(pd.to_numeric(merged["sqm_effective"], errors="coerce").notna().sum()) if "sqm_effective" in merged.columns else 0)
-
         st.write("df_norm columns:", df_norm.columns.tolist())
-        st.write("df_norm head:", df_norm.head())
         st.write("df_daily_store head:", df_daily_store.head())
-        st.write("df_region_daily head:", df_region_daily.head())
-
         st.subheader("SVI v2 components (raw)")
         st.dataframe(comp_df)
-
         st.subheader("Opportunities v2 (raw)")
         st.dataframe(opp_v2.head(20))
 
