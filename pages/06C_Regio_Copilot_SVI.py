@@ -1352,6 +1352,225 @@ def main():
         st.markdown("</div>", unsafe_allow_html=True)
 
     # ----------------------
+# STORE DRILLDOWN (v1) — within selected region
+# ----------------------
+st.markdown("## Store drilldown (pilot)")
+
+# Build store list for this region (human labels)
+stores_in_region = (
+    merged[merged["region"] == region_choice][["id", "store_display"]]
+    .dropna(subset=["id"])
+    .drop_duplicates()
+    .sort_values("store_display")
+)
+
+if stores_in_region.empty:
+    st.info("Geen winkels gevonden voor deze regio.")
+else:
+    c_sd1, c_sd2, c_sd3 = st.columns([1.6, 1.0, 1.4])
+    with c_sd1:
+        store_pick = st.selectbox(
+            "Kies winkel",
+            stores_in_region.apply(lambda r: f"{int(r['id'])} — {r['store_display']}", axis=1).tolist(),
+        )
+    with c_sd2:
+        show_store_compare = st.toggle("Toon benchmark (regio & company)", value=True)
+    with c_sd3:
+        st.caption("Tip: drilldown gebruikt dezelfde periode als boven.")
+
+    store_id = int(store_pick.split("—")[0].strip())
+
+    # Store data (same period window as region)
+    d_store = df_daily_store[df_daily_store["id"] == store_id].copy()
+    d_store["date"] = pd.to_datetime(d_store["date"], errors="coerce")
+    d_store = d_store.dropna(subset=["date"])
+    d_store = d_store[(d_store["date"] >= pd.Timestamp(start_period)) & (d_store["date"] <= pd.Timestamp(end_period))].copy()
+
+    if d_store.empty:
+        st.warning("Geen store-data voor deze periode.")
+    else:
+        # Robust coercion for optional KPIs
+        for c in [
+            "footfall", "turnover", "transactions",
+            "conversion_rate", "avg_basket_size",
+            "sales_per_visitor", "sales_per_transaction",
+            "sales_per_sqm",
+        ]:
+            if c in d_store.columns:
+                d_store[c] = pd.to_numeric(d_store[c], errors="coerce")
+
+        # Ensure derived KPIs (if missing or partly missing)
+        if "sales_per_visitor" not in d_store.columns and {"turnover", "footfall"}.issubset(d_store.columns):
+            d_store["sales_per_visitor"] = np.where(d_store["footfall"] > 0, d_store["turnover"] / d_store["footfall"], np.nan)
+
+        if "transactions" in d_store.columns and "conversion_rate" not in d_store.columns and "footfall" in d_store.columns:
+            d_store["conversion_rate"] = np.where(d_store["footfall"] > 0, d_store["transactions"] / d_store["footfall"] * 100.0, np.nan)
+
+        if "avg_basket_size" not in d_store.columns and {"turnover", "transactions"}.issubset(d_store.columns):
+            d_store["avg_basket_size"] = np.where(d_store["transactions"] > 0, d_store["turnover"] / d_store["transactions"], np.nan)
+
+        if "sales_per_transaction" not in d_store.columns and "avg_basket_size" in d_store.columns:
+            d_store["sales_per_transaction"] = d_store["avg_basket_size"]
+
+        # sales_per_sqm only if sqm_effective exists
+        sqm_eff = (
+            merged.loc[merged["id"] == store_id, "sqm_effective"].astype(float).dropna()
+            if "sqm_effective" in merged.columns else pd.Series(dtype=float)
+        )
+        sqm_val = float(sqm_eff.iloc[0]) if len(sqm_eff) else np.nan
+        if "sales_per_sqm" not in d_store.columns and pd.notna(sqm_val) and "turnover" in d_store.columns:
+            d_store["sales_per_sqm"] = np.where(sqm_val > 0, d_store["turnover"] / sqm_val, np.nan)
+
+        # Aggregates (period)
+        store_foot = float(d_store["footfall"].sum()) if "footfall" in d_store.columns else np.nan
+        store_turn = float(d_store["turnover"].sum()) if "turnover" in d_store.columns else np.nan
+        store_tx   = float(d_store["transactions"].sum()) if "transactions" in d_store.columns else np.nan
+
+        store_conv = np.nan
+        if pd.notna(store_tx) and pd.notna(store_foot) and store_foot > 0:
+            store_conv = (store_tx / store_foot) * 100.0
+
+        store_atv = np.nan
+        if pd.notna(store_turn) and pd.notna(store_tx) and store_tx > 0:
+            store_atv = store_turn / store_tx
+
+        store_spv = np.nan
+        if pd.notna(store_turn) and pd.notna(store_foot) and store_foot > 0:
+            store_spv = store_turn / store_foot
+
+        store_spsqm = np.nan
+        if pd.notna(store_turn) and pd.notna(sqm_val) and sqm_val > 0:
+            store_spsqm = store_turn / sqm_val
+
+        # Benchmarks (optional)
+        if show_store_compare:
+            d_region = df_region_daily.copy()
+            d_company = df_daily_store.copy()
+
+            # region aggregates
+            r_foot = float(d_region["footfall"].sum()) if "footfall" in d_region.columns else np.nan
+            r_turn = float(d_region["turnover"].sum()) if "turnover" in d_region.columns else np.nan
+            r_tx   = float(d_region["transactions"].sum()) if "transactions" in d_region.columns else np.nan
+
+            r_conv = (r_tx / r_foot * 100.0) if pd.notna(r_tx) and pd.notna(r_foot) and r_foot > 0 else np.nan
+            r_atv  = (r_turn / r_tx) if pd.notna(r_turn) and pd.notna(r_tx) and r_tx > 0 else np.nan
+            r_spv  = (r_turn / r_foot) if pd.notna(r_turn) and pd.notna(r_foot) and r_foot > 0 else np.nan
+
+            # company aggregates (same period)
+            d_company["date"] = pd.to_datetime(d_company["date"], errors="coerce")
+            d_company = d_company.dropna(subset=["date"])
+            d_company = d_company[(d_company["date"] >= pd.Timestamp(start_period)) & (d_company["date"] <= pd.Timestamp(end_period))].copy()
+
+            c_foot = float(d_company["footfall"].sum()) if "footfall" in d_company.columns else np.nan
+            c_turn = float(d_company["turnover"].sum()) if "turnover" in d_company.columns else np.nan
+            c_tx   = float(d_company["transactions"].sum()) if "transactions" in d_company.columns else np.nan
+
+            c_conv = (c_tx / c_foot * 100.0) if pd.notna(c_tx) and pd.notna(c_foot) and c_foot > 0 else np.nan
+            c_atv  = (c_turn / c_tx) if pd.notna(c_turn) and pd.notna(c_tx) and c_tx > 0 else np.nan
+            c_spv  = (c_turn / c_foot) if pd.notna(c_turn) and pd.notna(c_foot) and c_foot > 0 else np.nan
+        else:
+            r_conv = r_atv = r_spv = np.nan
+            c_conv = c_atv = c_spv = np.nan
+
+        # KPI cards row (store)
+        s1, s2, s3, s4, s5 = st.columns([1, 1, 1, 1, 1])
+        with s1:
+            kpi_card("Store Footfall", fmt_int(store_foot), "Winkel · periode")
+        with s2:
+            kpi_card("Store Omzet", fmt_eur(store_turn), "Winkel · periode")
+        with s3:
+            kpi_card("Conversion", (fmt_pct(store_conv) if not pd.isna(store_conv) else "-"), "Transacties / bezoekers")
+        with s4:
+            kpi_card("ATV", (fmt_eur_2(store_atv) if not pd.isna(store_atv) else "-"), "Omzet / transactie")
+        with s5:
+            kpi_card("Sales / m²", (fmt_eur_2(store_spsqm) if not pd.isna(store_spsqm) else "-"), (f"sqm: {fmt_int(sqm_val)}" if pd.notna(sqm_val) else "sqm onbekend"))
+
+        # Trend chart: turnover + footfall + conversion (independent scales)
+        st.markdown('<div class="panel"><div class="panel-title">Store trend (dag) — omzet/footfall + conversie</div>', unsafe_allow_html=True)
+
+        plot_df = d_store[["date"]].copy()
+        for c in ["turnover", "footfall", "conversion_rate"]:
+            if c in d_store.columns:
+                plot_df[c] = d_store[c].values
+
+        # Fallback conversion_rate from store_conv daily if missing but transactions exists
+        if "conversion_rate" not in plot_df.columns and {"transactions", "footfall"}.issubset(d_store.columns):
+            plot_df["conversion_rate"] = np.where(d_store["footfall"] > 0, d_store["transactions"] / d_store["footfall"] * 100.0, np.nan)
+
+        lines = []
+        if "turnover" in plot_df.columns:
+            a = plot_df[["date", "turnover"]].rename(columns={"turnover": "value"})
+            a["series"] = "Omzet"
+            lines.append(a)
+        if "footfall" in plot_df.columns:
+            b = plot_df[["date", "footfall"]].rename(columns={"footfall": "value"})
+            b["series"] = "Footfall"
+            lines.append(b)
+
+        base_long = pd.concat(lines, ignore_index=True) if lines else pd.DataFrame()
+
+        bar_or_line = (
+            alt.Chart(base_long.dropna(subset=["date", "value"]))
+            .mark_line(point=False)
+            .encode(
+                x=alt.X("date:T", title=None, axis=alt.Axis(format="%d %b")),
+                y=alt.Y("value:Q", title="", axis=alt.Axis(format=",.0f")),
+                color=alt.Color(
+                    "series:N",
+                    scale=alt.Scale(domain=["Omzet", "Footfall"], range=[PFM_RED, PFM_PURPLE]),
+                    legend=alt.Legend(title=""),
+                ),
+                tooltip=[
+                    alt.Tooltip("date:T", title="Datum", format="%d %b %Y"),
+                    alt.Tooltip("series:N", title="Reeks"),
+                    alt.Tooltip("value:Q", title="Waarde", format=",.0f"),
+                ],
+            )
+        )
+
+        if "conversion_rate" in plot_df.columns:
+            conv_line = (
+                alt.Chart(plot_df.dropna(subset=["date", "conversion_rate"]))
+                .mark_line(point=True, strokeDash=[6, 4], color="#111111")  # zwart
+                .encode(
+                    x=alt.X("date:T", title=None),
+                    y=alt.Y("conversion_rate:Q", title="Conversie %"),
+                    tooltip=[
+                        alt.Tooltip("date:T", title="Datum", format="%d %b %Y"),
+                        alt.Tooltip("conversion_rate:Q", title="Conversie", format=".1f"),
+                    ],
+                )
+            )
+            st.altair_chart(
+                alt.layer(bar_or_line, conv_line).resolve_scale(y="independent").properties(height=260),
+                use_container_width=True,
+            )
+        else:
+            st.altair_chart(bar_or_line.properties(height=260), use_container_width=True)
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        # Benchmark mini-table (optional)
+        if show_store_compare:
+            st.markdown('<div class="panel"><div class="panel-title">Benchmark snapshot (zelfde periode)</div>', unsafe_allow_html=True)
+
+            bench = pd.DataFrame(
+                [
+                    ["Store", store_spv, store_conv, store_atv],
+                    ["Regio", r_spv, r_conv, r_atv],
+                    ["Company", c_spv, c_conv, c_atv],
+                ],
+                columns=["Level", "SPV", "Conversion", "ATV"],
+            )
+            bench["SPV"] = bench["SPV"].apply(lambda x: fmt_eur_2(x) if pd.notna(x) else "-")
+            bench["Conversion"] = bench["Conversion"].apply(lambda x: fmt_pct(x) if pd.notna(x) else "-")
+            bench["ATV"] = bench["ATV"].apply(lambda x: fmt_eur_2(x) if pd.notna(x) else "-")
+
+            st.dataframe(bench, use_container_width=True, hide_index=True)
+            st.caption("Benchmark is puur context: zelfde periode, geaggregeerd. Geen ‘target’ tenzij jij die toevoegt.")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+    # ----------------------
     # Macro context (CBS/CCI) with dual axis + legend + black macro lines
     # ----------------------
     if show_macro:
