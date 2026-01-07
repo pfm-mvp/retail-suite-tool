@@ -38,8 +38,7 @@ PFM_LINE = "#E5E7EB"
 PFM_GREEN = "#22C55E"
 PFM_AMBER = "#F59E0B"
 
-# Better visible “other regions” color (still on-brand)
-OTHER_REGION_PURPLE = "#C4B5FD"  # stronger than #D8B4FE
+OTHER_REGION_PURPLE = "#C4B5FD"
 BLACK = "#111111"
 
 # ----------------------
@@ -239,55 +238,67 @@ def get_locations_by_company(company_id: int) -> pd.DataFrame:
         return pd.DataFrame(data["locations"])
     return pd.DataFrame(data)
 
+# ----------------------
+# Pathzz weekly loader (STORE LEVEL)
+# File: data/pathzz_sample_weekly.csv
+# Columns: Region;Week;Visits;store_type;shop_id
+# Week like: "2023-12-31 To 2024-01-06"
+# ----------------------
 @st.cache_data(ttl=600)
-def fetch_region_street_traffic(region: str, start_date, end_date) -> pd.DataFrame:
-    """
-    Reads weekly street footfall per region (Pathzz sample).
-    Must contain columns: region ; week ; street_footfall
-    """
-    csv_path = "data/pathzz_sample_weekly.csv"
+def load_pathzz_weekly(csv_path: str = "data/pathzz_sample_weekly.csv") -> pd.DataFrame:
     try:
-        df = pd.read_csv(
-            csv_path,
-            sep=";",
-            header=0,
-            usecols=[0, 1, 2],
-            dtype=str,
-            engine="python",
-        )
+        df = pd.read_csv(csv_path, sep=";", dtype=str, engine="python")
     except Exception:
         return pd.DataFrame()
 
-    df.columns = ["region", "week", "street_footfall"]
-    df["region"] = df["region"].astype(str).str.strip()
-    region_norm = str(region).strip().lower()
-    df = df[df["region"].str.lower() == region_norm].copy()
-    if df.empty:
+    # Normalize columns (case-insensitive)
+    cols = {c.strip(): c for c in df.columns}
+    required = ["Region", "Week", "Visits", "shop_id"]
+    if not all(r in cols for r in required):
         return pd.DataFrame()
 
-    df["street_footfall"] = df["street_footfall"].astype(str).str.strip().replace("", np.nan)
-    df = df.dropna(subset=["street_footfall"])
+    out = pd.DataFrame({
+        "region": df[cols["Region"]].astype(str).str.strip(),
+        "week": df[cols["Week"]].astype(str).str.strip(),
+        "visits": df[cols["Visits"]].astype(str).str.strip(),
+        "shop_id": df[cols["shop_id"]].astype(str).str.strip(),
+    })
 
-    df["street_footfall"] = (
-        df["street_footfall"]
+    if "store_type" in cols:
+        out["store_type"] = df[cols["store_type"]].astype(str).str.strip()
+    else:
+        out["store_type"] = np.nan
+
+    out["shop_id"] = pd.to_numeric(out["shop_id"], errors="coerce").astype("Int64")
+
+    # parse visits (EU-style possible)
+    out["visits"] = (
+        out["visits"]
+        .replace("", np.nan)
+        .astype(str)
         .str.replace(".", "", regex=False)
         .str.replace(",", ".", regex=False)
-        .astype(float)
     )
+    out["visits"] = pd.to_numeric(out["visits"], errors="coerce")
 
     def _parse_week_start(s: str):
         if isinstance(s, str) and "To" in s:
             return pd.to_datetime(s.split("To")[0].strip(), errors="coerce")
         return pd.NaT
 
-    df["week_start"] = df["week"].apply(_parse_week_start)
-    df = df.dropna(subset=["week_start"])
+    out["week_start"] = out["week"].apply(_parse_week_start)
+    out = out.dropna(subset=["week_start", "shop_id", "visits"])
+    return out[["region", "shop_id", "store_type", "week_start", "visits"]].reset_index(drop=True)
 
+def filter_pathzz_for_period(df_pathzz: pd.DataFrame, start_date, end_date) -> pd.DataFrame:
+    if df_pathzz is None or df_pathzz.empty:
+        return pd.DataFrame()
     start = pd.to_datetime(start_date)
     end = pd.to_datetime(end_date)
-    df = df[(df["week_start"] >= start) & (df["week_start"] <= end)]
-
-    return df[["week_start", "street_footfall"]].reset_index(drop=True)
+    tmp = df_pathzz.copy()
+    tmp["week_start"] = pd.to_datetime(tmp["week_start"], errors="coerce")
+    tmp = tmp.dropna(subset=["week_start"])
+    return tmp[(tmp["week_start"] >= start) & (tmp["week_start"] <= end)].copy()
 
 # ----------------------
 # UI helpers
@@ -387,7 +398,7 @@ def collapse_to_daily_store(df: pd.DataFrame, store_key_col: str) -> pd.DataFram
 
     return out
 
-def aggregate_weekly_region(df_region_daily: pd.DataFrame) -> pd.DataFrame:
+def aggregate_weekly_region_from_store_daily(df_region_daily: pd.DataFrame) -> pd.DataFrame:
     if df_region_daily is None or df_region_daily.empty:
         return pd.DataFrame()
 
@@ -444,10 +455,6 @@ def enrich_merged_with_sqm_from_df_norm(merged: pd.DataFrame, df_norm: pd.DataFr
     return out
 
 def mark_closed_days_as_nan(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    If a day has footfall=0 AND turnover=0 AND transactions=0 -> treat as closed day.
-    We set turnover/footfall/transactions to NaN so line charts don't dive to 0.
-    """
     if df is None or df.empty:
         return df
     out = df.copy()
@@ -470,26 +477,10 @@ def mark_closed_days_as_nan(df: pd.DataFrame) -> pd.DataFrame:
 # Lever scan score mapping
 # ----------------------
 def ratio_to_score_0_100(ratio_pct: float, floor: float, cap: float) -> float:
-    """
-    ratio_pct: 100 = benchmark
-    floor/cap: e.g. 80..120 makes it more sensitive than 70..130
-    """
     if pd.isna(ratio_pct):
         return np.nan
     r = float(np.clip(ratio_pct, floor, cap))
     return (r - floor) / (cap - floor) * 100.0
-
-def nice_component_name(key: str) -> str:
-    mapping = {
-        "sales_per_sqm": "Sales / m² (€)",
-        "capture_rate": "Capture rate (%)",
-        "conversion_rate": "Conversie (%)",
-        "sales_per_visitor": "SPV (€ / visitor)",
-        "sales_per_transaction": "ATV (€)",
-        "footfall": "Footfall",
-        "turnover": "Omzet",
-    }
-    return mapping.get(key, key)
 
 # ----------------------
 # SVI: composite + explainable
@@ -497,18 +488,26 @@ def nice_component_name(key: str) -> str:
 SVI_DRIVERS = [
     ("sales_per_visitor", "SPV (€/visitor)"),
     ("sales_per_sqm", "Sales / m² (€)"),
-    ("capture_rate", "Capture rate (%)"),
-    ("conversion_rate", "Conversion (%)"),         # optional if transactions present
-    ("sales_per_transaction", "ATV (€)"),          # optional if transactions present
+    ("capture_rate", "Capture (location-driven) (%)"),
+    ("conversion_rate", "Conversion (%)"),
+    ("sales_per_transaction", "ATV (€)"),
 ]
 
+# Capture is important, but should not dominate
+SVI_WEIGHTS = {
+    "sales_per_visitor": 1.0,
+    "sales_per_sqm": 1.0,
+    "conversion_rate": 1.0,
+    "sales_per_transaction": 0.8,
+    "capture_rate": 0.4,   # 👈 lower weight
+}
+
 def compute_driver_values_from_period(footfall, turnover, transactions, sqm_sum, capture_pct):
-    # base drivers
     spv = safe_div(turnover, footfall)
     spsqm = safe_div(turnover, sqm_sum)
     cr = safe_div(transactions, footfall) * 100.0 if (pd.notna(transactions) and pd.notna(footfall) and float(footfall) != 0.0) else np.nan
     atv = safe_div(turnover, transactions)
-    cap = capture_pct  # already in %
+    cap = capture_pct
     return {
         "sales_per_visitor": spv,
         "sales_per_sqm": spsqm,
@@ -518,15 +517,8 @@ def compute_driver_values_from_period(footfall, turnover, transactions, sqm_sum,
     }
 
 def compute_svi_explainable(vals_a: dict, vals_b: dict, floor: float, cap: float, weights=None):
-    """
-    Returns:
-      svi_score_0_100
-      avg_ratio_pct
-      breakdown_df with per driver: label, value_a, value_b, ratio_pct, score_0_100, weight
-    """
     if weights is None:
-        # equal weights across available drivers
-        weights = {k: 1.0 for k, _ in SVI_DRIVERS}
+        weights = {k: float(SVI_WEIGHTS.get(k, 1.0)) for k, _ in SVI_DRIVERS}
 
     rows = []
     for key, label in SVI_DRIVERS:
@@ -540,7 +532,6 @@ def compute_svi_explainable(vals_a: dict, vals_b: dict, floor: float, cap: float
         score = ratio_to_score_0_100(ratio, floor=float(floor), cap=float(cap))
         w = float(weights.get(key, 1.0))
 
-        # only include if ratio is valid
         include = pd.notna(ratio) and pd.notna(score)
         rows.append({
             "driver_key": key,
@@ -554,30 +545,21 @@ def compute_svi_explainable(vals_a: dict, vals_b: dict, floor: float, cap: float
         })
 
     bd = pd.DataFrame(rows)
-
     usable = bd[bd["include"]].copy()
     if usable.empty:
         return np.nan, np.nan, bd.drop(columns=["include"])
 
-    # Weighted average in ratio-space (more interpretable), then map to score
     usable["w"] = usable["weight"].astype(float)
     wsum = float(usable["w"].sum()) if float(usable["w"].sum()) > 0 else float(len(usable))
     avg_ratio = float((usable["ratio_pct"] * usable["w"]).sum() / wsum)
-
     svi = ratio_to_score_0_100(avg_ratio, floor=float(floor), cap=float(cap))
-
     return float(svi), float(avg_ratio), bd.drop(columns=["include"])
 
 def style_heatmap_ratio(val):
-    """
-    val = ratio % vs benchmark (100 = equal)
-    green when >110, amber around 90-110, red when <90
-    """
     try:
         if pd.isna(val):
             return ""
         v = float(val)
-        # soft thresholds
         if v >= 110:
             return "background-color: #ecfdf5; color:#065f46; font-weight:800;"
         if v >= 95:
@@ -590,7 +572,7 @@ def style_heatmap_ratio(val):
 # MAIN
 # ----------------------
 def main():
-    # ---------- Session state to prevent "Analyseer" wipe on drilldown ----------
+    # Session state to prevent wipe on drilldown
     if "rcp_last_key" not in st.session_state:
         st.session_state.rcp_last_key = None
     if "rcp_payload" not in st.session_state:
@@ -704,7 +686,6 @@ def main():
 
         all_shop_ids = merged["id"].dropna().astype(int).unique().tolist()
 
-        # NOTE: transactions included (needed for CR & ATV)
         metric_map = {
             "count_in": "footfall",
             "turnover": "turnover",
@@ -759,7 +740,6 @@ def main():
                 return
 
         df_norm = normalize_vemcount_response(resp, kpi_keys=metric_map.keys()).rename(columns=metric_map)
-
         if df_norm is None or df_norm.empty:
             st.warning("Geen data ontvangen voor de gekozen selectie.")
             return
@@ -818,9 +798,7 @@ def main():
         df_daily_store["sales_per_sqm"] = pd.to_numeric(df_daily_store["sales_per_sqm"], errors="coerce")
         df_daily_store["sales_per_sqm"] = df_daily_store["sales_per_sqm"].combine_first(pd.Series(calc_spm2, index=df_daily_store.index))
 
-        # Smooth closed days to NaN for nicer trends
         df_daily_store = mark_closed_days_as_nan(df_daily_store)
-
         df_region_daily = df_daily_store[df_daily_store["region"] == region_choice].copy()
 
         # -------- cache payload --------
@@ -851,9 +829,6 @@ def main():
         st.warning("Geen data voor geselecteerde regio binnen de periode.")
         return
 
-    # ----------------------
-    # Header + Region totals
-    # ----------------------
     st.markdown(f"## {selected_client['brand']} — Regio **{region_choice}** · {start_period} → {end_period}")
 
     foot_total = float(pd.to_numeric(df_region_daily["footfall"], errors="coerce").dropna().sum()) if "footfall" in df_region_daily.columns else 0.0
@@ -865,87 +840,103 @@ def main():
     atv = (turn_total / trans_total) if trans_total > 0 else np.nan
 
     # ----------------------
-    # Capture weekly chart data (region) + avg capture
+    # Pathzz store-level capture:
+    # - Weekly store footfall (Vemcount) matched to weekly visits (Pathzz) per shop_id
+    # - Region capture is aggregate over stores (sum footfall / sum visits)
     # ----------------------
-    region_weekly = aggregate_weekly_region(df_region_daily)
-    pathzz_weekly = fetch_region_street_traffic(region=region_choice, start_date=start_period, end_date=end_period)
+    pathzz_all = load_pathzz_weekly("data/pathzz_sample_weekly.csv")
+    pathzz_period = filter_pathzz_for_period(pathzz_all, start_period, end_period)
 
-    capture_weekly = pd.DataFrame()
-    avg_capture = np.nan
+    # restrict to selected region (Pathzz region column)
+    pathzz_region = pathzz_period[pathzz_period["region"].astype(str).str.strip().str.lower() == str(region_choice).strip().lower()].copy()
 
-    if not region_weekly.empty and not pathzz_weekly.empty:
-        region_weekly = region_weekly.copy()
-        region_weekly["week_start"] = pd.to_datetime(region_weekly["week_start"], errors="coerce")
-        region_weekly = region_weekly.dropna(subset=["week_start"])
-        region_weekly = region_weekly.groupby("week_start", as_index=False).agg(
-            footfall=("footfall", "sum"),
-            turnover=("turnover", "sum") if "turnover" in region_weekly.columns else ("footfall", "sum"),
-            transactions=("transactions", "sum") if "transactions" in region_weekly.columns else ("footfall", "sum"),
-        )
+    # Vemcount weekly footfall per store (in region)
+    dd_region = df_region_daily.copy()
+    dd_region["date"] = pd.to_datetime(dd_region["date"], errors="coerce")
+    dd_region = dd_region.dropna(subset=["date"])
+    dd_region["week_start"] = dd_region["date"].dt.to_period("W-SAT").dt.start_time
 
-        pathzz_weekly = pathzz_weekly.copy()
-        pathzz_weekly["week_start"] = pd.to_datetime(pathzz_weekly["week_start"], errors="coerce")
-        pathzz_weekly = pathzz_weekly.dropna(subset=["week_start"])
-        pathzz_weekly = pathzz_weekly.groupby("week_start", as_index=False).agg(street_footfall=("street_footfall", "mean"))
+    store_week = (
+        dd_region.groupby(["id", "week_start"], as_index=False)
+        .agg(footfall=("footfall", "sum"), turnover=("turnover", "sum"), transactions=("transactions", "sum"))
+    )
 
-        capture_weekly = pd.merge(region_weekly, pathzz_weekly, on="week_start", how="inner")
+    # Pathzz weekly visits per store
+    pathzz_store_week = (
+        pathzz_region.groupby(["shop_id", "week_start"], as_index=False)
+        .agg(visits=("visits", "sum"))
+    )
+    pathzz_store_week = pathzz_store_week.rename(columns={"shop_id": "id"})
 
-    if not capture_weekly.empty:
-        capture_weekly["capture_rate"] = np.where(
-            capture_weekly["street_footfall"] > 0,
-            capture_weekly["footfall"] / capture_weekly["street_footfall"] * 100.0,
+    # Merge and compute capture per store-week
+    capture_store_week = store_week.merge(pathzz_store_week, on=["id", "week_start"], how="inner")
+    if not capture_store_week.empty:
+        capture_store_week["capture_rate"] = np.where(
+            capture_store_week["visits"] > 0,
+            capture_store_week["footfall"] / capture_store_week["visits"] * 100.0,
             np.nan,
         )
-        avg_capture = float(pd.to_numeric(capture_weekly["capture_rate"], errors="coerce").dropna().mean())
+
+    # Region weekly: sum footfall & sum visits across stores, then capture
+    region_weekly = (
+        capture_store_week.groupby("week_start", as_index=False)
+        .agg(footfall=("footfall", "sum"), visits=("visits", "sum"), turnover=("turnover", "sum"))
+        if not capture_store_week.empty else pd.DataFrame()
+    )
+    if not region_weekly.empty:
+        region_weekly["capture_rate"] = np.where(region_weekly["visits"] > 0, region_weekly["footfall"] / region_weekly["visits"] * 100.0, np.nan)
+
+    # Region avg capture across full period (weighted): sum footfall / sum visits
+    avg_capture = np.nan
+    if not capture_store_week.empty:
+        total_visits = float(pd.to_numeric(capture_store_week["visits"], errors="coerce").dropna().sum())
+        total_ff = float(pd.to_numeric(capture_store_week["footfall"], errors="coerce").dropna().sum())
+        avg_capture = (total_ff / total_visits * 100.0) if total_visits > 0 else np.nan
+
+    # Store capture for full period (weighted): sum footfall / sum visits per store
+    store_capture = {}
+    if not capture_store_week.empty:
+        tmp = capture_store_week.copy()
+        tmp["footfall"] = pd.to_numeric(tmp["footfall"], errors="coerce")
+        tmp["visits"] = pd.to_numeric(tmp["visits"], errors="coerce")
+        store_agg = tmp.groupby("id", as_index=False).agg(footfall=("footfall", "sum"), visits=("visits", "sum"))
+        store_agg["capture_rate"] = np.where(store_agg["visits"] > 0, store_agg["footfall"] / store_agg["visits"] * 100.0, np.nan)
+        for _, r in store_agg.iterrows():
+            store_capture[int(r["id"])] = float(r["capture_rate"]) if pd.notna(r["capture_rate"]) else np.nan
 
     # ----------------------
-    # Company baseline (period totals)
+    # Company baseline totals
     # ----------------------
     def agg_period(df_: pd.DataFrame) -> dict:
         foot = float(pd.to_numeric(df_.get("footfall", 0), errors="coerce").dropna().sum())
         turn = float(pd.to_numeric(df_.get("turnover", 0), errors="coerce").dropna().sum())
         trans = float(pd.to_numeric(df_.get("transactions", 0), errors="coerce").dropna().sum())
-
-        # sqm sum: unique stores (avoid daily duplicates)
         sqm = pd.to_numeric(df_.get("sqm_effective", np.nan), errors="coerce")
         sqm_sum = float(sqm.dropna().drop_duplicates().sum()) if sqm.notna().any() else np.nan
-
-        return {
-            "footfall": foot,
-            "turnover": turn,
-            "transactions": trans,
-            "sqm_sum": sqm_sum,
-        }
+        return {"footfall": foot, "turnover": turn, "transactions": trans, "sqm_sum": sqm_sum}
 
     reg_tot = agg_period(df_region_daily)
     comp_tot = agg_period(df_daily_store)
 
-    # SVI driver values (region vs company)
     reg_vals = compute_driver_values_from_period(
         footfall=reg_tot["footfall"],
         turnover=reg_tot["turnover"],
         transactions=reg_tot["transactions"],
         sqm_sum=reg_tot["sqm_sum"],
-        capture_pct=avg_capture,  # already %
+        capture_pct=avg_capture,
     )
-
     comp_vals = compute_driver_values_from_period(
         footfall=comp_tot["footfall"],
         turnover=comp_tot["turnover"],
         transactions=comp_tot["transactions"],
         sqm_sum=comp_tot["sqm_sum"],
-        capture_pct=np.nan,  # company capture not available without company street traffic
+        capture_pct=np.nan,
     )
-
-    # For capture benchmark we use region capture vs itself (neutral) unless you later add company street traffic.
-    # That means capture driver won’t distort region-vs-company SVI; but it remains visible in breakdown & heatmap vs region benchmark.
-    # (This is deliberate: better honest than fake precision.)
+    # Company capture isn't available; keep it neutral for region-vs-company SVI (honest)
     if pd.isna(comp_vals.get("capture_rate", np.nan)):
         comp_vals["capture_rate"] = reg_vals.get("capture_rate", np.nan)
 
-    # ----------------------
-    # KPI cards row
-    # ----------------------
+    # KPI cards
     k1, k2, k3, k4, k5 = st.columns([1, 1, 1, 1, 1])
     with k1:
         kpi_card("Footfall", fmt_int(foot_total), "Regio · periode")
@@ -956,22 +947,22 @@ def main():
     with k4:
         kpi_card("ATV", fmt_eur_2(atv), "Omzet / transactie")
     with k5:
-        kpi_card("Capture", fmt_pct(avg_capture), "Regio totaal (Pathzz)")
+        kpi_card("Capture", fmt_pct(avg_capture), "Store-level Pathzz visits (weighted)")
 
     st.markdown(
-        "<div class='muted'>Benchmark: Company = alle shops in company (zelfde periode). Regio = shops binnen gekozen regio. Capture is Pathzz-regio-weekniveau.</div>",
+        "<div class='muted'>Benchmark: Company = alle shops in company (zelfde periode). Capture komt uit Pathzz store-level visits (shop_id) gekoppeld aan Vemcount weekly footfall.</div>",
         unsafe_allow_html=True,
     )
 
     # ======================
-    # 1) Explainable SVI (composite + breakdown)
+    # 1) Explainable SVI (region vs company)
     # ======================
     region_svi, region_avg_ratio, region_bd = compute_svi_explainable(
         vals_a=reg_vals,
         vals_b=comp_vals,
         floor=float(lever_floor),
         cap=float(lever_cap),
-        weights=None
+        weights=SVI_WEIGHTS
     )
     status_txt, status_color = status_from_score(region_svi if pd.notna(region_svi) else 0)
 
@@ -988,17 +979,16 @@ def main():
               </div>
               <div class="muted" style="margin-top:0.35rem">
                 Status: <span style="font-weight:900;color:{status_color}">{status_txt}</span><br/>
-                Gemiddelde ratio vs company (drivers) ≈ <b>{"" if pd.isna(region_avg_ratio) else f"{region_avg_ratio:.0f}%"} </b>
-                <span class="hint"> (ratio wordt geclipt {lever_floor}–{lever_cap}% → 0–100)</span>
+                Gemiddelde ratio vs company (drivers, gewogen) ≈ <b>{"" if pd.isna(region_avg_ratio) else f"{region_avg_ratio:.0f}%"} </b>
+                <span class="hint">(ratio wordt geclipt {lever_floor}–{lever_cap}% → 0–100)</span>
               </div>
             </div>
             """,
             unsafe_allow_html=True
         )
 
-    # Breakdown: compact bar chart + table
+    # Breakdown
     st.markdown('<div class="panel"><div class="panel-title">SVI breakdown — drivers</div>', unsafe_allow_html=True)
-
     bd = region_bd.copy()
     bd["ratio_pct"] = pd.to_numeric(bd["ratio_pct"], errors="coerce")
     bd["score"] = pd.to_numeric(bd["score"], errors="coerce")
@@ -1007,7 +997,6 @@ def main():
     if bd.empty:
         st.info("Nog onvoldoende data om drivers te berekenen (check footfall/omzet/sqm/transactions).")
     else:
-        # bar: driver score
         bar = (
             alt.Chart(bd)
             .mark_bar(cornerRadiusEnd=4, color=PFM_PURPLE)
@@ -1018,46 +1007,38 @@ def main():
                     alt.Tooltip("driver:N", title="Driver"),
                     alt.Tooltip("ratio_pct:Q", title="Ratio vs benchmark (%)", format=".1f"),
                     alt.Tooltip("score:Q", title="Score", format=".0f"),
+                    alt.Tooltip("weight:Q", title="Weight", format=".2f"),
                 ],
             )
             .properties(height=220)
         )
         st.altair_chart(bar, use_container_width=True)
 
-        # table
-        bd_tbl = bd.copy()
-        bd_tbl["value"] = bd_tbl["value"].apply(lambda x: fmt_eur_2(x) if pd.notna(x) and x < 100000 else (fmt_pct(x) if "rate" in str(bd_tbl.loc[bd_tbl["value"] == x, "driver_key"].values[:1]) else fmt_eur_2(x)))
-        # safer formatting explicitly:
-        def _fmt_driver_row(r):
-            key = r["driver_key"]
+        def _fmt_val(key, x):
             if key in ("conversion_rate", "capture_rate"):
-                return fmt_pct(r["value"])
-            return fmt_eur_2(r["value"])
-        def _fmt_bench_row(r):
-            key = r["driver_key"]
-            if key in ("conversion_rate", "capture_rate"):
-                return fmt_pct(r["benchmark"])
-            return fmt_eur_2(r["benchmark"])
+                return fmt_pct(x)
+            return fmt_eur_2(x)
 
         bd_show = bd.copy()
-        bd_show["Regio"] = bd_show.apply(_fmt_driver_row, axis=1)
-        bd_show["Company"] = bd_show.apply(_fmt_bench_row, axis=1)
+        bd_show["Regio"] = bd_show.apply(lambda r: _fmt_val(r["driver_key"], r["value"]), axis=1)
+        bd_show["Company"] = bd_show.apply(lambda r: _fmt_val(r["driver_key"], r["benchmark"]), axis=1)
         bd_show["Ratio vs company"] = bd_show["ratio_pct"].apply(lambda x: "-" if pd.isna(x) else f"{x:.0f}%")
         bd_show["Score"] = bd_show["score"].apply(lambda x: "-" if pd.isna(x) else f"{x:.0f}")
-        bd_show = bd_show[["driver", "Regio", "Company", "Ratio vs company", "Score"]].rename(columns={"driver": "Driver"})
+        bd_show["Weight"] = bd_show["weight"].apply(lambda x: "-" if pd.isna(x) else f"{x:.2f}")
+        bd_show = bd_show[["driver", "Regio", "Company", "Ratio vs company", "Score", "Weight"]].rename(columns={"driver": "Driver"})
         st.dataframe(bd_show, use_container_width=True, hide_index=True)
 
     st.markdown("</div>", unsafe_allow_html=True)
 
     # ======================
-    # Weekly trend — Store vs Street + Capture (week labels)
+    # Weekly trend — Store vs Pathzz visits + Capture
     # ======================
-    st.markdown('<div class="panel"><div class="panel-title">Weekly trend — Store vs Street + Capture</div>', unsafe_allow_html=True)
+    st.markdown('<div class="panel"><div class="panel-title">Weekly trend — Store footfall vs Pathzz visits + Capture</div>', unsafe_allow_html=True)
 
-    if capture_weekly.empty:
-        st.info("Geen matchende Pathzz-weekdata gevonden voor deze regio/periode.")
+    if region_weekly is None or region_weekly.empty:
+        st.info("Geen matchende Pathzz-storeweekdata gevonden voor deze regio/periode.")
     else:
-        chart_df = capture_weekly[["week_start", "footfall", "street_footfall", "turnover", "capture_rate"]].copy()
+        chart_df = region_weekly[["week_start", "footfall", "visits", "turnover", "capture_rate"]].copy()
         chart_df = chart_df.sort_values("week_start")
 
         iso = chart_df["week_start"].dt.isocalendar()
@@ -1066,7 +1047,7 @@ def main():
 
         long = chart_df.melt(
             id_vars=["week_label"],
-            value_vars=["footfall", "street_footfall", "turnover"],
+            value_vars=["footfall", "visits", "turnover"],
             var_name="metric",
             value_name="value",
         )
@@ -1081,7 +1062,7 @@ def main():
                 color=alt.Color(
                     "metric:N",
                     scale=alt.Scale(
-                        domain=["footfall", "street_footfall", "turnover"],
+                        domain=["footfall", "visits", "turnover"],
                         range=[PFM_PURPLE, PFM_LINE, PFM_RED],
                     ),
                     legend=alt.Legend(title=""),
@@ -1115,12 +1096,11 @@ def main():
     st.markdown("</div>", unsafe_allow_html=True)
 
     # ======================
-    # 2) Heatmap table (scanning-machine)
+    # 2) Heatmap table (stores vs region benchmark)
     # ======================
     st.markdown("## Heatmap — stores vs benchmark (scanning-machine)")
 
     reg_store_daily = df_daily_store[df_daily_store["region"] == region_choice].copy()
-
     agg = reg_store_daily.groupby(["id", "store_display"], as_index=False).agg(
         turnover=("turnover", "sum"),
         footfall=("footfall", "sum"),
@@ -1136,37 +1116,18 @@ def main():
     agg = agg.merge(sqm_map, on="id", how="left")
     agg["sales_per_sqm"] = np.where((agg["sqm_effective"] > 0) & pd.notna(agg["sqm_effective"]), agg["turnover"] / agg["sqm_effective"], np.nan)
 
-    # Store capture proxy: store weekly footfall / region street weekly (then average)
-    store_capture_proxy = {}
-    if not capture_weekly.empty:
-        cw = capture_weekly[["week_start", "street_footfall"]].copy()
-        cw["week_start"] = pd.to_datetime(cw["week_start"], errors="coerce")
-        cw = cw.dropna(subset=["week_start"])
+    # store capture from Pathzz (weighted across period)
+    agg["capture_rate"] = agg["id"].apply(lambda x: store_capture.get(int(x), np.nan) if pd.notna(x) else np.nan)
 
-        dd = reg_store_daily.copy()
-        dd["date"] = pd.to_datetime(dd["date"], errors="coerce")
-        dd = dd.dropna(subset=["date"])
-        dd["week_start"] = dd["date"].dt.to_period("W-SAT").dt.start_time
-
-        sw = dd.groupby(["id", "week_start"], as_index=False).agg(footfall=("footfall", "sum"))
-        sw = sw.merge(cw, on="week_start", how="inner")
-        sw["cap_proxy"] = np.where(sw["street_footfall"] > 0, sw["footfall"] / sw["street_footfall"] * 100.0, np.nan)
-
-        for sid, g in sw.groupby("id"):
-            store_capture_proxy[int(sid)] = float(pd.to_numeric(g["cap_proxy"], errors="coerce").dropna().mean())
-
-    agg["capture_rate"] = agg["id"].apply(lambda x: store_capture_proxy.get(int(x), np.nan) if pd.notna(x) else np.nan)
-
-    # Benchmark for heatmap = REGIO baseline (more operationally useful)
+    # Benchmark for heatmap = REGION baseline
     reg_bench = compute_driver_values_from_period(
         footfall=reg_tot["footfall"],
         turnover=reg_tot["turnover"],
         transactions=reg_tot["transactions"],
         sqm_sum=reg_tot["sqm_sum"],
-        capture_pct=avg_capture,  # region capture
+        capture_pct=avg_capture,
     )
 
-    # Store SVI (vs region benchmark) + indices per driver
     def store_driver_vals(row):
         return compute_driver_values_from_period(
             footfall=row["footfall"],
@@ -1176,100 +1137,84 @@ def main():
             capture_pct=row["capture_rate"],
         )
 
-    # driver ratios & store svi
-    weights = {
-        "sales_per_visitor": 1.0,
-        "sales_per_sqm": 1.0,
-        "capture_rate": 1.0,
-        "conversion_rate": 1.0,
-        "sales_per_transaction": 1.0,
-    }
-
     svi_list = []
     ratios_map = {k: [] for k, _ in SVI_DRIVERS}
     for _, r in agg.iterrows():
         vals = store_driver_vals(r)
-        svi, avg_ratio, bd = compute_svi_explainable(vals, reg_bench, float(lever_floor), float(lever_cap), weights=weights)
+        svi, avg_ratio, bd_store = compute_svi_explainable(vals, reg_bench, float(lever_floor), float(lever_cap), weights=SVI_WEIGHTS)
         svi_list.append(svi)
 
-        # collect ratios per driver for heatmap columns
-        bd = bd.copy()
+        bd_store = bd_store.copy()
         for dk, _ in SVI_DRIVERS:
-            rr = bd.loc[bd["driver_key"] == dk, "ratio_pct"]
+            rr = bd_store.loc[bd_store["driver_key"] == dk, "ratio_pct"]
             ratios_map[dk].append(float(rr.iloc[0]) if (not rr.empty and pd.notna(rr.iloc[0])) else np.nan)
 
     agg["SVI"] = svi_list
     for dk, _ in SVI_DRIVERS:
         agg[f"{dk}_idx"] = ratios_map[dk]
 
-    # Heatmap table view
-    heat = agg.copy()
-    # Keep it “scanable”
-    heat["SVI"] = pd.to_numeric(heat["SVI"], errors="coerce")
-
-    # Optional upside column (computed below, but also handy to sort)
-    heat["upside_period_eur"] = np.nan
-    heat["upside_driver"] = ""
-
     # ======================
-    # 3) Value Upside (scenario) — period + annualized + driver label
+    # 3) Value Upside (scenario) — ACTIONABLE drivers only
+    # Capture is EXCLUDED on purpose (important but hard to influence quickly)
     # ======================
     days_in_period = max(1, (pd.to_datetime(end_period) - pd.to_datetime(start_period)).days + 1)
 
-    # driver gaps vs region benchmark
     def calc_upside_for_store(row):
         """
         Returns (upside_period_eur, driver_label)
-        Conservative: lift weakest driver to benchmark, estimate incremental turnover.
+
+        Conservative, actionable:
+          - Low SPV: lift SPV to benchmark, footfall constant
+          - Low Sales/m²: lift Sales/m² to benchmark, sqm constant
+          - Low Conversion: lift conversion to benchmark, footfall constant, turnover via ATV
+        Capture is explicitly excluded as main opportunity driver.
         """
         foot = row["footfall"]
         turn = row["turnover"]
         sqm = row["sqm_effective"]
         trans = row["transactions"]
 
-        # store driver values
         spv_s = safe_div(turn, foot)
         spsqm_s = safe_div(turn, sqm)
-        cap_s = row.get("capture_rate", np.nan)
+        cr_s = safe_div(trans, foot) * 100.0 if (pd.notna(trans) and pd.notna(foot) and float(foot) != 0.0) else np.nan
+        atv_s = safe_div(turn, trans)
 
-        # benchmark values (region)
         spv_b = reg_bench.get("sales_per_visitor", np.nan)
         spsqm_b = reg_bench.get("sales_per_sqm", np.nan)
-        cap_b = reg_bench.get("capture_rate", np.nan)
+        cr_b = reg_bench.get("conversion_rate", np.nan)
+        atv_b = reg_bench.get("sales_per_transaction", np.nan)
 
-        # compute candidate upsides (turnover)
+        # pick an ATV to monetize conversion uplift
+        atv_use = atv_s if pd.notna(atv_s) else atv_b
+
         candidates = []
 
-        # 1) SPV upside (footfall held constant)
+        # 1) SPV
         if pd.notna(foot) and foot > 0 and pd.notna(spv_s) and pd.notna(spv_b) and spv_s < spv_b:
             candidates.append(("Low SPV", float(foot) * float(spv_b - spv_s)))
 
-        # 2) Sales/m² upside (sqm held constant)
+        # 2) Sales/m²
         if pd.notna(sqm) and sqm > 0 and pd.notna(spsqm_s) and pd.notna(spsqm_b) and spsqm_s < spsqm_b:
             candidates.append(("Low Sales / m²", float(sqm) * float(spsqm_b - spsqm_s)))
 
-        # 3) Capture upside (street traffic fixed, lift capture to benchmark → more footfall → more turnover via store SPV)
-        # proxy: if cap_s < cap_b then extra footfall = foot * (cap_b/cap_s - 1)
-        if pd.notna(cap_s) and pd.notna(cap_b) and cap_s > 0 and cap_s < cap_b and pd.notna(spv_s):
-            extra_foot = float(foot) * (float(cap_b) / float(cap_s) - 1.0)
-            candidates.append(("Low Capture", max(0.0, extra_foot) * float(spv_s)))
+        # 3) Conversion (actionable)
+        if pd.notna(foot) and foot > 0 and pd.notna(cr_s) and pd.notna(cr_b) and cr_s < cr_b and pd.notna(atv_use):
+            extra_trans = float(foot) * (float(cr_b - cr_s) / 100.0)
+            candidates.append(("Low Conversion", max(0.0, extra_trans) * float(atv_use)))
 
         if not candidates:
             return np.nan, ""
 
-        # pick biggest
         best = sorted(candidates, key=lambda x: x[1], reverse=True)[0]
         upside = float(best[1]) if best[1] > 0 else np.nan
         return upside, best[0]
 
+    heat = agg.copy()
     ups = heat.apply(calc_upside_for_store, axis=1, result_type="expand")
-    if isinstance(ups, pd.DataFrame) and ups.shape[1] >= 2:
-        heat["upside_period_eur"] = pd.to_numeric(ups.iloc[:, 0], errors="coerce")
-        heat["upside_driver"] = ups.iloc[:, 1].astype(str)
-
+    heat["upside_period_eur"] = pd.to_numeric(ups.iloc[:, 0], errors="coerce")
+    heat["upside_driver"] = ups.iloc[:, 1].astype(str)
     heat["upside_annual_eur"] = heat["upside_period_eur"] * (365.0 / float(days_in_period))
 
-    # Format ratios for heatmap display
     heat_show = heat[[
         "store_display",
         "SVI",
@@ -1299,42 +1244,30 @@ def main():
         "upside_driver": "Main driver",
     })
 
-    # Format base numeric columns (keep idx numeric for styling)
-    heat_show["SVI"] = pd.to_numeric(heat_show["SVI"], errors="coerce")
-    heat_show["Omzet"] = pd.to_numeric(heat_show["Omzet"], errors="coerce")
-    heat_show["Footfall"] = pd.to_numeric(heat_show["Footfall"], errors="coerce")
-    heat_show["Upside (periode)"] = pd.to_numeric(heat_show["Upside (periode)"], errors="coerce")
-    heat_show["Upside (annualized)"] = pd.to_numeric(heat_show["Upside (annualized)"], errors="coerce")
-
-    # Display: first a plain sortable table (fast), then optional styled “heatmap” view
     cA, cB = st.columns([2, 1])
     with cA:
         st.caption("Sort tip: klik op **SVI** (laag → hoog) of **Upside (annualized)** (hoog → laag) voor snelle focus.")
+        st.caption("Let op: **Capture** is zichtbaar in de heatmap, maar wordt bewust **niet** als ‘Main driver’ gebruikt voor upside.")
     with cB:
         show_heat_styling = st.toggle("Toon heatmap-kleuren", value=True)
 
     if not show_heat_styling:
         disp = heat_show.copy()
-        disp["SVI"] = disp["SVI"].apply(lambda x: "-" if pd.isna(x) else f"{x:.0f}")
-        disp["Omzet"] = disp["Omzet"].apply(fmt_eur)
-        disp["Footfall"] = disp["Footfall"].apply(fmt_int)
+        disp["SVI"] = pd.to_numeric(disp["SVI"], errors="coerce").apply(lambda x: "-" if pd.isna(x) else f"{x:.0f}")
+        disp["Omzet"] = pd.to_numeric(disp["Omzet"], errors="coerce").apply(fmt_eur)
+        disp["Footfall"] = pd.to_numeric(disp["Footfall"], errors="coerce").apply(fmt_int)
         for c in ["SPV idx", "Sales/m² idx", "Capture idx", "CR idx", "ATV idx"]:
-            disp[c] = disp[c].apply(lambda x: "-" if pd.isna(x) else f"{x:.0f}%")
-        disp["Upside (periode)"] = disp["Upside (periode)"].apply(lambda x: "-" if pd.isna(x) else fmt_eur(x))
-        disp["Upside (annualized)"] = disp["Upside (annualized)"].apply(lambda x: "-" if pd.isna(x) else fmt_eur(x))
+            disp[c] = pd.to_numeric(disp[c], errors="coerce").apply(lambda x: "-" if pd.isna(x) else f"{x:.0f}%")
+        disp["Upside (periode)"] = pd.to_numeric(disp["Upside (periode)"], errors="coerce").apply(lambda x: "-" if pd.isna(x) else fmt_eur(x))
+        disp["Upside (annualized)"] = pd.to_numeric(disp["Upside (annualized)"], errors="coerce").apply(lambda x: "-" if pd.isna(x) else fmt_eur(x))
         st.dataframe(disp, use_container_width=True, hide_index=True)
     else:
-        # styled heatmap columns
         styled = heat_show.copy()
-        # friendly formatting in non-idx columns via Styler format
         styler = styled.style
-
-        # apply coloring to idx columns + SVI (optional)
         for col in ["SPV idx", "Sales/m² idx", "Capture idx", "CR idx", "ATV idx"]:
             if col in styled.columns:
                 styler = styler.applymap(style_heatmap_ratio, subset=[col])
 
-        # slight highlight for low SVI rows (readability)
         def _svi_row_style(v):
             try:
                 if pd.isna(v):
@@ -1347,37 +1280,31 @@ def main():
                 return ""
             except Exception:
                 return ""
-        if "SVI" in styled.columns:
-            styler = styler.applymap(_svi_row_style, subset=["SVI"])
+
+        styler = styler.applymap(_svi_row_style, subset=["SVI"])
 
         styler = styler.format({
-            "SVI": lambda x: "-" if pd.isna(x) else f"{x:.0f}",
-            "Omzet": lambda x: "-" if pd.isna(x) else fmt_eur(x),
-            "Footfall": lambda x: "-" if pd.isna(x) else fmt_int(x),
-            "SPV idx": lambda x: "-" if pd.isna(x) else f"{x:.0f}%",
-            "Sales/m² idx": lambda x: "-" if pd.isna(x) else f"{x:.0f}%",
-            "Capture idx": lambda x: "-" if pd.isna(x) else f"{x:.0f}%",
-            "CR idx": lambda x: "-" if pd.isna(x) else f"{x:.0f}%",
-            "ATV idx": lambda x: "-" if pd.isna(x) else f"{x:.0f}%",
-            "Upside (periode)": lambda x: "-" if pd.isna(x) else fmt_eur(x),
-            "Upside (annualized)": lambda x: "-" if pd.isna(x) else fmt_eur(x),
+            "SVI": lambda x: "-" if pd.isna(x) else f"{float(x):.0f}",
+            "Omzet": lambda x: "-" if pd.isna(x) else fmt_eur(float(x)),
+            "Footfall": lambda x: "-" if pd.isna(x) else fmt_int(float(x)),
+            "SPV idx": lambda x: "-" if pd.isna(x) else f"{float(x):.0f}%",
+            "Sales/m² idx": lambda x: "-" if pd.isna(x) else f"{float(x):.0f}%",
+            "Capture idx": lambda x: "-" if pd.isna(x) else f"{float(x):.0f}%",
+            "CR idx": lambda x: "-" if pd.isna(x) else f"{float(x):.0f}%",
+            "ATV idx": lambda x: "-" if pd.isna(x) else f"{float(x):.0f}%",
+            "Upside (periode)": lambda x: "-" if pd.isna(x) else fmt_eur(float(x)),
+            "Upside (annualized)": lambda x: "-" if pd.isna(x) else fmt_eur(float(x)),
         })
 
         st.dataframe(styler, use_container_width=True, hide_index=True)
 
-    # ======================
-    # Value Upside summary (bulletproof copy)
-    # ======================
+    # Value Upside summary
     st.markdown("## Value Upside (scenario) — biggest opportunities")
 
-    opp = heat_show[["Winkel", "SVI", "Upside (periode)", "Upside (annualized)", "Main driver"]].copy()
-    opp = opp.rename(columns={"Upside (periode)": "Upside (periode)", "Upside (annualized)": "Upside (annualized)"})
-
-    opp["SVI_num"] = pd.to_numeric(heat["SVI"], errors="coerce")
-    opp["up_period"] = pd.to_numeric(heat["upside_period_eur"], errors="coerce")
-    opp["up_annual"] = pd.to_numeric(heat["upside_annual_eur"], errors="coerce")
-
-    opp = opp.dropna(subset=["up_period"]).sort_values("up_period", ascending=False).head(5).copy()
+    opp = heat.copy()
+    opp["up_period"] = pd.to_numeric(opp["upside_period_eur"], errors="coerce")
+    opp["up_annual"] = pd.to_numeric(opp["upside_annual_eur"], errors="coerce")
+    opp = opp.dropna(subset=["up_period"]).sort_values("up_period", ascending=False).head(5)
 
     total_period = float(pd.to_numeric(opp["up_period"], errors="coerce").dropna().sum()) if not opp.empty else np.nan
     total_annual = float(pd.to_numeric(opp["up_annual"], errors="coerce").dropna().sum()) if not opp.empty else np.nan
@@ -1397,110 +1324,19 @@ def main():
     st.markdown("<div style='height:0.6rem'></div>", unsafe_allow_html=True)
 
     if opp.empty:
-        st.info("Nog geen duidelijke upside te berekenen (check drivers: SPV / Sales/m² / Capture).")
+        st.info("Nog geen duidelijke upside te berekenen (check drivers: SPV / Sales/m² / Conversion).")
     else:
         show_opp = pd.DataFrame({
-            "Winkel": opp["Winkel"].values,
-            "Main driver": opp["Main driver"].values,
+            "Winkel": opp["store_display"].values,
+            "Main driver": opp["upside_driver"].values,
             "Upside (periode)": opp["up_period"].apply(fmt_eur).values,
             "Upside (annualized)": opp["up_annual"].apply(fmt_eur).values,
         })
         st.dataframe(show_opp, use_container_width=True, hide_index=True)
 
-    # ======================
-    # Quadrant (v2) — region overview BEFORE drilldown
-    # ======================
-    if show_quadrant:
-        st.markdown("## Regio quadrant (v2)")
-
-        regs = sorted(merged["region"].dropna().unique().tolist())
-        rows = []
-
-        # company totals for quadrant
-        comp_vals_all = compute_driver_values_from_period(
-            footfall=comp_tot["footfall"],
-            turnover=comp_tot["turnover"],
-            transactions=comp_tot["transactions"],
-            sqm_sum=comp_tot["sqm_sum"],
-            capture_pct=np.nan,
-        )
-
-        for r in regs:
-            drr = df_daily_store[df_daily_store["region"] == r].copy()
-            if drr.empty:
-                continue
-
-            rt = agg_period(drr)
-
-            # region capture avg if available (Pathzz only for selected region -> set neutral for others)
-            reg_capture = avg_capture if r == region_choice else np.nan
-
-            reg_vals_r = compute_driver_values_from_period(
-                footfall=rt["footfall"],
-                turnover=rt["turnover"],
-                transactions=rt["transactions"],
-                sqm_sum=rt["sqm_sum"],
-                capture_pct=reg_capture,
-            )
-
-            # Y: SPV index vs company (100 = equal)
-            reg_spv = reg_vals_r.get("sales_per_visitor", np.nan)
-            cmp_spv = comp_vals_all.get("sales_per_visitor", np.nan)
-            y = (reg_spv / cmp_spv * 100.0) if (pd.notna(reg_spv) and pd.notna(cmp_spv) and cmp_spv != 0) else 100.0
-
-            # X: SVI proxy (drivers vs company)
-            # for capture: neutral (use benchmark=self) unless company street data is available
-            if pd.isna(reg_vals_r.get("capture_rate", np.nan)):
-                reg_vals_r["capture_rate"] = comp_vals_all.get("capture_rate", np.nan)
-
-            svi_proxy, _, _ = compute_svi_explainable(
-                vals_a=reg_vals_r,
-                vals_b=comp_vals_all,
-                floor=float(lever_floor),
-                cap=float(lever_cap),
-                weights=None
-            )
-
-            rows.append({
-                "region": r,
-                "x_svi_proxy": svi_proxy,
-                "y_spv_index": y,
-                "is_selected": (r == region_choice),
-            })
-
-        quad = pd.DataFrame(rows)
-        quad["x_svi_proxy"] = pd.to_numeric(quad["x_svi_proxy"], errors="coerce")
-        quad["y_spv_index"] = pd.to_numeric(quad["y_spv_index"], errors="coerce")
-
-        if quad.empty or quad["x_svi_proxy"].dropna().empty:
-            st.info("Nog onvoldoende data voor quadrant.")
-        else:
-            st.caption("X-as: SVI-proxy (0–100) vs company (drivers). Y-as: SPV-index vs company (100 = gelijk).")
-
-            chart = (
-                alt.Chart(quad.dropna(subset=["x_svi_proxy", "y_spv_index"]))
-                .mark_circle(size=220, opacity=0.95)
-                .encode(
-                    x=alt.X("x_svi_proxy:Q", title="SVI proxy (0–100)", scale=alt.Scale(domain=[0, 100])),
-                    y=alt.Y("y_spv_index:Q", title="SPV index vs company", axis=alt.Axis(format=".0f")),
-                    color=alt.Color(
-                        "is_selected:N",
-                        scale=alt.Scale(domain=[True, False], range=[PFM_PURPLE, OTHER_REGION_PURPLE]),
-                        legend=None,
-                    ),
-                    tooltip=[
-                        alt.Tooltip("region:N", title="Regio"),
-                        alt.Tooltip("x_svi_proxy:Q", title="SVI proxy", format=".0f"),
-                        alt.Tooltip("y_spv_index:Q", title="SPV index", format=".0f"),
-                    ],
-                )
-                .properties(height=320)
-            )
-            st.altair_chart(chart, use_container_width=True)
-
-    # ======================
-    # Store drilldown (after top-level scanning)
-    # ======================
+    # ----------------------
+    # Store drilldown
+    # ----------------------
     st.markdown("## Store drilldown")
 
     region_stores = merged[merged["region"] == region_choice].copy()
@@ -1524,7 +1360,6 @@ def main():
 
     st.markdown(f"### **{store_name}** · storeID {chosen_id}")
 
-    # Store period totals
     foot_s = float(pd.to_numeric(df_store["footfall"], errors="coerce").dropna().sum()) if "footfall" in df_store.columns else 0.0
     turn_s = float(pd.to_numeric(df_store["turnover"], errors="coerce").dropna().sum()) if "turnover" in df_store.columns else 0.0
     trans_s = float(pd.to_numeric(df_store["transactions"], errors="coerce").dropna().sum()) if "transactions" in df_store.columns else 0.0
@@ -1535,25 +1370,23 @@ def main():
     sqm_eff_store = pd.to_numeric(region_stores.loc[region_stores["id_int"] == chosen_id, "sqm_effective"], errors="coerce")
     sqm_eff_store = float(sqm_eff_store.iloc[0]) if (sqm_eff_store is not None and not sqm_eff_store.empty and pd.notna(sqm_eff_store.iloc[0])) else np.nan
     spm2_s = (turn_s / sqm_eff_store) if (pd.notna(sqm_eff_store) and sqm_eff_store > 0) else np.nan
-    spv_s = (turn_s / foot_s) if foot_s > 0 else np.nan
 
-    # Store capture proxy avg
-    cap_proxy_store = store_capture_proxy.get(int(chosen_id), np.nan)
+    cap_store = store_capture.get(int(chosen_id), np.nan)
 
-    # Store explainable SVI vs REGION benchmark
     store_vals = compute_driver_values_from_period(
         footfall=foot_s,
         turnover=turn_s,
         transactions=trans_s,
         sqm_sum=sqm_eff_store,
-        capture_pct=cap_proxy_store,
+        capture_pct=cap_store,
     )
+
     store_svi, store_avg_ratio, store_bd = compute_svi_explainable(
         vals_a=store_vals,
         vals_b=reg_bench,
         floor=float(lever_floor),
         cap=float(lever_cap),
-        weights=None
+        weights=SVI_WEIGHTS
     )
     store_status, store_status_color = status_from_score(store_svi if pd.notna(store_svi) else 0)
 
@@ -1575,7 +1408,6 @@ def main():
         unsafe_allow_html=True
     )
 
-    # Store breakdown
     st.markdown('<div class="panel"><div class="panel-title">Store SVI breakdown (vs regio)</div>', unsafe_allow_html=True)
     bd2 = store_bd.copy()
     bd2["ratio_pct"] = pd.to_numeric(bd2["ratio_pct"], errors="coerce")
@@ -1585,330 +1417,10 @@ def main():
     else:
         bd2_show = bd2.copy()
         bd2_show["Ratio vs regio"] = bd2_show["ratio_pct"].apply(lambda x: "-" if pd.isna(x) else f"{x:.0f}%")
-        bd2_show = bd2_show[["driver", "Ratio vs regio"]].rename(columns={"driver": "Driver"})
+        bd2_show["Weight"] = bd2_show["weight"].apply(lambda x: "-" if pd.isna(x) else f"{x:.2f}")
+        bd2_show = bd2_show[["driver", "Ratio vs regio", "Weight"]].rename(columns={"driver": "Driver"})
         st.dataframe(bd2_show, use_container_width=True, hide_index=True)
     st.markdown("</div>", unsafe_allow_html=True)
-
-    # ----------------------
-    # Trends — Store vs Regio vs Company (daily)
-    # ----------------------
-    st.markdown('<div class="panel"><div class="panel-title">Trends — Store vs Regio vs Company (daily)</div>', unsafe_allow_html=True)
-
-    metric_options = {
-        "Conversie (%)": "conversion_rate",
-        "SPV (€ / visitor)": "sales_per_visitor",
-        "ATV (€)": "sales_per_transaction",
-        "Omzet (€)": "turnover",
-        "Footfall": "footfall",
-        "Sales / m² (€)": "sales_per_sqm",
-    }
-    metric_label = st.selectbox("Metric", list(metric_options.keys()), index=0, label_visibility="collapsed")
-    metric_col = metric_options[metric_label]
-
-    d = df_daily_store.copy()
-    d["date"] = pd.to_datetime(d["date"], errors="coerce")
-    d = d.dropna(subset=["date"])
-
-    store_series = df_store[["date", metric_col]].copy() if (not df_store.empty and metric_col in df_store.columns) else pd.DataFrame(columns=["date", metric_col])
-    store_series = store_series.rename(columns={metric_col: "value"})
-    store_series["series"] = "Store"
-
-    reg = d[d["region"] == region_choice].copy()
-
-    def baseline_daily(df_in: pd.DataFrame, which: str) -> pd.DataFrame:
-        tmp = df_in.copy()
-        tmp["date"] = pd.to_datetime(tmp["date"], errors="coerce")
-        tmp = tmp.dropna(subset=["date"])
-
-        if which == "conversion_rate":
-            g = tmp.groupby("date", as_index=False).agg(footfall=("footfall", "sum"), transactions=("transactions", "sum"))
-            g["value"] = np.where(g["footfall"] > 0, g["transactions"] / g["footfall"] * 100.0, np.nan)
-            return g[["date", "value"]]
-        if which == "sales_per_visitor":
-            g = tmp.groupby("date", as_index=False).agg(footfall=("footfall", "sum"), turnover=("turnover", "sum"))
-            g["value"] = np.where(g["footfall"] > 0, g["turnover"] / g["footfall"], np.nan)
-            return g[["date", "value"]]
-        if which == "sales_per_transaction":
-            g = tmp.groupby("date", as_index=False).agg(transactions=("transactions", "sum"), turnover=("turnover", "sum"))
-            g["value"] = np.where(g["transactions"] > 0, g["turnover"] / g["transactions"], np.nan)
-            return g[["date", "value"]]
-        if which == "sales_per_sqm":
-            tmp["sqm_effective"] = pd.to_numeric(tmp.get("sqm_effective", np.nan), errors="coerce")
-            tmp["turnover"] = pd.to_numeric(tmp.get("turnover", np.nan), errors="coerce")
-            g = tmp.groupby(["date", "id"], as_index=False).agg(turnover=("turnover", "sum"), sqm=("sqm_effective", "first"))
-            g_active = g[g["turnover"].fillna(0) > 0].copy()
-            g2 = g_active.groupby("date", as_index=False).agg(turnover=("turnover", "sum"), sqm=("sqm", "sum"))
-            g2["value"] = np.where(g2["sqm"] > 0, g2["turnover"] / g2["sqm"], np.nan)
-            return g2[["date", "value"]]
-
-        g = tmp.groupby("date", as_index=False).agg(value=(which, "sum"))
-        return g[["date", "value"]]
-
-    region_base = baseline_daily(reg, metric_col)
-    region_base["series"] = "Regio"
-    company_base = baseline_daily(d, metric_col)
-    company_base["series"] = "Company"
-
-    plot_df = pd.concat([store_series, region_base, company_base], ignore_index=True)
-    plot_df["value"] = pd.to_numeric(plot_df["value"], errors="coerce")
-
-    chart = (
-        alt.Chart(plot_df.dropna(subset=["date"]))
-        .mark_line(point=True, strokeWidth=2)
-        .encode(
-            x=alt.X("date:T", title="Datum"),
-            y=alt.Y("value:Q", title=metric_label),
-            color=alt.Color(
-                "series:N",
-                scale=alt.Scale(domain=["Store", "Regio", "Company"], range=[PFM_PURPLE, PFM_LINE, PFM_RED]),
-                legend=alt.Legend(title=""),
-            ),
-            tooltip=[
-                alt.Tooltip("date:T", title="Datum"),
-                alt.Tooltip("series:N", title="Reeks"),
-                alt.Tooltip("value:Q", title=metric_label, format=",.2f"),
-            ],
-        )
-        .properties(height=320)
-    )
-    st.altair_chart(chart, use_container_width=True)
-
-    st.markdown("<div class='muted'>Baselines: Regio/Company zijn volume-gewogen per dag. Closed days worden leeg (NaN) getoond i.p.v. 0.</div>", unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    # ======================
-    # Macro context (CBS/CCI)
-    # ======================
-    if show_macro:
-        st.markdown("## Macro-context (CBS/CCI)")
-
-        macro_start = start_period - timedelta(days=365)
-        macro_end = end_period
-
-        st.caption(f"Macro toont: {macro_start} → {macro_end} (1 jaar terug vanaf start van je periode t/m einddatum).")
-
-        region_shop_ids = merged[merged["region"] == region_choice]["id"].dropna().astype(int).unique().tolist()
-        cfg = VemcountApiConfig(report_url=REPORT_URL)
-
-        macro_metric_map = {"count_in": "footfall", "turnover": "turnover", "transactions": "transactions"}
-
-        resp_macro = None
-        with st.spinner("Macro data ophalen (regio footfall/omzet) ..."):
-            try:
-                resp_macro = fetch_report(
-                    cfg=cfg,
-                    shop_ids=region_shop_ids,
-                    data_outputs=list(macro_metric_map.keys()),
-                    period="date",
-                    step="day",
-                    source="shops",
-                    date_from=macro_start,
-                    date_to=macro_end,
-                    timeout=120,
-                )
-            except requests.exceptions.RequestException as e:
-                st.error(f"❌ Macro fetch faalde: {e}")
-
-        region_month = pd.DataFrame()
-        if resp_macro:
-            df_norm_macro = normalize_vemcount_response(resp_macro, kpi_keys=macro_metric_map.keys()).rename(columns=macro_metric_map)
-            if df_norm_macro is not None and not df_norm_macro.empty:
-                macro_store_key = None
-                for cand in ["shop_id", "id", "location_id"]:
-                    if cand in df_norm_macro.columns:
-                        macro_store_key = cand
-                        break
-
-                if macro_store_key:
-                    df_macro_daily_store = collapse_to_daily_store(df_norm_macro, store_key_col=macro_store_key)
-                    if df_macro_daily_store is not None and not df_macro_daily_store.empty:
-                        df_macro_daily_store["date"] = pd.to_datetime(df_macro_daily_store["date"], errors="coerce")
-                        df_macro_daily_store = df_macro_daily_store.dropna(subset=["date"])
-                        df_macro_daily_store = df_macro_daily_store[
-                            (df_macro_daily_store["date"] >= pd.Timestamp(macro_start)) &
-                            (df_macro_daily_store["date"] <= pd.Timestamp(macro_end))
-                        ].copy()
-
-                        region_month = df_macro_daily_store.copy()
-                        region_month["month"] = region_month["date"].dt.to_period("M").dt.to_timestamp()
-                        region_month = (
-                            region_month.groupby("month", as_index=False)[["turnover", "footfall"]]
-                            .sum()
-                            .rename(columns={"turnover": "region_turnover", "footfall": "region_footfall"})
-                        )
-
-        def index_from_first_nonzero(s: pd.Series) -> pd.Series:
-            s = pd.to_numeric(s, errors="coerce").astype(float)
-            nonzero = s.replace(0, np.nan).dropna()
-            if nonzero.empty:
-                return pd.Series(np.nan, index=s.index)
-            base_val = float(nonzero.iloc[0])
-            return (s / base_val) * 100.0
-
-        if not region_month.empty:
-            region_month["region_turnover_index"] = index_from_first_nonzero(region_month["region_turnover"])
-            region_month["region_footfall_index"] = index_from_first_nonzero(region_month["region_footfall"])
-
-        # CBS retail index
-        months_back = int(((macro_end.year - macro_start.year) * 12 + (macro_end.month - macro_start.month)) + 6)
-        months_back = max(60, min(240, months_back))
-
-        cbs_retail_month = pd.DataFrame()
-        try:
-            retail_series = get_retail_index(months_back=months_back) or []
-        except Exception:
-            retail_series = []
-
-        if retail_series:
-            raw = pd.DataFrame(retail_series)
-            value_col = next((c for c in ["retail_value", "value", "index", "retail_index"] if c in raw.columns), None)
-            period_col = next((c for c in ["period", "periode", "month", "maand"] if c in raw.columns), None)
-            if value_col and period_col:
-                raw["date"] = pd.to_datetime(
-                    raw[period_col].astype(str).str[:4] + "-" + raw[period_col].astype(str).str[-2:] + "-01",
-                    errors="coerce",
-                )
-                raw[value_col] = pd.to_numeric(raw[value_col], errors="coerce")
-                raw = raw.dropna(subset=["date", value_col])
-                raw = raw[
-                    (raw["date"] >= pd.Timestamp(macro_start.replace(day=1))) &
-                    (raw["date"] <= pd.Timestamp(macro_end.replace(day=1)))
-                ].copy()
-                if not raw.empty:
-                    cbs_retail_month = raw.groupby("date", as_index=False)[value_col].mean().rename(columns={value_col: "retail_value"})
-                    base = cbs_retail_month["retail_value"].replace(0, np.nan).dropna()
-                    if not base.empty:
-                        b = float(base.iloc[0])
-                        cbs_retail_month["cbs_retail_index"] = (cbs_retail_month["retail_value"] / b) * 100.0
-
-        # CCI
-        cci_df = pd.DataFrame()
-        try:
-            cci_series = get_cci_series(months_back=months_back) or []
-        except Exception:
-            cci_series = []
-
-        if cci_series:
-            raw = pd.DataFrame(cci_series)
-            value_col = next((c for c in ["cci", "value", "index", "cci_value"] if c in raw.columns), None)
-            period_col = next((c for c in ["period", "periode", "month", "maand"] if c in raw.columns), None)
-            if value_col and period_col:
-                raw["date"] = pd.to_datetime(
-                    raw[period_col].astype(str).str[:4] + "-" + raw[period_col].astype(str).str[-2:] + "-01",
-                    errors="coerce",
-                )
-                raw[value_col] = pd.to_numeric(raw[value_col], errors="coerce")
-                raw = raw.dropna(subset=["date", value_col])
-                raw = raw[
-                    (raw["date"] >= pd.Timestamp(macro_start.replace(day=1))) &
-                    (raw["date"] <= pd.Timestamp(macro_end.replace(day=1)))
-                ].copy()
-                if not raw.empty:
-                    cci_df = raw.groupby("date", as_index=False)[value_col].mean().rename(columns={value_col: "cci"})
-                    base = cci_df["cci"].replace(0, np.nan).dropna()
-                    if not base.empty:
-                        b = float(base.iloc[0])
-                        cci_df["cci_index"] = (cci_df["cci"] / b) * 100.0
-
-        def dual_axis_macro_chart(df: pd.DataFrame, title: str, left_series: list[str], right_series: list[str]):
-            st.markdown(f'<div class="panel"><div class="panel-title">{title}</div>', unsafe_allow_html=True)
-            if df is None or df.empty:
-                st.info("Geen macro-data beschikbaar.")
-                st.markdown("</div>", unsafe_allow_html=True)
-                return
-
-            left = df[df["series"].isin(left_series)].copy()
-            right = df[df["series"].isin(right_series)].copy()
-
-            domain = left_series + right_series
-            range_ = []
-            for s in domain:
-                if s in right_series:
-                    range_.append(BLACK)
-                elif "footfall" in s.lower():
-                    range_.append(PFM_PURPLE)
-                elif "omzet" in s.lower() or "turnover" in s.lower():
-                    range_.append(PFM_RED)
-                else:
-                    range_.append(PFM_DARK)
-
-            color_scale = alt.Scale(domain=domain, range=range_)
-
-            left_chart = (
-                alt.Chart(left)
-                .mark_line(point=True, strokeWidth=2)
-                .encode(
-                    x=alt.X("date:T", title="Maand", axis=alt.Axis(format="%b %Y", labelAngle=0)),
-                    y=alt.Y("value:Q", title="Regio index", axis=alt.Axis(format=".0f")),
-                    color=alt.Color("series:N", scale=color_scale, title="Legenda"),
-                    tooltip=[
-                        alt.Tooltip("date:T", title="Maand", format="%b %Y"),
-                        alt.Tooltip("series:N", title="Reeks"),
-                        alt.Tooltip("value:Q", title="Index", format=".1f"),
-                    ],
-                )
-            )
-
-            right_chart = (
-                alt.Chart(right)
-                .mark_line(point=True, strokeWidth=2)
-                .encode(
-                    x=alt.X("date:T", title=""),
-                    y=alt.Y("value:Q", title="CBS / CCI index", axis=alt.Axis(orient="right", format=".0f")),
-                    color=alt.Color("series:N", scale=color_scale, title="Legenda"),
-                    tooltip=[
-                        alt.Tooltip("date:T", title="Maand", format="%b %Y"),
-                        alt.Tooltip("series:N", title="Reeks"),
-                        alt.Tooltip("value:Q", title="Index", format=".1f"),
-                    ],
-                )
-            )
-
-            chart = alt.layer(left_chart, right_chart).resolve_scale(y="independent").properties(height=280)
-            st.altair_chart(chart, use_container_width=True)
-            st.markdown("</div>", unsafe_allow_html=True)
-
-        macro_lines = []
-        if not region_month.empty:
-            a = region_month.rename(columns={"month": "date"})[["date", "region_footfall_index"]].copy()
-            a["series"] = "Regio footfall-index"
-            a = a.rename(columns={"region_footfall_index": "value"})
-            macro_lines.append(a)
-
-            b = region_month.rename(columns={"month": "date"})[["date", "region_turnover_index"]].copy()
-            b["series"] = "Regio omzet-index"
-            b = b.rename(columns={"region_turnover_index": "value"})
-            macro_lines.append(b)
-
-        macro_df_cbs = pd.DataFrame()
-        if macro_lines and (not cbs_retail_month.empty and "cbs_retail_index" in cbs_retail_month.columns):
-            c = cbs_retail_month[["date", "cbs_retail_index"]].copy()
-            c["series"] = "CBS detailhandelindex"
-            c = c.rename(columns={"cbs_retail_index": "value"})
-            macro_df_cbs = pd.concat(macro_lines + [c], ignore_index=True)
-
-        macro_df_cci = pd.DataFrame()
-        if macro_lines and (not cci_df.empty and "cci_index" in cci_df.columns):
-            c = cci_df[["date", "cci_index"]].copy()
-            c["series"] = "CCI consumentenvertrouwen"
-            c = c.rename(columns={"cci_index": "value"})
-            macro_df_cci = pd.concat(macro_lines + [c], ignore_index=True)
-
-        m1, m2 = st.columns(2)
-        with m1:
-            dual_axis_macro_chart(
-                df=macro_df_cbs,
-                title="CBS detailhandelindex vs Regio (dual axis)",
-                left_series=["Regio footfall-index", "Regio omzet-index"],
-                right_series=["CBS detailhandelindex"],
-            )
-        with m2:
-            dual_axis_macro_chart(
-                df=macro_df_cci,
-                title="CCI consumentenvertrouwen vs Regio (dual axis)",
-                left_series=["Regio footfall-index", "Regio omzet-index"],
-                right_series=["CCI consumentenvertrouwen"],
-            )
 
     # ----------------------
     # Debug
@@ -1918,9 +1430,12 @@ def main():
         st.write("Company:", company_id)
         st.write("Region:", region_choice)
         st.write("Period:", start_period, "→", end_period)
-        st.write("SVI floor/cap:", lever_floor, lever_cap)
+        st.write("SVI floor/cap.effects:", lever_floor, lever_cap)
+        st.write("SVI_WEIGHTS:", SVI_WEIGHTS)
         st.write("Reg bench:", reg_bench)
         st.write("Company vals:", comp_vals)
+        st.write("Pathzz rows(period, region):", len(pathzz_region))
+        st.write("capture_store_week head:", capture_store_week.head(10) if "capture_store_week" in locals() else None)
         st.write("df_daily_store cols:", df_daily_store.columns.tolist())
         st.write("Example store rows:", df_store.head(10))
 
