@@ -291,14 +291,25 @@ def load_pathzz_weekly(csv_path: str = "data/pathzz_sample_weekly.csv") -> pd.Da
     return out[["region", "shop_id", "store_type", "week_start", "visits"]].reset_index(drop=True)
 
 def filter_pathzz_for_period(df_pathzz: pd.DataFrame, start_date, end_date) -> pd.DataFrame:
+    expected_cols = ["region", "shop_id", "store_type", "week_start", "visits"]
+
+    # If df is None or empty or missing columns, return an empty df WITH the expected columns
     if df_pathzz is None or df_pathzz.empty:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=expected_cols)
+
+    missing = [c for c in expected_cols if c not in df_pathzz.columns]
+    if missing:
+        return pd.DataFrame(columns=expected_cols)
+
     start = pd.to_datetime(start_date)
     end = pd.to_datetime(end_date)
+
     tmp = df_pathzz.copy()
     tmp["week_start"] = pd.to_datetime(tmp["week_start"], errors="coerce")
     tmp = tmp.dropna(subset=["week_start"])
-    return tmp[(tmp["week_start"] >= start) & (tmp["week_start"] <= end)].copy()
+
+    out = tmp[(tmp["week_start"] >= start) & (tmp["week_start"] <= end)].copy()
+    return out if not out.empty else pd.DataFrame(columns=expected_cols)
 
 # ----------------------
 # UI helpers
@@ -848,7 +859,13 @@ def main():
     pathzz_period = filter_pathzz_for_period(pathzz_all, start_period, end_period)
 
     # restrict to selected region (Pathzz region column)
-    pathzz_region = pathzz_period[pathzz_period["region"].astype(str).str.strip().str.lower() == str(region_choice).strip().lower()].copy()
+    pathzz_region = pd.DataFrame(columns=["region", "shop_id", "store_type", "week_start", "visits"])
+
+    if pathzz_period is not None and not pathzz_period.empty and "region" in pathzz_period.columns:
+        pathzz_region = pathzz_period[
+            pathzz_period["region"].astype(str).str.strip().str.lower()
+            == str(region_choice).strip().lower()
+        ].copy()
 
     # Vemcount weekly footfall per store (in region)
     dd_region = df_region_daily.copy()
@@ -1438,6 +1455,10 @@ def main():
         st.write("capture_store_week head:", capture_store_week.head(10) if "capture_store_week" in locals() else None)
         st.write("df_daily_store cols:", df_daily_store.columns.tolist())
         st.write("Example store rows:", df_store.head(10))
+        st.write("Pathzz loaded rows:", 0 if pathzz_all is None else len(pathzz_all))
+        st.write("Pathzz columns:", [] if pathzz_all is None else list(pathzz_all.columns))
+        st.write("Pathzz period rows:", 0 if pathzz_period is None else len(pathzz_period))
+        st.write("Pathzz period columns:", [] if pathzz_period is None else list(pathzz_period.columns))
 
 if __name__ == "__main__":
     main()
