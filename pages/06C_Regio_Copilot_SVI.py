@@ -592,22 +592,57 @@ def plot_macro_panel(macro_start, macro_end):
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
-    def _prep(df, date_col="date"):
-        if df is None or df.empty:
-            return pd.DataFrame()
-        out = df.copy()
-        if date_col not in out.columns:
-            # try common alternatives
-            for cand in ["Date", "period", "time", "month"]:
-                if cand in out.columns:
-                    out = out.rename(columns={cand: "date"})
-                    break
-        if "date" not in out.columns:
-            return pd.DataFrame()
+    def _prep(obj, date_col_candidates=("date", "period", "month", "time"), value_col_candidates=("value", "index", "cci")):
+        """
+        Make macro-series input robust.
+        Accepts: pd.DataFrame, dict, list[dict], list[tuple], None
+        Returns: pd.DataFrame with columns: date, value
+        """
+        if obj is None:
+            return pd.DataFrame(columns=["date", "value"])
+    
+        # If already a DataFrame
+        if isinstance(obj, pd.DataFrame):
+            df = obj.copy()
+        else:
+            # Try to coerce common structures into a DataFrame
+            try:
+                df = pd.DataFrame(obj)
+            except Exception:
+                return pd.DataFrame(columns=["date", "value"])
+    
+        if df is None or df.shape[0] == 0:
+            return pd.DataFrame(columns=["date", "value"])
+    
+        # Find date column
+        date_col = None
+        for c in date_col_candidates:
+            if c in df.columns:
+                date_col = c
+                break
+    
+        # Find value column
+        value_col = None
+        for c in value_col_candidates:
+            if c in df.columns:
+                value_col = c
+                break
+    
+        # If it’s a 2-column unnamed df (e.g. tuples)
+        if date_col is None and value_col is None and df.shape[1] >= 2:
+            date_col = df.columns[0]
+            value_col = df.columns[1]
+    
+        if date_col is None or value_col is None:
+            # Last resort: return empty so chart doesn't crash
+            return pd.DataFrame(columns=["date", "value"])
+    
+        out = df[[date_col, value_col]].rename(columns={date_col: "date", value_col: "value"}).copy()
         out["date"] = pd.to_datetime(out["date"], errors="coerce")
-        out = out.dropna(subset=["date"])
-        out = out[(out["date"] >= pd.to_datetime(macro_start)) & (out["date"] <= pd.to_datetime(macro_end))].copy()
-        return out
+        out["value"] = pd.to_numeric(out["value"], errors="coerce")
+        out = out.dropna(subset=["date"]).sort_values("date")
+    
+        return out.reset_index(drop=True)
 
     cci_df = _prep(cci)
     ridx_df = _prep(ridx)
