@@ -37,6 +37,7 @@ PFM_LIGHT = "#F3F4F6"
 PFM_LINE = "#E5E7EB"
 PFM_GREEN = "#22C55E"
 PFM_AMBER = "#F59E0B"
+OTHER_REGION_PURPLE = "#D8B4FE"  # licht-paars, goed zichtbaar op wit
 BLACK = "#111111"
 
 # ----------------------
@@ -806,6 +807,51 @@ def main():
     )
 
     # ----------------------
+    # Regio Vitality Index (SVI) — prominent
+    # ----------------------
+    def compute_svi_score(vals_a: dict, vals_b: dict, floor: float, cap: float) -> tuple[float, float]:
+        """
+        Returns (svi_score_0_100, avg_ratio_pct)
+        SVI = avg ratio(conv, spv, atv, sales/m²) mapped to 0–100 via floor/cap clipping.
+        """
+        ratio_list = []
+        for m in ["conversion_rate", "sales_per_visitor", "sales_per_transaction", "sales_per_sqm"]:
+            va = vals_a.get(m, np.nan)
+            vb = vals_b.get(m, np.nan)
+            if pd.notna(va) and pd.notna(vb) and float(vb) != 0.0:
+                ratio_list.append((float(va) / float(vb)) * 100.0)
+    
+        if not ratio_list:
+            return np.nan, np.nan
+    
+        avg_ratio = float(np.nanmean(ratio_list))
+        svi = ratio_to_score_0_100(avg_ratio, floor=float(lever_floor), cap=float(lever_cap))
+        return float(svi), avg_ratio
+    
+    region_svi, region_avg_ratio = compute_svi_score(reg_vals, comp_vals, lever_floor, lever_cap)
+    status_txt, status_color = status_from_score(region_svi if pd.notna(region_svi) else 0)
+    
+    c_svi_1, c_svi_2 = st.columns([1.1, 2.9])
+    with c_svi_1:
+        st.altair_chart(gauge_chart(region_svi if pd.notna(region_svi) else 0, status_color), use_container_width=False)
+    with c_svi_2:
+        st.markdown(
+            f"""
+            <div class="panel">
+              <div class="panel-title">Regio Vitality Index (SVI)</div>
+              <div style="font-size:2rem;font-weight:900;color:{PFM_DARK};line-height:1.1">
+                {"" if pd.isna(region_svi) else f"{region_svi:.0f}"} <span class="pill">/ 100</span>
+              </div>
+              <div class="muted" style="margin-top:0.35rem">
+                Status: <span style="font-weight:900;color:{status_color}">{status_txt}</span><br/>
+                Benchmark: Company · ratio-gemiddelde (conv / SPV / ATV / sales m²) ≈ <b>{"" if pd.isna(region_avg_ratio) else f"{region_avg_ratio:.0f}%"} </b>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    # ----------------------
     # Weekly trend — Store vs Street + Capture
     # ----------------------
     st.markdown('<div class="panel"><div class="panel-title">Weekly trend — Store vs Street + Capture</div>', unsafe_allow_html=True)
@@ -871,6 +917,64 @@ def main():
     st.markdown("</div>", unsafe_allow_html=True)
 
     # ----------------------
+    # Store ranking (top → bottom) binnen regio — met SVI per store
+    # ----------------------
+    st.markdown("## Stores in regio — Top → Bottom")
+    
+    # Period totals per store in regio
+    reg_store_daily = df_daily_store[df_daily_store["region"] == region_choice].copy()
+    
+    # Agg per store
+    agg = reg_store_daily.groupby(["id", "store_display"], as_index=False).agg(
+        turnover=("turnover", "sum"),
+        footfall=("footfall", "sum"),
+        transactions=("transactions", "sum"),
+    )
+    
+    # Derived
+    agg["conversion_rate"] = np.where(agg["footfall"] > 0, agg["transactions"] / agg["footfall"] * 100.0, np.nan)
+    agg["sales_per_visitor"] = np.where(agg["footfall"] > 0, agg["turnover"] / agg["footfall"], np.nan)
+    agg["sales_per_transaction"] = np.where(agg["transactions"] > 0, agg["turnover"] / agg["transactions"], np.nan)
+    
+    # sales/m² per store via sqm_effective
+    sqm_map = merged.loc[merged["region"] == region_choice, ["id", "sqm_effective"]].drop_duplicates()
+    sqm_map["sqm_effective"] = pd.to_numeric(sqm_map["sqm_effective"], errors="coerce")
+    agg = agg.merge(sqm_map, on="id", how="left")
+    agg["sales_per_sqm"] = np.where((agg["sqm_effective"] > 0) & pd.notna(agg["sqm_effective"]), agg["turnover"] / agg["sqm_effective"], np.nan)
+    
+    # Benchmarks: regio als baseline (voor store SVI in context van regio)
+    reg_baseline_vals = reg_vals
+    
+    def compute_store_svi_row(row):
+        store_vals = {
+            "conversion_rate": row["conversion_rate"],
+            "sales_per_visitor": row["sales_per_visitor"],
+            "sales_per_transaction": row["sales_per_transaction"],
+            "sales_per_sqm": row["sales_per_sqm"],
+        }
+        svi, avg_ratio = compute_svi_score(store_vals, reg_baseline_vals, lever_floor, lever_cap)
+        return pd.Series({"SVI": svi, "SVI_ratio": avg_ratio})
+    
+    agg[["SVI", "SVI_ratio"]] = agg.apply(compute_store_svi_row, axis=1)
+    
+    # sort top->bottom on SVI, fallback turnover
+    agg = agg.sort_values(["SVI", "turnover"], ascending=[False, False])
+    
+    show_cols = ["store_display", "SVI", "turnover", "conversion_rate", "sales_per_visitor", "sales_per_transaction", "sales_per_sqm"]
+    
+    display_df = agg[show_cols].copy()
+    display_df["SVI"] = display_df["SVI"].map(lambda x: "-" if pd.isna(x) else f"{x:.0f}")
+    display_df["turnover"] = display_df["turnover"].map(fmt_eur)
+    display_df["conversion_rate"] = display_df["conversion_rate"].map(fmt_pct)
+    display_df["sales_per_visitor"] = display_df["sales_per_visitor"].map(fmt_eur_2)
+    display_df["sales_per_transaction"] = display_df["sales_per_transaction"].map(fmt_eur_2)
+    display_df["sales_per_sqm"] = display_df["sales_per_sqm"].map(fmt_eur_2)
+    
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
+    
+    st.caption("Tip: gebruik dit overzicht om meteen te kiezen welke store je wil drillen (SVI is vs regio-baseline).")
+
+    # ----------------------
     # Store drilldown (fixed: does NOT reset analysis)
     # ----------------------
     st.markdown("## Store drilldown")
@@ -920,6 +1024,31 @@ def main():
         kpi_card("Conversion", fmt_pct(conv_s), "Store · periode")
     with sk4:
         kpi_card("Sales / m²", fmt_eur(spm2_s), "Store · periode (sqm_effective)")
+
+    # Store SVI vs regio
+    store_vals_for_svi = {
+        "conversion_rate": conv_s,
+        "sales_per_visitor": (turn_s / foot_s) if foot_s > 0 else np.nan,
+        "sales_per_transaction": atv_s,
+        "sales_per_sqm": spm2_s,
+    }
+    
+    store_svi, store_avg_ratio = compute_svi_score(store_vals_for_svi, reg_vals, lever_floor, lever_cap)
+    store_status, store_status_color = status_from_score(store_svi if pd.notna(store_svi) else 0)
+    
+    st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
+    svi_c1, svi_c2, svi_c3 = st.columns([1, 1, 2])
+    with svi_c1:
+        kpi_card("Store SVI (vs Regio)", "-" if pd.isna(store_svi) else f"{store_svi:.0f} / 100", "SVI score")
+    with svi_c2:
+        kpi_card("Status", store_status, "Interpretatie")
+    with svi_c3:
+        st.markdown(
+            f"<div class='panel'><div class='panel-title'>SVI uitleg</div>"
+            f"<div class='muted'>Gebaseerd op ratio’s (conv/SPV/ATV/sales m²) t.o.v. regio-baseline. "
+            f"Gemiddelde ratio ≈ <b>{'' if pd.isna(store_avg_ratio) else f'{store_avg_ratio:.0f}%'} </b></div></div>",
+            unsafe_allow_html=True
+        )
 
     # ----------------------
     # Trends — Store vs Regio vs Company (daily)
@@ -1020,59 +1149,6 @@ def main():
     st.markdown("</div>", unsafe_allow_html=True)
 
     # ----------------------
-    # Best / worst days (store) — filter closed days
-    # ----------------------
-    st.markdown('<div class="panel"><div class="panel-title">Best / worst days (store)</div>', unsafe_allow_html=True)
-
-    rank_opts = {
-        "Omzet": "turnover",
-        "Conversie": "conversion_rate",
-        "SPV": "sales_per_visitor",
-        "ATV": "sales_per_transaction",
-        "Sales / m²": "sales_per_sqm",
-        "Footfall": "footfall",
-    }
-    rank_label = st.selectbox("Rank op", list(rank_opts.keys()), index=0)
-    rank_col = rank_opts[rank_label]
-
-    ds = df_store.copy()
-    ds["date"] = pd.to_datetime(ds["date"], errors="coerce")
-    ds = ds.dropna(subset=["date"])
-    # remove "closed" days entirely (avoid 0 top/bottom pollution)
-    closed = (
-        pd.to_numeric(ds.get("footfall", 0), errors="coerce").fillna(0).eq(0)
-        & pd.to_numeric(ds.get("turnover", 0), errors="coerce").fillna(0).eq(0)
-        & pd.to_numeric(ds.get("transactions", 0), errors="coerce").fillna(0).eq(0)
-    )
-    ds = ds[~closed].copy()
-
-    left, right = st.columns(2)
-    with left:
-        st.subheader("Top 5 days")
-        if ds.empty:
-            st.info("Geen (open) dagen in deze periode.")
-        else:
-            st.dataframe(
-                ds.sort_values(rank_col, ascending=False).head(5)[
-                    ["date", "turnover", "footfall", "transactions", "conversion_rate", "sales_per_visitor", "sales_per_transaction", "sales_per_sqm"]
-                ],
-                use_container_width=True
-            )
-    with right:
-        st.subheader("Bottom 5 days")
-        if ds.empty:
-            st.info("Geen (open) dagen in deze periode.")
-        else:
-            st.dataframe(
-                ds.sort_values(rank_col, ascending=True).head(5)[
-                    ["date", "turnover", "footfall", "transactions", "conversion_rate", "sales_per_visitor", "sales_per_transaction", "sales_per_sqm"]
-                ],
-                use_container_width=True
-            )
-
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    # ----------------------
     # Lever scan — fix "everything 100" by:
     # 1) more sensitive floor/cap (control)
     # 2) show ratio & gap in tooltip (already)
@@ -1160,6 +1236,59 @@ def main():
         .properties(height=240)
     )
     st.altair_chart(lever_chart, use_container_width=True)
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # ----------------------
+    # Best / worst days (store) — filter closed days
+    # ----------------------
+    st.markdown('<div class="panel"><div class="panel-title">Best / worst days (store)</div>', unsafe_allow_html=True)
+
+    rank_opts = {
+        "Omzet": "turnover",
+        "Conversie": "conversion_rate",
+        "SPV": "sales_per_visitor",
+        "ATV": "sales_per_transaction",
+        "Sales / m²": "sales_per_sqm",
+        "Footfall": "footfall",
+    }
+    rank_label = st.selectbox("Rank op", list(rank_opts.keys()), index=0)
+    rank_col = rank_opts[rank_label]
+
+    ds = df_store.copy()
+    ds["date"] = pd.to_datetime(ds["date"], errors="coerce")
+    ds = ds.dropna(subset=["date"])
+    # remove "closed" days entirely (avoid 0 top/bottom pollution)
+    closed = (
+        pd.to_numeric(ds.get("footfall", 0), errors="coerce").fillna(0).eq(0)
+        & pd.to_numeric(ds.get("turnover", 0), errors="coerce").fillna(0).eq(0)
+        & pd.to_numeric(ds.get("transactions", 0), errors="coerce").fillna(0).eq(0)
+    )
+    ds = ds[~closed].copy()
+
+    left, right = st.columns(2)
+    with left:
+        st.subheader("Top 5 days")
+        if ds.empty:
+            st.info("Geen (open) dagen in deze periode.")
+        else:
+            st.dataframe(
+                ds.sort_values(rank_col, ascending=False).head(5)[
+                    ["date", "turnover", "footfall", "transactions", "conversion_rate", "sales_per_visitor", "sales_per_transaction", "sales_per_sqm"]
+                ],
+                use_container_width=True
+            )
+    with right:
+        st.subheader("Bottom 5 days")
+        if ds.empty:
+            st.info("Geen (open) dagen in deze periode.")
+        else:
+            st.dataframe(
+                ds.sort_values(rank_col, ascending=True).head(5)[
+                    ["date", "turnover", "footfall", "transactions", "conversion_rate", "sales_per_visitor", "sales_per_transaction", "sales_per_sqm"]
+                ],
+                use_container_width=True
+            )
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1271,9 +1400,10 @@ def main():
                 .encode(
                     x=alt.X("x_svi_proxy:Q", title="SVI proxy (0–100)", scale=alt.Scale(domain=[0, 100])),
                     y=alt.Y("y_spv_index:Q", title="SPV index vs company", axis=alt.Axis(format=".0f")),
+
                     color=alt.Color(
                         "is_selected:N",
-                        scale=alt.Scale(domain=[True, False], range=[PFM_PURPLE, PFM_LINE]),
+                        scale=alt.Scale(domain=[True, False], range=[PFM_PURPLE, OTHER_REGION_PURPLE]),
                         legend=None,
                     ),
                     tooltip=[
