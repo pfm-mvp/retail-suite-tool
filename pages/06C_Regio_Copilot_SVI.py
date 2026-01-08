@@ -590,13 +590,6 @@ def plot_macro_panel(df_region_daily, macro_start, macro_end):
         unsafe_allow_html=True
     )
 
-    # Refresh button (handig bij caching + CBS)
-    cA, cB = st.columns([3, 1])
-    with cB:
-        if st.button("🔄 Refresh macro data", key="refresh_macro"):
-            st.cache_data.clear()
-            st.rerun()
-
     # ---- 1) Build REGION monthly indices (footfall + turnover) ----
     ms = pd.to_datetime(macro_start)
     me = pd.to_datetime(macro_end)
@@ -629,10 +622,14 @@ def plot_macro_panel(df_region_daily, macro_start, macro_end):
         region_m["Region footfall-index"] = _idx(region_m["footfall"])
         region_m["Region omzet-index"] = _idx(region_m["turnover"])
 
-    # ---- 2) Fetch + prep CBS macro series ----
+    # --- determine how many months we actually need ---
+    months_needed = int(
+        ((pd.to_datetime(macro_end) - pd.to_datetime(macro_start)).days / 30.5) + 2
+    )
+    
     try:
-        cci_raw = get_cci_series(months_back=0)      # 0 => "don’t trim" (we filter on dates anyway)
-        ridx_raw = get_retail_index(months_back=0)
+        cci = get_cci_series(months_back=max(24, months_needed))
+        ridx = get_retail_index(months_back=max(24, months_needed))
     except Exception as e:
         st.info(f"Macro data not available right now: {e}")
         st.markdown("</div>", unsafe_allow_html=True)
@@ -1035,7 +1032,36 @@ def main():
     if show_macro:
         macro_start = (pd.to_datetime(start_period) - pd.Timedelta(days=365)).date()
         macro_end = pd.to_datetime(end_period).date()
-        plot_macro_panel(df_region_daily, macro_start, macro_end)
+    
+        # fetch macro-window data (separate request!)
+        with st.spinner("Fetching macro-window data (region indices)..."):
+            resp_macro = fetch_report(
+                cfg=cfg,
+                shop_ids=all_shop_ids,
+                data_outputs=["count_in", "turnover"],   # genoeg voor indices
+                period="date",
+                step="day",
+                source="shops",
+                date_from=macro_start,
+                date_to=macro_end,
+                timeout=120,
+            )
+    
+        df_macro = normalize_vemcount_response(resp_macro, kpi_keys=["count_in", "turnover"]).rename(
+            columns={"count_in": "footfall", "turnover": "turnover"}
+        )
+    
+        # zelfde join als eerder zodat 'region' beschikbaar is
+        df_macro = collapse_to_daily_store(df_macro, store_key_col=store_key_col).merge(
+            merged2[["id", "region"]].drop_duplicates(),
+            left_on=store_key_col,
+            right_on="id",
+            how="left",
+        )
+    
+        df_region_macro = df_macro[df_macro["region"] == region_choice].copy()
+    
+        plot_macro_panel(macro_start, macro_end, df_region_macro)
 
     foot_total = float(pd.to_numeric(df_region_daily["footfall"], errors="coerce").dropna().sum()) if "footfall" in df_region_daily.columns else 0.0
     turn_total = float(pd.to_numeric(df_region_daily["turnover"], errors="coerce").dropna().sum()) if "turnover" in df_region_daily.columns else 0.0
