@@ -584,7 +584,7 @@ def style_heatmap_ratio(val):
 # ----------------------
 # Macro charts
 # ----------------------
-def plot_macro_panel(macro_start, macro_end, df_region_daily):
+def plot_macro_panel(df_region_daily, macro_start, macro_end):
     st.markdown(
         '<div class="panel"><div class="panel-title">Macro context — Consumer Confidence & Retail Index</div>',
         unsafe_allow_html=True
@@ -1035,7 +1035,7 @@ def main():
     if show_macro:
         macro_start = (pd.to_datetime(start_period) - pd.Timedelta(days=365)).date()
         macro_end = pd.to_datetime(end_period).date()
-        plot_macro_panel(macro_start, macro_end)
+        plot_macro_panel(df_region_daily, macro_start, macro_end)
 
     foot_total = float(pd.to_numeric(df_region_daily["footfall"], errors="coerce").dropna().sum()) if "footfall" in df_region_daily.columns else 0.0
     turn_total = float(pd.to_numeric(df_region_daily["turnover"], errors="coerce").dropna().sum()) if "turnover" in df_region_daily.columns else 0.0
