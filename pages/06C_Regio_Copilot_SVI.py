@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import requests
 import os
+import re
 import streamlit as st
 import altair as alt
 
@@ -618,8 +619,6 @@ def plot_macro_panel(macro_start, macro_end):
             return pd.DataFrame(columns=["date", "value"])
 
         # --- CBS-style: often has Perioden ---
-        import re
-        
         if "Perioden" in df.columns:
             tmp = df.copy()
         
