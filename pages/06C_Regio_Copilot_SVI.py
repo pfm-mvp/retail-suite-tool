@@ -1238,36 +1238,49 @@ def main():
             var_name="metric",
             value_name="value",
         )
+        label_map = {
+        "footfall": "Footfall (stores)",
+        "visits": "Street traffic (Pathzz)",
+        }
+        long["metric_label"] = long["metric"].map(label_map).fillna(long["metric"])
 
         bars = (
             alt.Chart(long)
             .mark_bar(opacity=0.85, cornerRadiusEnd=4)
             .encode(
                 x=alt.X("week_label:N", sort=week_order, title=None),
-                xOffset=alt.XOffset("metric:N"),
+                xOffset=alt.XOffset("metric_label:N"),
                 y=alt.Y("value:Q", title=""),
                 color=alt.Color(
-                    "metric:N",
+                    "metric_label:N",
                     scale=alt.Scale(
-                        domain=["footfall", "visits"],
+                        domain=["Footfall (stores)", "Street traffic (Pathzz)"],
                         range=[PFM_PURPLE, PFM_LINE],
                     ),
-                    legend=alt.Legend(title=""),
+                    legend=alt.Legend(title="", orient="right"),
                 ),
                 tooltip=[
                     alt.Tooltip("week_label:N", title="Week"),
-                    alt.Tooltip("metric:N", title="Metric"),
+                    alt.Tooltip("metric_label:N", title="Metric"),
                     alt.Tooltip("value:Q", title="Value", format=",.0f"),
                 ],
             )
         )
 
+        chart_df2 = chart_df.copy()
+        chart_df2["series"] = "Capture %"
+
         line = (
-            alt.Chart(chart_df)
-            .mark_line(point=True, strokeWidth=2, color=PFM_DARK)
+            alt.Chart(chart_df2)
+            .mark_line(point=True, strokeWidth=2)
             .encode(
                 x=alt.X("week_label:N", sort=week_order, title=None),
                 y=alt.Y("capture_rate:Q", title="Capture %"),
+                color=alt.Color(
+                    "series:N",
+                    scale=alt.Scale(domain=["Capture %"], range=[PFM_DARK]),
+                    legend=alt.Legend(title=""),
+                ),
                 tooltip=[
                     alt.Tooltip("week_label:N", title="Week"),
                     alt.Tooltip("capture_rate:Q", title="Capture", format=".1f"),
