@@ -1022,7 +1022,7 @@ def main():
     dd_region["week_start"] = dd_region["date"].dt.to_period("W-SAT").dt.start_time
 
     for c in ["footfall", "turnover", "transactions"]:
-    dd_region[c] = pd.to_numeric(dd_region.get(c, np.nan), errors="coerce").fillna(0.0)
+        dd_region[c] = pd.to_numeric(dd_region.get(c, np.nan), errors="coerce").fillna(0.0)
 
     store_week = (
         dd_region.groupby(["id", "week_start"], as_index=False)
@@ -1645,7 +1645,9 @@ def main():
         st.write("Pathzz mtime:", pz_mtime)
         st.write("Pathzz week_start min/max:", (None if pathzz_all.empty else (pathzz_all["week_start"].min(), pathzz_all["week_start"].max())))
         st.write("Raw Pathzz columns:", pd.read_csv("data/pathzz_sample_weekly.csv", sep=";", nrows=5).columns.tolist())
-        pz = load_pathzz_weekly_store("data/pathzz_sample_weekly.csv")
+        pz_path_dbg = "data/pathzz_sample_weekly.csv"
+        pz_mtime_dbg = os.path.getmtime(pz_path_dbg) if os.path.exists(pz_path_dbg) else 0.0
+        pz = load_pathzz_weekly_store(pz_path_dbg, pz_mtime_dbg)
         st.write("Pathzz cols:", [] if pz is None else pz.columns.tolist())
         st.write("Pathzz rows:", 0 if pz is None else len(pz))
         if pz is not None and not pz.empty:
