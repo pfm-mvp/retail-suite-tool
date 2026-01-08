@@ -582,54 +582,68 @@ def style_heatmap_ratio(val):
         return ""
 
 # ----------------------
-# Macro charts
+# Macro charts (FIXED)
 # ----------------------
-def plot_macro_panel(df_region_daily, macro_start, macro_end):
+def plot_macro_panel(df_region_daily: pd.DataFrame, macro_start, macro_end):
     st.markdown(
         '<div class="panel"><div class="panel-title">Macro context — Consumer Confidence & Retail Index</div>',
         unsafe_allow_html=True
     )
 
-    # ---- 1) Build REGION monthly indices (footfall + turnover) ----
     ms = pd.to_datetime(macro_start)
     me = pd.to_datetime(macro_end)
+
+    # ---------- 1) Build REGION monthly indices (footfall + turnover) over full macro window ----------
+    if df_region_daily is None or df_region_daily.empty:
+        st.info("No region data available for macro context.")
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
 
     dd = df_region_daily.copy()
     dd["date"] = pd.to_datetime(dd["date"], errors="coerce")
     dd = dd.dropna(subset=["date"])
     dd = dd[(dd["date"] >= ms) & (dd["date"] <= me)].copy()
 
-    for c in ["footfall", "turnover"]:
-        dd[c] = pd.to_numeric(dd.get(c, np.nan), errors="coerce")
+    if dd.empty:
+        st.info("No region index series for this macro window (no footfall/turnover data).")
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+
+    dd["footfall"] = pd.to_numeric(dd.get("footfall", np.nan), errors="coerce")
+    dd["turnover"] = pd.to_numeric(dd.get("turnover", np.nan), errors="coerce")
 
     # monthly sums
     region_m = (
         dd.set_index("date")[["footfall", "turnover"]]
-        .resample("MS")  # Month Start
+        .resample("MS")
         .sum(min_count=1)
         .reset_index()
         .rename(columns={"date": "month"})
     )
 
-    # index base = 100 on first month
-    def _idx(series):
-        base = series.iloc[0] if len(series) else np.nan
-        if pd.isna(base) or base == 0:
+    def _idx(series: pd.Series) -> pd.Series:
+        if series is None or len(series) == 0:
+            return pd.Series([], dtype=float)
+        base = series.iloc[0]
+        if pd.isna(base) or float(base) == 0.0:
             return pd.Series([np.nan] * len(series), index=series.index)
         return (series / base) * 100.0
 
-    if not region_m.empty:
-        region_m["Region footfall-index"] = _idx(region_m["footfall"])
-        region_m["Region omzet-index"] = _idx(region_m["turnover"])
+    region_m["Region footfall-index"] = _idx(region_m["footfall"])
+    region_m["Region omzet-index"] = _idx(region_m["turnover"])
 
-    # --- determine how many months we actually need ---
-    months_needed = int(
-        ((pd.to_datetime(macro_end) - pd.to_datetime(macro_start)).days / 30.5) + 2
-    )
-    
+    region_m = region_m.dropna(subset=["month"]).copy()
+    if region_m.empty:
+        st.info("No region index series for this macro window (after monthly aggregation).")
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+
+    # ---------- 2) Fetch macro series from CBS service (CCI + retail index) ----------
+    months_needed = int(((me - ms).days / 30.5) + 2)
+
     try:
-        cci = get_cci_series(months_back=max(24, months_needed))
-        ridx = get_retail_index(months_back=max(24, months_needed))
+        cci_raw = get_cci_series(months_back=max(24, months_needed))
+        ridx_raw = get_retail_index(months_back=max(24, months_needed))
     except Exception as e:
         st.info(f"Macro data not available right now: {e}")
         st.markdown("</div>", unsafe_allow_html=True)
@@ -640,15 +654,21 @@ def plot_macro_panel(df_region_daily, macro_start, macro_end):
             return pd.NaT
         s = str(s).strip()
 
-        # 2024MM09 / 2024M09 / 202409 / 2024-09
-        s = s.replace("MM", "M")  # normalize
+        # normalize: 2024MM09 -> 2024M09
+        s = s.replace("MM", "M")
+
+        # 2024M09
         m = re.match(r"^(\d{4})M(\d{2})$", s)
         if m:
             return pd.Timestamp(int(m.group(1)), int(m.group(2)), 1)
+
+        # 202409
         m = re.match(r"^(\d{4})(\d{2})$", s)
         if m:
             return pd.Timestamp(int(m.group(1)), int(m.group(2)), 1)
-        m = re.match(r"^(\d{4})-(\d{2})$", s)
+
+        # 2024-09 / 2024/09
+        m = re.match(r"^(\d{4})[-/](\d{2})$", s)
         if m:
             return pd.Timestamp(int(m.group(1)), int(m.group(2)), 1)
 
@@ -657,10 +677,8 @@ def plot_macro_panel(df_region_daily, macro_start, macro_end):
             return pd.NaT
         return pd.Timestamp(dt.year, dt.month, 1)
 
+    # cci_raw: [{"period":"2024MM09","cci":-21.0}, ...]
     cci_df = pd.DataFrame(cci_raw) if isinstance(cci_raw, list) else pd.DataFrame()
-    ridx_df = pd.DataFrame(ridx_raw) if isinstance(ridx_raw, list) else pd.DataFrame()
-
-    # cbs_service returns: cci_df columns: period, cci
     if not cci_df.empty and {"period", "cci"}.issubset(set(cci_df.columns)):
         cci_df["month"] = cci_df["period"].apply(_parse_period_to_monthstart)
         cci_df["value"] = pd.to_numeric(cci_df["cci"], errors="coerce")
@@ -668,7 +686,8 @@ def plot_macro_panel(df_region_daily, macro_start, macro_end):
     else:
         cci_df = pd.DataFrame(columns=["month", "value"])
 
-    # retail index returns: period, retail_value
+    # ridx_raw: [{"period":"2024MM09","retail_value":123.4}, ...]
+    ridx_df = pd.DataFrame(ridx_raw) if isinstance(ridx_raw, list) else pd.DataFrame()
     if not ridx_df.empty and {"period", "retail_value"}.issubset(set(ridx_df.columns)):
         ridx_df["month"] = ridx_df["period"].apply(_parse_period_to_monthstart)
         ridx_df["value"] = pd.to_numeric(ridx_df["retail_value"], errors="coerce")
@@ -676,90 +695,90 @@ def plot_macro_panel(df_region_daily, macro_start, macro_end):
     else:
         ridx_df = pd.DataFrame(columns=["month", "value"])
 
-    # filter macro window
+    # filter both to macro window
     cci_df = cci_df[(cci_df["month"] >= ms) & (cci_df["month"] <= me)].copy()
     ridx_df = ridx_df[(ridx_df["month"] >= ms) & (ridx_df["month"] <= me)].copy()
-    region_m = region_m[(region_m["month"] >= ms) & (region_m["month"] <= me)].copy()
 
-    # ---- Debug (optioneel) ----
-    with st.expander("🔧 Debug macro (dates)"):
-        st.write("macro_start/end:", macro_start, macro_end)
-        st.write("region_m min/max:", None if region_m.empty else (region_m["month"].min(), region_m["month"].max()))
-        st.write("cci min/max:", None if cci_df.empty else (cci_df["month"].min(), cci_df["month"].max()))
-        st.write("ridx min/max:", None if ridx_df.empty else (ridx_df["month"].min(), ridx_df["month"].max()))
-        if not region_m.empty:
-            st.write("region_m head:", region_m.head(3))
-        if not cci_df.empty:
-            st.write("cci head:", cci_df.head(3))
-        if not ridx_df.empty:
-            st.write("ridx head:", ridx_df.head(3))
+    # ---------- 3) Build charts ----------
+    # Force month axis readability
+    x_enc = alt.X(
+        "month:T",
+        title=None,
+        axis=alt.Axis(format="%b %Y", labelAngle=-35, labelOverlap=False, labelPadding=8)
+    )
 
-    if region_m.empty:
-        st.info("No region index series for this window (no footfall/turnover data in macro window).")
-        st.markdown("</div>", unsafe_allow_html=True)
-        return
+    # region long for legend
+    reg_long = region_m.melt(
+        id_vars=["month"],
+        value_vars=["Region footfall-index", "Region omzet-index"],
+        var_name="series",
+        value_name="idx",
+    )
 
-    # ---- 3) Two charts: (a) CBS retail index vs region, (b) CCI vs region ----
-    def _region_lines():
-        reg_long = region_m.melt(
-            id_vars=["month"],
-            value_vars=["Region footfall-index", "Region omzet-index"],
-            var_name="series",
-            value_name="idx",
+    region_lines = (
+        alt.Chart(reg_long)
+        .mark_line(point=True)
+        .encode(
+            x=x_enc,
+            y=alt.Y("idx:Q", title="Regio-index (100 = start)"),
+            color=alt.Color("series:N", legend=alt.Legend(title="", orient="right")),
+            tooltip=[
+                alt.Tooltip("month:T", title="Maand"),
+                alt.Tooltip("series:N", title="Reeks"),
+                alt.Tooltip("idx:Q", title="Index", format=".1f"),
+            ],
         )
-        return (
-            alt.Chart(reg_long)
-            .mark_line(point=True)
-            .encode(
-                x=alt.X("month:T", title=None),
-                y=alt.Y("idx:Q", title="Regio-index (100 = start)"),
-                color=alt.Color("series:N", legend=alt.Legend(title="")),
-                tooltip=[
-                    alt.Tooltip("month:T", title="Maand"),
-                    alt.Tooltip("series:N", title="Reeks"),
-                    alt.Tooltip("idx:Q", title="Index", format=".1f"),
-                ],
-            )
-        )
+    )
 
-    def _macro_line(df_macro, title_right):
+    def macro_line(df_macro: pd.DataFrame, label: str, dash: bool):
+        if df_macro is None or df_macro.empty:
+            return None
+
+        # we’ll give it a series field so it appears in legend
         dfm = df_macro.copy()
-        dfm["series"] = title_right
+        dfm["series"] = label
+
         return (
             alt.Chart(dfm)
-            .mark_line(point=True, strokeDash=[6, 4], strokeWidth=2, color=BLACK)
+            .mark_line(
+                point=True,
+                strokeWidth=2,
+                strokeDash=[6, 4] if dash else [1, 0],
+            )
             .encode(
-                x=alt.X("month:T", title=None),
-                y=alt.Y(
-                    "value:Q",
-                    title=title_right,
-                    axis=alt.Axis(orient="right"),
+                x=x_enc,
+                y=alt.Y("value:Q", title=label, axis=alt.Axis(orient="right")),
+                color=alt.Color(
+                    "series:N",
+                    scale=alt.Scale(domain=[label], range=[BLACK]),
+                    legend=alt.Legend(title="", orient="right"),
                 ),
                 tooltip=[
                     alt.Tooltip("month:T", title="Maand"),
-                    alt.Tooltip("value:Q", title=title_right, format=".1f"),
+                    alt.Tooltip("value:Q", title=label, format=".1f"),
                 ],
             )
         )
 
+    # Left: CBS retail vs Region
     c1, c2 = st.columns(2)
 
     with c1:
         st.markdown("**CBS detailhandelindex vs Regio**")
-        base = _region_lines()
-        macro = _macro_line(ridx_df, "CBS retail index")
+        mline = macro_line(ridx_df, "CBS retail index", dash=True)
+        chart = alt.layer(region_lines, mline) if mline is not None else region_lines
         st.altair_chart(
-            alt.layer(base, macro).resolve_scale(y="independent").properties(height=260),
-            use_container_width=True
+            chart.resolve_scale(y="independent").properties(height=280).configure_view(strokeWidth=0),
+            use_container_width=True,
         )
 
     with c2:
         st.markdown("**Consumentenvertrouwen (CCI) vs Regio**")
-        base = _region_lines()
-        macro = _macro_line(cci_df, "CCI")
+        mline = macro_line(cci_df, "CCI", dash=True)
+        chart = alt.layer(region_lines, mline) if mline is not None else region_lines
         st.altair_chart(
-            alt.layer(base, macro).resolve_scale(y="independent").properties(height=260),
-            use_container_width=True
+            chart.resolve_scale(y="independent").properties(height=280).configure_view(strokeWidth=0),
+            use_container_width=True,
         )
 
     st.markdown("</div>", unsafe_allow_html=True)
@@ -1026,19 +1045,20 @@ def main():
 
     st.markdown(f"## {selected_client['brand']} — Region **{region_choice}** · {start_period} → {end_period}")
 
-    # ----------------------
-    # Macro charts (RESTORED)
-    # ----------------------
-    if show_macro:
-        macro_start = (pd.to_datetime(start_period) - pd.Timedelta(days=365)).date()
-        macro_end = pd.to_datetime(end_period).date()
-    
-        # fetch macro-window data (separate request!)
-        with st.spinner("Fetching macro-window data (region indices)..."):
+# ----------------------
+# Macro charts (FIXED)
+# ----------------------
+if show_macro:
+    macro_start = (pd.to_datetime(start_period) - pd.Timedelta(days=365)).date()
+    macro_end = pd.to_datetime(end_period).date()
+
+    # We need macro-window region daily data (not just selected period)
+    with st.spinner("Fetching macro-window data (region indices)..."):
+        try:
             resp_macro = fetch_report(
                 cfg=cfg,
                 shop_ids=all_shop_ids,
-                data_outputs=["count_in", "turnover"],   # genoeg voor indices
+                data_outputs=["count_in", "turnover"],
                 period="date",
                 step="day",
                 source="shops",
@@ -1046,22 +1066,42 @@ def main():
                 date_to=macro_end,
                 timeout=120,
             )
-    
+        except Exception as e:
+            st.info(f"Macro window fetch failed: {e}")
+            resp_macro = None
+
+    if resp_macro is not None:
         df_macro = normalize_vemcount_response(resp_macro, kpi_keys=["count_in", "turnover"]).rename(
             columns={"count_in": "footfall", "turnover": "turnover"}
         )
-    
-        # zelfde join als eerder zodat 'region' beschikbaar is
-        df_macro = collapse_to_daily_store(df_macro, store_key_col=store_key_col).merge(
-            merged2[["id", "region"]].drop_duplicates(),
-            left_on=store_key_col,
-            right_on="id",
-            how="left",
-        )
-    
-        df_region_macro = df_macro[df_macro["region"] == region_choice].copy()
-    
-        plot_macro_panel(macro_start, macro_end, df_region_macro)
+
+        if df_macro is not None and not df_macro.empty:
+            # Ensure store id column exists (same as earlier)
+            if store_key_col not in df_macro.columns:
+                # try to find an id column
+                for cand in ["shop_id", "id", "location_id"]:
+                    if cand in df_macro.columns:
+                        store_key_col = cand
+                        break
+
+            df_macro = collapse_to_daily_store(df_macro, store_key_col=store_key_col)
+
+            # Join region mapping (use merged, not merged2 here)
+            df_macro = df_macro.merge(
+                merged[["id", "region"]].drop_duplicates(),
+                left_on=store_key_col,
+                right_on="id",
+                how="left",
+            )
+
+            df_region_macro = df_macro[df_macro["region"] == region_choice].copy()
+
+            # ✅ NOTE: signature is (df_region_daily, macro_start, macro_end)
+            plot_macro_panel(df_region_macro, macro_start, macro_end)
+        else:
+            st.info("Macro window data returned empty (no region indices available).")
+    else:
+        st.info("Macro window data not available right now.")
 
     foot_total = float(pd.to_numeric(df_region_daily["footfall"], errors="coerce").dropna().sum()) if "footfall" in df_region_daily.columns else 0.0
     turn_total = float(pd.to_numeric(df_region_daily["turnover"], errors="coerce").dropna().sum()) if "turnover" in df_region_daily.columns else 0.0
