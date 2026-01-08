@@ -590,19 +590,14 @@ def plot_macro_panel(macro_start, macro_end):
         unsafe_allow_html=True
     )
 
-    def plot_macro_panel(macro_start, macro_end):
-    st.markdown(
-        '<div class="panel"><div class="panel-title">Macro context — Consumer Confidence & Retail Index</div>',
-        unsafe_allow_html=True
-    )
-
-    # ✅ add this HERE (inside the panel, before fetching macro data)
+    # Refresh button (clears cache + rerun)
     cA, cB = st.columns([3, 1])
     with cB:
         if st.button("🔄 Refresh macro data", key="refresh_macro"):
             st.cache_data.clear()
             st.rerun()
 
+    # Fetch macro series
     try:
         cci = get_cci_series()
         ridx = get_retail_index()
@@ -611,45 +606,37 @@ def plot_macro_panel(macro_start, macro_end):
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
-    try:
-        cci = get_cci_series()
-        ridx = get_retail_index()
-
+    # Debug raw payload
     with st.expander("🔎 Debug macro (raw payload)"):
-        st.write("len(cci):", None if cci is None else len(cci))
-        st.write("len(ridx):", None if ridx is None else len(ridx))
-        st.write("cci[0] sample:", None if (not cci or len(cci)==0) else cci[0])
-        st.write("ridx[0] sample:", None if (not ridx or len(ridx)==0) else ridx[0])
-    
-    except Exception as e:
-        st.info(f"Macro data not available right now: {e}")
-        st.markdown("</div>", unsafe_allow_html=True)
-        return
+        st.write("macro_start/end:", macro_start, macro_end)
+        st.write("type(cci):", type(cci), "len:", 0 if cci is None else len(cci))
+        st.write("type(ridx):", type(ridx), "len:", 0 if ridx is None else len(ridx))
+        st.write("cci[0] sample:", None if (not cci) else cci[0])
+        st.write("ridx[0] sample:", None if (not ridx) else ridx[0])
 
     def _parse_any_date(s):
         if pd.isna(s):
             return pd.NaT
         s = str(s).strip()
-    
-        # CBS komt vaak met: 2024MM09
+
+        # 2024MM09 -> 2024-09-01
         if "MM" in s and len(s) >= 7:
-            s = s.replace("MM", "-") + "-01"  # -> 2024-09-01
-    
-        # Soms: 202409
+            s = s.replace("MM", "-") + "-01"
+
+        # 202409 -> 2024-09-01
         if s.isdigit() and len(s) == 6:
             s = f"{s[:4]}-{s[4:]}-01"
-    
-        # Soms: 2024-09
+
+        # 2024-09 -> 2024-09-01
         if len(s) == 7 and s[4] == "-":
             s = s + "-01"
-    
+
         return pd.to_datetime(s, errors="coerce")
 
     def _prep(obj):
         """
-        Robust macro-series prep.
-        Accepts: DataFrame, dict, list[dict], list[tuple], etc.
-        Returns: DataFrame with columns ['date','value'].
+        Accepts list[dict] (your CBS service), dict, DataFrame, etc.
+        Returns DataFrame with columns: date, value
         """
         if obj is None:
             return pd.DataFrame(columns=["date", "value"])
@@ -665,42 +652,35 @@ def plot_macro_panel(macro_start, macro_end):
         if df.empty:
             return pd.DataFrame(columns=["date", "value"])
 
-        # --- CBS-style: often has Perioden ---
+        # CBS typed dataset style: Perioden + some value column
         if "Perioden" in df.columns:
             tmp = df.copy()
-        
+
             def _parse_cbs_period(p):
                 if pd.isna(p):
                     return pd.NaT
                 s = str(p).strip()
-        
-                # 2024M07
-                m = re.match(r"^(\d{4})M(\d{2})$", s)
+
+                m = re.match(r"^(\d{4})M(\d{2})$", s)      # 2024M07
                 if m:
                     return pd.Timestamp(int(m.group(1)), int(m.group(2)), 1)
-        
-                # 2024MM07 (komt ook voor)
-                m = re.match(r"^(\d{4})MM(\d{2})$", s)
+
+                m = re.match(r"^(\d{4})MM(\d{2})$", s)     # 2024MM07
                 if m:
                     return pd.Timestamp(int(m.group(1)), int(m.group(2)), 1)
-        
-                # 2024-07 of 2024/07
-                m = re.match(r"^(\d{4})[-/](\d{2})$", s)
+
+                m = re.match(r"^(\d{4})[-/](\d{2})$", s)   # 2024-07
                 if m:
                     return pd.Timestamp(int(m.group(1)), int(m.group(2)), 1)
-        
-                # 202407 (yyyymm)
-                m = re.match(r"^(\d{4})(\d{2})$", s)
+
+                m = re.match(r"^(\d{4})(\d{2})$", s)       # 202407
                 if m:
                     return pd.Timestamp(int(m.group(1)), int(m.group(2)), 1)
-        
-                # fallback
-                dt = pd.to_datetime(s, errors="coerce")
-                return dt
-        
+
+                return pd.to_datetime(s, errors="coerce")
+
             tmp["date"] = tmp["Perioden"].apply(_parse_cbs_period)
 
-            # pick first numeric-ish column that's not Perioden/date
             value_candidates = [c for c in tmp.columns if c not in ("Perioden", "date")]
             if not value_candidates:
                 return pd.DataFrame(columns=["date", "value"])
@@ -708,45 +688,40 @@ def plot_macro_panel(macro_start, macro_end):
             val_col = value_candidates[0]
             tmp["value"] = pd.to_numeric(tmp[val_col], errors="coerce")
             out = tmp[["date", "value"]].copy()
-            
             out["date"] = out["date"].apply(_parse_any_date)
             out = out.dropna(subset=["date", "value"]).sort_values("date").reset_index(drop=True)
             return out
 
-        else:
-            # generic fallback
-            lower_cols = {c.lower(): c for c in df.columns}
-            date_col = None
-            for cand in ("date", "month", "period", "time"):
-                if cand in lower_cols:
-                    date_col = lower_cols[cand]
-                    break
+        # Your service style: period + cci  OR  period + retail_value
+        lower_cols = {c.lower(): c for c in df.columns}
 
-            val_col = None
-            for cand in ("value", "index", "cci", "retail_index", "retail_value"):
-                if cand in lower_cols:
-                    val_col = lower_cols[cand]
-                    break
+        date_col = None
+        for cand in ("date", "month", "period", "time"):
+            if cand in lower_cols:
+                date_col = lower_cols[cand]
+                break
 
-            # If still nothing: try 2-column structure
-            if (date_col is None or val_col is None) and df.shape[1] >= 2:
-                date_col = df.columns[0]
-                val_col = df.columns[1]
+        val_col = None
+        for cand in ("value", "index", "cci", "retail_index", "retail_value"):
+            if cand in lower_cols:
+                val_col = lower_cols[cand]
+                break
 
-            if date_col is None or val_col is None:
-                return pd.DataFrame(columns=["date", "value"])
+        # fallback: first two cols
+        if (date_col is None or val_col is None) and df.shape[1] >= 2:
+            date_col = df.columns[0]
+            val_col = df.columns[1]
 
-            out = df[[date_col, val_col]].rename(columns={date_col: "date", val_col: "value"}).copy()
-            out["date"] = pd.to_datetime(out["date"], errors="coerce")
-            out["value"] = pd.to_numeric(out["value"], errors="coerce")
+        if date_col is None or val_col is None:
+            return pd.DataFrame(columns=["date", "value"])
 
-            # Forceer extra-robuste date parsing
-            out["date"] = out["date"].apply(_parse_any_date)
-            
-            out = out.dropna(subset=["date", "value"]).sort_values("date").reset_index(drop=True)
-            return out
+        out = df[[date_col, val_col]].rename(columns={date_col: "date", val_col: "value"}).copy()
+        out["date"] = out["date"].apply(_parse_any_date)
+        out["value"] = pd.to_numeric(out["value"], errors="coerce")
+        out = out.dropna(subset=["date", "value"]).sort_values("date").reset_index(drop=True)
+        return out
 
-    # prep series
+    # Prep + filter
     cci_df = _prep(cci)
     ridx_df = _prep(ridx)
 
@@ -754,25 +729,7 @@ def plot_macro_panel(macro_start, macro_end):
         st.write("cci_df dtypes:", None if cci_df is None else cci_df.dtypes)
         st.write("cci min/max:", None if cci_df.empty else (cci_df["date"].min(), cci_df["date"].max()))
         st.write("ridx min/max:", None if ridx_df.empty else (ridx_df["date"].min(), ridx_df["date"].max()))
-        if not cci_df.empty:
-            st.write("cci head:", cci_df.head(3))
-        if not ridx_df.empty:
-            st.write("ridx head:", ridx_df.head(3))
 
-    with st.expander("🔎 Debug macro (CBS/CCI)"):
-        st.write("macro_start/end:", macro_start, macro_end)
-        st.write("CCI raw type:", type(cci))
-        st.write("Retail raw type:", type(ridx))
-        st.write("CCI df cols:", [] if cci_df is None else cci_df.columns.tolist())
-        st.write("Retail df cols:", [] if ridx_df is None else ridx_df.columns.tolist())
-    if cci_df is not None and not cci_df.empty:
-        st.write("CCI date min/max:", cci_df["date"].min(), cci_df["date"].max())
-        st.write(cci_df.head(3))
-    if ridx_df is not None and not ridx_df.empty:
-        st.write("Retail date min/max:", ridx_df["date"].min(), ridx_df["date"].max())
-        st.write(ridx_df.head(3))
-
-    # filter to macro window (THIS was missing / broken)
     ms = pd.to_datetime(macro_start)
     me = pd.to_datetime(macro_end)
     if not cci_df.empty:
@@ -797,10 +754,7 @@ def plot_macro_panel(macro_start, macro_end):
                 .encode(
                     x=alt.X("date:T", title=None),
                     y=alt.Y("value:Q", title="Consumer Confidence Index"),
-                    tooltip=[
-                        alt.Tooltip("date:T", title="Date"),
-                        alt.Tooltip("value:Q", title="CCI", format=".1f"),
-                    ],
+                    tooltip=[alt.Tooltip("date:T", title="Date"), alt.Tooltip("value:Q", title="CCI", format=".1f")],
                 )
                 .properties(height=220)
             )
@@ -816,10 +770,7 @@ def plot_macro_panel(macro_start, macro_end):
                 .encode(
                     x=alt.X("date:T", title=None),
                     y=alt.Y("value:Q", title="Retail Index"),
-                    tooltip=[
-                        alt.Tooltip("date:T", title="Date"),
-                        alt.Tooltip("value:Q", title="Index", format=".1f"),
-                    ],
+                    tooltip=[alt.Tooltip("date:T", title="Date"), alt.Tooltip("value:Q", title="Index", format=".1f")],
                 )
                 .properties(height=220)
             )
