@@ -584,197 +584,186 @@ def style_heatmap_ratio(val):
 # ----------------------
 # Macro charts
 # ----------------------
-def plot_macro_panel(macro_start, macro_end):
+def plot_macro_panel(macro_start, macro_end, df_region_daily):
     st.markdown(
         '<div class="panel"><div class="panel-title">Macro context — Consumer Confidence & Retail Index</div>',
         unsafe_allow_html=True
     )
 
-    # Refresh button (clears cache + rerun)
+    # Refresh button (handig bij caching + CBS)
     cA, cB = st.columns([3, 1])
     with cB:
         if st.button("🔄 Refresh macro data", key="refresh_macro"):
             st.cache_data.clear()
             st.rerun()
 
-    # Fetch macro series
+    # ---- 1) Build REGION monthly indices (footfall + turnover) ----
+    ms = pd.to_datetime(macro_start)
+    me = pd.to_datetime(macro_end)
+
+    dd = df_region_daily.copy()
+    dd["date"] = pd.to_datetime(dd["date"], errors="coerce")
+    dd = dd.dropna(subset=["date"])
+    dd = dd[(dd["date"] >= ms) & (dd["date"] <= me)].copy()
+
+    for c in ["footfall", "turnover"]:
+        dd[c] = pd.to_numeric(dd.get(c, np.nan), errors="coerce")
+
+    # monthly sums
+    region_m = (
+        dd.set_index("date")[["footfall", "turnover"]]
+        .resample("MS")  # Month Start
+        .sum(min_count=1)
+        .reset_index()
+        .rename(columns={"date": "month"})
+    )
+
+    # index base = 100 on first month
+    def _idx(series):
+        base = series.iloc[0] if len(series) else np.nan
+        if pd.isna(base) or base == 0:
+            return pd.Series([np.nan] * len(series), index=series.index)
+        return (series / base) * 100.0
+
+    if not region_m.empty:
+        region_m["Region footfall-index"] = _idx(region_m["footfall"])
+        region_m["Region omzet-index"] = _idx(region_m["turnover"])
+
+    # ---- 2) Fetch + prep CBS macro series ----
     try:
-        cci = get_cci_series()
-        ridx = get_retail_index()
+        cci_raw = get_cci_series(months_back=0)      # 0 => "don’t trim" (we filter on dates anyway)
+        ridx_raw = get_retail_index(months_back=0)
     except Exception as e:
         st.info(f"Macro data not available right now: {e}")
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
-    # Debug raw payload
-    with st.expander("🔎 Debug macro (raw payload)"):
-        st.write("macro_start/end:", macro_start, macro_end)
-        st.write("type(cci):", type(cci), "len:", 0 if cci is None else len(cci))
-        st.write("type(ridx):", type(ridx), "len:", 0 if ridx is None else len(ridx))
-        st.write("cci[0] sample:", None if (not cci) else cci[0])
-        st.write("ridx[0] sample:", None if (not ridx) else ridx[0])
-
-    def _parse_any_date(s):
-        if pd.isna(s):
+    def _parse_period_to_monthstart(s: str):
+        if s is None or str(s).strip() == "":
             return pd.NaT
         s = str(s).strip()
 
-        # 2024MM09 -> 2024-09-01
-        if "MM" in s and len(s) >= 7:
-            s = s.replace("MM", "-") + "-01"
+        # 2024MM09 / 2024M09 / 202409 / 2024-09
+        s = s.replace("MM", "M")  # normalize
+        m = re.match(r"^(\d{4})M(\d{2})$", s)
+        if m:
+            return pd.Timestamp(int(m.group(1)), int(m.group(2)), 1)
+        m = re.match(r"^(\d{4})(\d{2})$", s)
+        if m:
+            return pd.Timestamp(int(m.group(1)), int(m.group(2)), 1)
+        m = re.match(r"^(\d{4})-(\d{2})$", s)
+        if m:
+            return pd.Timestamp(int(m.group(1)), int(m.group(2)), 1)
 
-        # 202409 -> 2024-09-01
-        if s.isdigit() and len(s) == 6:
-            s = f"{s[:4]}-{s[4:]}-01"
+        dt = pd.to_datetime(s, errors="coerce")
+        if pd.isna(dt):
+            return pd.NaT
+        return pd.Timestamp(dt.year, dt.month, 1)
 
-        # 2024-09 -> 2024-09-01
-        if len(s) == 7 and s[4] == "-":
-            s = s + "-01"
+    cci_df = pd.DataFrame(cci_raw) if isinstance(cci_raw, list) else pd.DataFrame()
+    ridx_df = pd.DataFrame(ridx_raw) if isinstance(ridx_raw, list) else pd.DataFrame()
 
-        return pd.to_datetime(s, errors="coerce")
+    # cbs_service returns: cci_df columns: period, cci
+    if not cci_df.empty and {"period", "cci"}.issubset(set(cci_df.columns)):
+        cci_df["month"] = cci_df["period"].apply(_parse_period_to_monthstart)
+        cci_df["value"] = pd.to_numeric(cci_df["cci"], errors="coerce")
+        cci_df = cci_df.dropna(subset=["month", "value"])[["month", "value"]].sort_values("month")
+    else:
+        cci_df = pd.DataFrame(columns=["month", "value"])
 
-    def _prep(obj):
-        """
-        Accepts list[dict] (your CBS service), dict, DataFrame, etc.
-        Returns DataFrame with columns: date, value
-        """
-        if obj is None:
-            return pd.DataFrame(columns=["date", "value"])
+    # retail index returns: period, retail_value
+    if not ridx_df.empty and {"period", "retail_value"}.issubset(set(ridx_df.columns)):
+        ridx_df["month"] = ridx_df["period"].apply(_parse_period_to_monthstart)
+        ridx_df["value"] = pd.to_numeric(ridx_df["retail_value"], errors="coerce")
+        ridx_df = ridx_df.dropna(subset=["month", "value"])[["month", "value"]].sort_values("month")
+    else:
+        ridx_df = pd.DataFrame(columns=["month", "value"])
 
-        if isinstance(obj, pd.DataFrame):
-            df = obj.copy()
-        else:
-            try:
-                df = pd.DataFrame(obj)
-            except Exception:
-                return pd.DataFrame(columns=["date", "value"])
+    # filter macro window
+    cci_df = cci_df[(cci_df["month"] >= ms) & (cci_df["month"] <= me)].copy()
+    ridx_df = ridx_df[(ridx_df["month"] >= ms) & (ridx_df["month"] <= me)].copy()
+    region_m = region_m[(region_m["month"] >= ms) & (region_m["month"] <= me)].copy()
 
-        if df.empty:
-            return pd.DataFrame(columns=["date", "value"])
-
-        # CBS typed dataset style: Perioden + some value column
-        if "Perioden" in df.columns:
-            tmp = df.copy()
-
-            def _parse_cbs_period(p):
-                if pd.isna(p):
-                    return pd.NaT
-                s = str(p).strip()
-
-                m = re.match(r"^(\d{4})M(\d{2})$", s)      # 2024M07
-                if m:
-                    return pd.Timestamp(int(m.group(1)), int(m.group(2)), 1)
-
-                m = re.match(r"^(\d{4})MM(\d{2})$", s)     # 2024MM07
-                if m:
-                    return pd.Timestamp(int(m.group(1)), int(m.group(2)), 1)
-
-                m = re.match(r"^(\d{4})[-/](\d{2})$", s)   # 2024-07
-                if m:
-                    return pd.Timestamp(int(m.group(1)), int(m.group(2)), 1)
-
-                m = re.match(r"^(\d{4})(\d{2})$", s)       # 202407
-                if m:
-                    return pd.Timestamp(int(m.group(1)), int(m.group(2)), 1)
-
-                return pd.to_datetime(s, errors="coerce")
-
-            tmp["date"] = tmp["Perioden"].apply(_parse_cbs_period)
-
-            value_candidates = [c for c in tmp.columns if c not in ("Perioden", "date")]
-            if not value_candidates:
-                return pd.DataFrame(columns=["date", "value"])
-
-            val_col = value_candidates[0]
-            tmp["value"] = pd.to_numeric(tmp[val_col], errors="coerce")
-            out = tmp[["date", "value"]].copy()
-            out["date"] = out["date"].apply(_parse_any_date)
-            out = out.dropna(subset=["date", "value"]).sort_values("date").reset_index(drop=True)
-            return out
-
-        # Your service style: period + cci  OR  period + retail_value
-        lower_cols = {c.lower(): c for c in df.columns}
-
-        date_col = None
-        for cand in ("date", "month", "period", "time"):
-            if cand in lower_cols:
-                date_col = lower_cols[cand]
-                break
-
-        val_col = None
-        for cand in ("value", "index", "cci", "retail_index", "retail_value"):
-            if cand in lower_cols:
-                val_col = lower_cols[cand]
-                break
-
-        # fallback: first two cols
-        if (date_col is None or val_col is None) and df.shape[1] >= 2:
-            date_col = df.columns[0]
-            val_col = df.columns[1]
-
-        if date_col is None or val_col is None:
-            return pd.DataFrame(columns=["date", "value"])
-
-        out = df[[date_col, val_col]].rename(columns={date_col: "date", val_col: "value"}).copy()
-        out["date"] = out["date"].apply(_parse_any_date)
-        out["value"] = pd.to_numeric(out["value"], errors="coerce")
-        out = out.dropna(subset=["date", "value"]).sort_values("date").reset_index(drop=True)
-        return out
-
-    # Prep + filter
-    cci_df = _prep(cci)
-    ridx_df = _prep(ridx)
-
+    # ---- Debug (optioneel) ----
     with st.expander("🔧 Debug macro (dates)"):
-        st.write("cci_df dtypes:", None if cci_df is None else cci_df.dtypes)
-        st.write("cci min/max:", None if cci_df.empty else (cci_df["date"].min(), cci_df["date"].max()))
-        st.write("ridx min/max:", None if ridx_df.empty else (ridx_df["date"].min(), ridx_df["date"].max()))
+        st.write("macro_start/end:", macro_start, macro_end)
+        st.write("region_m min/max:", None if region_m.empty else (region_m["month"].min(), region_m["month"].max()))
+        st.write("cci min/max:", None if cci_df.empty else (cci_df["month"].min(), cci_df["month"].max()))
+        st.write("ridx min/max:", None if ridx_df.empty else (ridx_df["month"].min(), ridx_df["month"].max()))
+        if not region_m.empty:
+            st.write("region_m head:", region_m.head(3))
+        if not cci_df.empty:
+            st.write("cci head:", cci_df.head(3))
+        if not ridx_df.empty:
+            st.write("ridx head:", ridx_df.head(3))
 
-    ms = pd.to_datetime(macro_start)
-    me = pd.to_datetime(macro_end)
-    if not cci_df.empty:
-        cci_df = cci_df[(cci_df["date"] >= ms) & (cci_df["date"] <= me)].copy()
-    if not ridx_df.empty:
-        ridx_df = ridx_df[(ridx_df["date"] >= ms) & (ridx_df["date"] <= me)].copy()
-
-    if cci_df.empty and ridx_df.empty:
-        st.info("No macro series returned for this window.")
+    if region_m.empty:
+        st.info("No region index series for this window (no footfall/turnover data in macro window).")
         st.markdown("</div>", unsafe_allow_html=True)
         return
+
+    # ---- 3) Two charts: (a) CBS retail index vs region, (b) CCI vs region ----
+    def _region_lines():
+        reg_long = region_m.melt(
+            id_vars=["month"],
+            value_vars=["Region footfall-index", "Region omzet-index"],
+            var_name="series",
+            value_name="idx",
+        )
+        return (
+            alt.Chart(reg_long)
+            .mark_line(point=True)
+            .encode(
+                x=alt.X("month:T", title=None),
+                y=alt.Y("idx:Q", title="Regio-index (100 = start)"),
+                color=alt.Color("series:N", legend=alt.Legend(title="")),
+                tooltip=[
+                    alt.Tooltip("month:T", title="Maand"),
+                    alt.Tooltip("series:N", title="Reeks"),
+                    alt.Tooltip("idx:Q", title="Index", format=".1f"),
+                ],
+            )
+        )
+
+    def _macro_line(df_macro, title_right):
+        dfm = df_macro.copy()
+        dfm["series"] = title_right
+        return (
+            alt.Chart(dfm)
+            .mark_line(point=True, strokeDash=[6, 4], strokeWidth=2, color=BLACK)
+            .encode(
+                x=alt.X("month:T", title=None),
+                y=alt.Y(
+                    "value:Q",
+                    title=title_right,
+                    axis=alt.Axis(orient="right"),
+                ),
+                tooltip=[
+                    alt.Tooltip("month:T", title="Maand"),
+                    alt.Tooltip("value:Q", title=title_right, format=".1f"),
+                ],
+            )
+        )
 
     c1, c2 = st.columns(2)
 
     with c1:
-        if cci_df.empty:
-            st.info("CCI series is empty for this window.")
-        else:
-            ch = (
-                alt.Chart(cci_df)
-                .mark_line(point=True)
-                .encode(
-                    x=alt.X("date:T", title=None),
-                    y=alt.Y("value:Q", title="Consumer Confidence Index"),
-                    tooltip=[alt.Tooltip("date:T", title="Date"), alt.Tooltip("value:Q", title="CCI", format=".1f")],
-                )
-                .properties(height=220)
-            )
-            st.altair_chart(ch, use_container_width=True)
+        st.markdown("**CBS detailhandelindex vs Regio**")
+        base = _region_lines()
+        macro = _macro_line(ridx_df, "CBS retail index")
+        st.altair_chart(
+            alt.layer(base, macro).resolve_scale(y="independent").properties(height=260),
+            use_container_width=True
+        )
 
     with c2:
-        if ridx_df.empty:
-            st.info("Retail index series is empty for this window.")
-        else:
-            ch = (
-                alt.Chart(ridx_df)
-                .mark_line(point=True)
-                .encode(
-                    x=alt.X("date:T", title=None),
-                    y=alt.Y("value:Q", title="Retail Index"),
-                    tooltip=[alt.Tooltip("date:T", title="Date"), alt.Tooltip("value:Q", title="Index", format=".1f")],
-                )
-                .properties(height=220)
-            )
-            st.altair_chart(ch, use_container_width=True)
+        st.markdown("**Consumentenvertrouwen (CCI) vs Regio**")
+        base = _region_lines()
+        macro = _macro_line(cci_df, "CCI")
+        st.altair_chart(
+            alt.layer(base, macro).resolve_scale(y="independent").properties(height=260),
+            use_container_width=True
+        )
 
     st.markdown("</div>", unsafe_allow_html=True)
 # ----------------------
