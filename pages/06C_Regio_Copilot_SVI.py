@@ -621,13 +621,29 @@ def plot_macro_panel(df_region_daily: pd.DataFrame, macro_start, macro_end):
         .rename(columns={"date": "month"})
     )
 
-    def _idx(series: pd.Series) -> pd.Series:
+    def _idx(series: pd.Series, k_base: int = 3) -> pd.Series:
+        """
+        Robust index: base = mean of first k non-zero, non-na months.
+        Prevents:
+          - all-NaN index if first month is empty
+          - crazy 0–600 scales if first month is tiny
+        """
         if series is None or len(series) == 0:
             return pd.Series([], dtype=float)
-        base = series.iloc[0]
-        if pd.isna(base) or float(base) == 0.0:
-            return pd.Series([np.nan] * len(series), index=series.index)
-        return (series / base) * 100.0
+    
+        s = pd.to_numeric(series, errors="coerce").copy()
+    
+        # only consider meaningful months for base (non-na & > 0)
+        valid = s[(s.notna()) & (s > 0)]
+    
+        if valid.empty:
+            return pd.Series([np.nan] * len(s), index=s.index)
+    
+        base = float(valid.iloc[:k_base].mean())
+        if pd.isna(base) or base <= 0:
+            return pd.Series([np.nan] * len(s), index=s.index)
+    
+        return (s / base) * 100.0
 
     region_m["Region footfall-index"] = _idx(region_m["footfall"])
     region_m["Region omzet-index"] = _idx(region_m["turnover"])
