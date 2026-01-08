@@ -309,7 +309,7 @@ def load_pathzz_weekly_store(csv_path: str = "data/pathzz_sample_weekly.csv") ->
     df["shop_id"] = pd.to_numeric(df["shop_id"], errors="coerce").astype("Int64")
 
     df = df.dropna(subset=["visits", "shop_id"])
-    if df.emptyif df.empty:
+    if df.empty:
         return pd.DataFrame(columns=["region", "week", "week_start", "visits", "shop_id"])
 
     df["visits"] = (
