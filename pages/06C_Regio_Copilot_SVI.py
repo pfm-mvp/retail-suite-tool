@@ -1672,6 +1672,7 @@ def main():
         st.write("Pathzz rows (all):", 0 if pathzz_all is None else len(pathzz_all))
         st.write("Pathzz rows (period):", 0 if pathzz_period is None else len(pathzz_period))
         st.write("Pathzz rows (region):", 0 if pathzz_region is None else len(pathzz_region))
+        st.write("Raw Pathzz columns:", pd.read_csv("data/pathzz_sample_weekly.csv", sep=";", nrows=5).columns.tolist())
         pz = load_pathzz_weekly_store("data/pathzz_sample_weekly.csv")
         st.write("Pathzz cols:", [] if pz is None else pz.columns.tolist())
         st.write("Pathzz rows:", 0 if pz is None else len(pz))
