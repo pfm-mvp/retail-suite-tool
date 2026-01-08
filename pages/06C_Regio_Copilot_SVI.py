@@ -1289,7 +1289,9 @@ def main():
         )
 
         st.altair_chart(
-            alt.layer(bars, line).resolve_scale(y="independent").properties(height=260),
+            alt.layer(bars, line)
+              .resolve_scale(y="independent", color="independent")
+              .properties(height=260),
             use_container_width=True
         )
 
