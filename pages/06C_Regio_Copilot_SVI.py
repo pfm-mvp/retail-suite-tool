@@ -598,6 +598,25 @@ def plot_macro_panel(macro_start, macro_end):
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
+    def _parse_any_date(s):
+        if pd.isna(s):
+            return pd.NaT
+        s = str(s).strip()
+    
+        # CBS komt vaak met: 2024MM09
+        if "MM" in s and len(s) >= 7:
+            s = s.replace("MM", "-") + "-01"  # -> 2024-09-01
+    
+        # Soms: 202409
+        if s.isdigit() and len(s) == 6:
+            s = f"{s[:4]}-{s[4:]}-01"
+    
+        # Soms: 2024-09
+        if len(s) == 7 and s[4] == "-":
+            s = s + "-01"
+    
+        return pd.to_datetime(s, errors="coerce")
+
     def _prep(obj):
         """
         Robust macro-series prep.
@@ -689,12 +708,24 @@ def plot_macro_panel(macro_start, macro_end):
             out["date"] = pd.to_datetime(out["date"], errors="coerce")
             out["value"] = pd.to_numeric(out["value"], errors="coerce")
 
-        out = out.dropna(subset=["date", "value"]).sort_values("date").reset_index(drop=True)
-        return out
+            # Forceer extra-robuste date parsing
+            out["date"] = out["date"].apply(_parse_any_date)
+            
+            out = out.dropna(subset=["date", "value"]).sort_values("date").reset_index(drop=True)
+            return out
 
     # prep series
     cci_df = _prep(cci)
     ridx_df = _prep(ridx)
+
+    with st.expander("🔧 Debug macro (dates)"):
+    st.write("cci_df dtypes:", None if cci_df is None else cci_df.dtypes)
+    st.write("cci min/max:", None if cci_df.empty else (cci_df["date"].min(), cci_df["date"].max()))
+    st.write("ridx min/max:", None if ridx_df.empty else (ridx_df["date"].min(), ridx_df["date"].max()))
+    if not cci_df.empty:
+        st.write("cci head:", cci_df.head(3))
+    if not ridx_df.empty:
+        st.write("ridx head:", ridx_df.head(3))
 
     with st.expander("🔎 Debug macro (CBS/CCI)"):
         st.write("macro_start/end:", macro_start, macro_end)
