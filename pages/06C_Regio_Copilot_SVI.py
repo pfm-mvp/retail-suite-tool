@@ -242,10 +242,6 @@ def get_locations_by_company(company_id: int) -> pd.DataFrame:
         return pd.DataFrame(data["locations"])
     return pd.DataFrame(data)
 
-# ----------------------
-# Pathzz (store-level weekly) helpers
-# ----------------------
-@st.cache_data(ttl=600)
 @st.cache_data(ttl=600)
 def load_pathzz_weekly_store(csv_path: str = "data/pathzz_sample_weekly.csv") -> pd.DataFrame:
     """
@@ -266,7 +262,7 @@ def load_pathzz_weekly_store(csv_path: str = "data/pathzz_sample_weekly.csv") ->
     if df is None or df.empty:
         return pd.DataFrame(columns=["region", "week", "week_start", "visits", "shop_id"])
 
-    # normalize column names
+    # Normalize column names
     df = df.rename(columns={"Region": "region", "Week": "week", "Visits": "visits"}).copy()
 
     # Must-have columns
@@ -274,44 +270,43 @@ def load_pathzz_weekly_store(csv_path: str = "data/pathzz_sample_weekly.csv") ->
         if c not in df.columns:
             return pd.DataFrame(columns=["region", "week", "week_start", "visits", "shop_id"])
 
-    # Ensure shop_id exists as a column (some exports may omit it)
+    # Ensure shop_id exists
     if "shop_id" not in df.columns:
-        # try common fallback names
         for cand in ["ShopId", "shopid", "store_id", "StoreId"]:
             if cand in df.columns:
                 df = df.rename(columns={cand: "shop_id"})
                 break
 
-    # If still no shop_id, try: last column might actually be shop id
+    # If still no shop_id but at least 4 columns: assume last column is shop id
     if "shop_id" not in df.columns and df.shape[1] >= 4:
         df["shop_id"] = df.iloc[:, -1]
 
-    # ---- Clean fields ----
-    df["region"] = df["region"].astype(str).str.strip()
+    # If still missing, bail out
+    if "shop_id" not in df.columns:
+        return pd.DataFrame(columns=["region", "week", "week_start", "visits", "shop_id"])
 
-    # visits EU format: "45.654" -> 45654
+    # Clean fields
+    df["region"] = df["region"].astype(str).str.strip()
     df["visits"] = df["visits"].astype(str).str.strip().replace("", np.nan)
 
-    # IMPORTANT: handle broken rows where shop_id landed in store_type
-    # Case: header includes store_type + shop_id, but some lines have only 4 fields
-    # => shop_id becomes NaN, store_type contains digits (the real shop_id)
-    if "shop_id" in df.columns and "store_type" in df.columns:
+    # Fix broken rows where shop_id landed in store_type (due to missing field)
+    if "store_type" in df.columns:
         shop_id_missing = df["shop_id"].isna() | (df["shop_id"].astype(str).str.strip() == "")
         store_type_numeric = df["store_type"].astype(str).str.fullmatch(r"\d+")
         fix_mask = shop_id_missing & store_type_numeric.fillna(False)
         df.loc[fix_mask, "shop_id"] = df.loc[fix_mask, "store_type"]
-        df.loc[fix_mask, "store_type"] = np.nan  # optional
+        # optional: clear store_type for those fixed rows
+        df.loc[fix_mask, "store_type"] = np.nan
 
-    # Now coerce shop_id safely
-    if "shop_id" not in df.columns:
-        return pd.DataFrame(columns=["region", "week", "week_start", "visits", "shop_id"])
-
+    # Coerce shop_id
     df["shop_id"] = pd.to_numeric(df["shop_id"], errors="coerce").astype("Int64")
 
+    # Drop invalid
     df = df.dropna(subset=["visits", "shop_id"])
     if df.empty:
         return pd.DataFrame(columns=["region", "week", "week_start", "visits", "shop_id"])
 
+    # Parse visits EU-ish (45.654 -> 45654)
     df["visits"] = (
         df["visits"]
         .str.replace(".", "", regex=False)
