@@ -1629,7 +1629,7 @@ def main():
         st.write("Company vals:", comp_vals)
         st.write("Pathzz file exists:", os.path.exists("data/pathzz_sample_weekly.csv"))
         if os.path.exists("data/pathzz_sample_weekly.csv"):
-        st.write("Pathzz file size:", os.path.getsize("data/pathzz_sample_weekly.csv"))
+            st.write("Pathzz file size:", os.path.getsize("data/pathzz_sample_weekly.csv"))
         st.write("Pathzz rows (all):", 0 if pathzz_all is None else len(pathzz_all))
         st.write("Pathzz rows (period):", 0 if pathzz_period is None else len(pathzz_period))
         st.write("Pathzz rows (region):", 0 if pathzz_region is None else len(pathzz_region))
