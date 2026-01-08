@@ -241,19 +241,11 @@ def get_locations_by_company(company_id: int) -> pd.DataFrame:
     if isinstance(data, dict) and "locations" in data:
         return pd.DataFrame(data["locations"])
     return pd.DataFrame(data)
-
+# ----------------------
+# Pathzz store-level capture (FIXED)
+# ----------------------
 @st.cache_data(ttl=600)
-def load_pathzz_weekly_store(csv_path: str = "data/pathzz_sample_weekly.csv") -> pd.DataFrame:
-    """
-    Accepts semicolon separated Pathzz weekly store export.
-
-    Supported headers:
-      - Region;Week;Visits;shop_id
-      - Region;Week;Visits;store_type;shop_id
-
-    Week format:
-      "2023-12-31 To 2024-01-06"  (start date is week_start)
-    """
+def load_pathzz_weekly_store(csv_path: str, _mtime: float) -> pd.DataFrame:
     try:
         df = pd.read_csv(csv_path, sep=";", dtype=str, engine="python")
     except Exception:
@@ -262,51 +254,26 @@ def load_pathzz_weekly_store(csv_path: str = "data/pathzz_sample_weekly.csv") ->
     if df is None or df.empty:
         return pd.DataFrame(columns=["region", "week", "week_start", "visits", "shop_id"])
 
-    # Normalize column names
     df = df.rename(columns={"Region": "region", "Week": "week", "Visits": "visits"}).copy()
 
-    # Must-have columns
     for c in ["region", "week", "visits"]:
         if c not in df.columns:
             return pd.DataFrame(columns=["region", "week", "week_start", "visits", "shop_id"])
 
-    # Ensure shop_id exists
-    if "shop_id" not in df.columns:
-        for cand in ["ShopId", "shopid", "store_id", "StoreId"]:
-            if cand in df.columns:
-                df = df.rename(columns={cand: "shop_id"})
-                break
-
-    # If still no shop_id but at least 4 columns: assume last column is shop id
     if "shop_id" not in df.columns and df.shape[1] >= 4:
         df["shop_id"] = df.iloc[:, -1]
 
-    # If still missing, bail out
     if "shop_id" not in df.columns:
         return pd.DataFrame(columns=["region", "week", "week_start", "visits", "shop_id"])
 
-    # Clean fields
     df["region"] = df["region"].astype(str).str.strip()
     df["visits"] = df["visits"].astype(str).str.strip().replace("", np.nan)
-
-    # Fix broken rows where shop_id landed in store_type (due to missing field)
-    if "store_type" in df.columns:
-        shop_id_missing = df["shop_id"].isna() | (df["shop_id"].astype(str).str.strip() == "")
-        store_type_numeric = df["store_type"].astype(str).str.fullmatch(r"\d+")
-        fix_mask = shop_id_missing & store_type_numeric.fillna(False)
-        df.loc[fix_mask, "shop_id"] = df.loc[fix_mask, "store_type"]
-        # optional: clear store_type for those fixed rows
-        df.loc[fix_mask, "store_type"] = np.nan
-
-    # Coerce shop_id
     df["shop_id"] = pd.to_numeric(df["shop_id"], errors="coerce").astype("Int64")
 
-    # Drop invalid
     df = df.dropna(subset=["visits", "shop_id"])
     if df.empty:
         return pd.DataFrame(columns=["region", "week", "week_start", "visits", "shop_id"])
 
-    # Parse visits EU-ish (45.654 -> 45654)
     df["visits"] = (
         df["visits"]
         .str.replace(".", "", regex=False)
@@ -1034,7 +1001,10 @@ def main():
     # ----------------------
     # Pathzz store-level capture (FIXED)
     # ----------------------
-    pathzz_all = load_pathzz_weekly_store("data/pathzz_sample_weekly.csv")
+    pz_path = "data/pathzz_sample_weekly.csv"
+    pz_mtime = os.path.getmtime(pz_path) if os.path.exists(pz_path) else 0.0
+    pathzz_all = load_pathzz_weekly_store(pz_path, pz_mtime)
+    
     pathzz_period = filter_pathzz_for_period(pathzz_all, start_period, end_period)
 
     # region filter on normalized key
@@ -1049,7 +1019,10 @@ def main():
     dd_region = df_region_daily.copy()
     dd_region["date"] = pd.to_datetime(dd_region["date"], errors="coerce")
     dd_region = dd_region.dropna(subset=["date"])
-    dd_region["week_start"] = dd_region["date"].dt.to_period("W-SUN").dt.start_time
+    dd_region["week_start"] = dd_region["date"].dt.to_period("W-SAT").dt.start_time
+
+    for c in ["footfall", "turnover", "transactions"]:
+    dd_region[c] = pd.to_numeric(dd_region.get(c, np.nan), errors="coerce").fillna(0.0)
 
     store_week = (
         dd_region.groupby(["id", "week_start"], as_index=False)
@@ -1661,12 +1634,16 @@ def main():
         st.write("Store weights:", store_weights)
         st.write("Reg bench:", reg_bench)
         st.write("Company vals:", comp_vals)
+        st.write("Pathzz mtime:", pz_mtime)
+        st.write("Pathzz week_start min/max:", None if pathzz_all.empty else (pathzz_all["week_start"].min(), pathzz_all["week_start"].max()))
         st.write("Pathzz file exists:", os.path.exists("data/pathzz_sample_weekly.csv"))
         if os.path.exists("data/pathzz_sample_weekly.csv"):
             st.write("Pathzz file size:", os.path.getsize("data/pathzz_sample_weekly.csv"))
         st.write("Pathzz rows (all):", 0 if pathzz_all is None else len(pathzz_all))
         st.write("Pathzz rows (period):", 0 if pathzz_period is None else len(pathzz_period))
         st.write("Pathzz rows (region):", 0 if pathzz_region is None else len(pathzz_region))
+        st.write("Pathzz mtime:", pz_mtime)
+        st.write("Pathzz week_start min/max:", (None if pathzz_all.empty else (pathzz_all["week_start"].min(), pathzz_all["week_start"].max())))
         st.write("Raw Pathzz columns:", pd.read_csv("data/pathzz_sample_weekly.csv", sep=";", nrows=5).columns.tolist())
         pz = load_pathzz_weekly_store("data/pathzz_sample_weekly.csv")
         st.write("Pathzz cols:", [] if pz is None else pz.columns.tolist())
