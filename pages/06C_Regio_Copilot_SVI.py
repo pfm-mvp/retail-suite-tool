@@ -680,6 +680,10 @@ def plot_macro_panel(macro_start, macro_end):
             val_col = value_candidates[0]
             tmp["value"] = pd.to_numeric(tmp[val_col], errors="coerce")
             out = tmp[["date", "value"]].copy()
+            
+            out["date"] = out["date"].apply(_parse_any_date)
+            out = out.dropna(subset=["date", "value"]).sort_values("date").reset_index(drop=True)
+            return out
 
         else:
             # generic fallback
@@ -719,13 +723,13 @@ def plot_macro_panel(macro_start, macro_end):
     ridx_df = _prep(ridx)
 
     with st.expander("🔧 Debug macro (dates)"):
-    st.write("cci_df dtypes:", None if cci_df is None else cci_df.dtypes)
-    st.write("cci min/max:", None if cci_df.empty else (cci_df["date"].min(), cci_df["date"].max()))
-    st.write("ridx min/max:", None if ridx_df.empty else (ridx_df["date"].min(), ridx_df["date"].max()))
-    if not cci_df.empty:
-        st.write("cci head:", cci_df.head(3))
-    if not ridx_df.empty:
-        st.write("ridx head:", ridx_df.head(3))
+        st.write("cci_df dtypes:", None if cci_df is None else cci_df.dtypes)
+        st.write("cci min/max:", None if cci_df.empty else (cci_df["date"].min(), cci_df["date"].max()))
+        st.write("ridx min/max:", None if ridx_df.empty else (ridx_df["date"].min(), ridx_df["date"].max()))
+        if not cci_df.empty:
+            st.write("cci head:", cci_df.head(3))
+        if not ridx_df.empty:
+            st.write("ridx head:", ridx_df.head(3))
 
     with st.expander("🔎 Debug macro (CBS/CCI)"):
         st.write("macro_start/end:", macro_start, macro_end)
