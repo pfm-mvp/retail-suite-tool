@@ -590,9 +590,37 @@ def plot_macro_panel(macro_start, macro_end):
         unsafe_allow_html=True
     )
 
+    def plot_macro_panel(macro_start, macro_end):
+    st.markdown(
+        '<div class="panel"><div class="panel-title">Macro context — Consumer Confidence & Retail Index</div>',
+        unsafe_allow_html=True
+    )
+
+    # ✅ add this HERE (inside the panel, before fetching macro data)
+    cA, cB = st.columns([3, 1])
+    with cB:
+        if st.button("🔄 Refresh macro data", key="refresh_macro"):
+            st.cache_data.clear()
+            st.rerun()
+
     try:
         cci = get_cci_series()
         ridx = get_retail_index()
+    except Exception as e:
+        st.info(f"Macro data not available right now: {e}")
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+
+    try:
+        cci = get_cci_series()
+        ridx = get_retail_index()
+
+    with st.expander("🔎 Debug macro (raw payload)"):
+        st.write("len(cci):", None if cci is None else len(cci))
+        st.write("len(ridx):", None if ridx is None else len(ridx))
+        st.write("cci[0] sample:", None if (not cci or len(cci)==0) else cci[0])
+        st.write("ridx[0] sample:", None if (not ridx or len(ridx)==0) else ridx[0])
+    
     except Exception as e:
         st.info(f"Macro data not available right now: {e}")
         st.markdown("</div>", unsafe_allow_html=True)
@@ -695,7 +723,7 @@ def plot_macro_panel(macro_start, macro_end):
                     break
 
             val_col = None
-            for cand in ("value", "index", "cci", "retail_index"):
+            for cand in ("value", "index", "cci", "retail_index", "retail_value"):
                 if cand in lower_cols:
                     val_col = lower_cols[cand]
                     break
