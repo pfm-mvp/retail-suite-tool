@@ -1672,9 +1672,15 @@ def main():
         st.write("Pathzz cols:", [] if pz is None else pz.columns.tolist())
         st.write("Pathzz rows:", 0 if pz is None else len(pz))
         if pz is not None and not pz.empty:
-        st.write("Pathzz sample:", pz.head(5))
-        st.write("Pathzz shop_id nulls:", int(pz["shop_id"].isna().sum()))
-        st.write("Unique Pathzz shop_ids in region:", pathzz_region["shop_id"].dropna().nunique())
+            st.write("Pathzz sample:", pz.head(5))
+            st.write("Pathzz shop_id nulls:", int(pz["shop_id"].isna().sum()))
+        else:
+            st.write("Pathzz sample: <empty>")
+        st.write(
+            "Unique Pathzz shop_ids in region:",
+            0 if (pathzz_region is None or pathzz_region.empty or "shop_id" not in pathzz_region.columns)
+            else int(pathzz_region["shop_id"].dropna().nunique())
+        )
         st.write("Unique Vemcount store ids in region:", store_week["id"].dropna().nunique())
         st.write("Matched store-week rows:", len(capture_store_week) if "capture_store_week" in locals() else 0)
         st.write("Pathzz week_start sample:", pathzz_region["week_start"].head(3) if not pathzz_region.empty else None)
