@@ -582,7 +582,10 @@ def style_heatmap_ratio(val):
 # Macro charts
 # ----------------------
 def plot_macro_panel(macro_start, macro_end):
-    st.markdown('<div class="panel"><div class="panel-title">Macro context — Consumer Confidence & Retail Index</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="panel"><div class="panel-title">Macro context — Consumer Confidence & Retail Index</div>',
+        unsafe_allow_html=True
+    )
 
     try:
         cci = get_cci_series()
@@ -592,60 +595,81 @@ def plot_macro_panel(macro_start, macro_end):
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
-    def _prep(obj, date_col_candidates=("date", "period", "month", "time"), value_col_candidates=("value", "index", "cci")):
+    def _prep(obj):
         """
-        Make macro-series input robust.
-        Accepts: pd.DataFrame, dict, list[dict], list[tuple], None
-        Returns: pd.DataFrame with columns: date, value
+        Robust macro-series prep.
+        Accepts: DataFrame, dict, list[dict], list[tuple], etc.
+        Returns: DataFrame with columns ['date','value'].
         """
         if obj is None:
             return pd.DataFrame(columns=["date", "value"])
-    
-        # If already a DataFrame
+
         if isinstance(obj, pd.DataFrame):
             df = obj.copy()
         else:
-            # Try to coerce common structures into a DataFrame
             try:
                 df = pd.DataFrame(obj)
             except Exception:
                 return pd.DataFrame(columns=["date", "value"])
-    
-        if df is None or df.shape[0] == 0:
-            return pd.DataFrame(columns=["date", "value"])
-    
-        # Find date column
-        date_col = None
-        for c in date_col_candidates:
-            if c in df.columns:
-                date_col = c
-                break
-    
-        # Find value column
-        value_col = None
-        for c in value_col_candidates:
-            if c in df.columns:
-                value_col = c
-                break
-    
-        # If it’s a 2-column unnamed df (e.g. tuples)
-        if date_col is None and value_col is None and df.shape[1] >= 2:
-            date_col = df.columns[0]
-            value_col = df.columns[1]
-    
-        if date_col is None or value_col is None:
-            # Last resort: return empty so chart doesn't crash
-            return pd.DataFrame(columns=["date", "value"])
-    
-        out = df[[date_col, value_col]].rename(columns={date_col: "date", value_col: "value"}).copy()
-        out["date"] = pd.to_datetime(out["date"], errors="coerce")
-        out["value"] = pd.to_numeric(out["value"], errors="coerce")
-        out = out.dropna(subset=["date"]).sort_values("date")
-    
-        return out.reset_index(drop=True)
 
+        if df.empty:
+            return pd.DataFrame(columns=["date", "value"])
+
+        # --- CBS-style: often has Perioden ---
+        if "Perioden" in df.columns:
+            tmp = df.copy()
+            tmp["date"] = pd.to_datetime(tmp["Perioden"], errors="coerce")
+
+            # pick first numeric-ish column that's not Perioden/date
+            value_candidates = [c for c in tmp.columns if c not in ("Perioden", "date")]
+            if not value_candidates:
+                return pd.DataFrame(columns=["date", "value"])
+
+            val_col = value_candidates[0]
+            tmp["value"] = pd.to_numeric(tmp[val_col], errors="coerce")
+            out = tmp[["date", "value"]].copy()
+
+        else:
+            # generic fallback
+            lower_cols = {c.lower(): c for c in df.columns}
+            date_col = None
+            for cand in ("date", "month", "period", "time"):
+                if cand in lower_cols:
+                    date_col = lower_cols[cand]
+                    break
+
+            val_col = None
+            for cand in ("value", "index", "cci", "retail_index"):
+                if cand in lower_cols:
+                    val_col = lower_cols[cand]
+                    break
+
+            # If still nothing: try 2-column structure
+            if (date_col is None or val_col is None) and df.shape[1] >= 2:
+                date_col = df.columns[0]
+                val_col = df.columns[1]
+
+            if date_col is None or val_col is None:
+                return pd.DataFrame(columns=["date", "value"])
+
+            out = df[[date_col, val_col]].rename(columns={date_col: "date", val_col: "value"}).copy()
+            out["date"] = pd.to_datetime(out["date"], errors="coerce")
+            out["value"] = pd.to_numeric(out["value"], errors="coerce")
+
+        out = out.dropna(subset=["date", "value"]).sort_values("date").reset_index(drop=True)
+        return out
+
+    # prep series
     cci_df = _prep(cci)
     ridx_df = _prep(ridx)
+
+    # filter to macro window (THIS was missing / broken)
+    ms = pd.to_datetime(macro_start)
+    me = pd.to_datetime(macro_end)
+    if not cci_df.empty:
+        cci_df = cci_df[(cci_df["date"] >= ms) & (cci_df["date"] <= me)].copy()
+    if not ridx_df.empty:
+        ridx_df = ridx_df[(ridx_df["date"] >= ms) & (ridx_df["date"] <= me)].copy()
 
     if cci_df.empty and ridx_df.empty:
         st.info("No macro series returned for this window.")
@@ -658,64 +682,41 @@ def plot_macro_panel(macro_start, macro_end):
         if cci_df.empty:
             st.info("CCI series is empty for this window.")
         else:
-            # find numeric value column
-            val_col = None
-            for cand in ["value", "cci", "index", "Value"]:
-                if cand in cci_df.columns:
-                    val_col = cand
-                    break
-            if val_col is None:
-                # pick first numeric
-                num_cols = [c for c in cci_df.columns if c != "date"]
-                val_col = num_cols[0] if num_cols else None
-
-            if val_col is None:
-                st.info("CCI value column not found.")
-            else:
-                cci_df[val_col] = pd.to_numeric(cci_df[val_col], errors="coerce")
-                ch = (
-                    alt.Chart(cci_df.dropna(subset=[val_col]))
-                    .mark_line(point=True)
-                    .encode(
-                        x=alt.X("date:T", title=None),
-                        y=alt.Y(f"{val_col}:Q", title="Consumer Confidence Index"),
-                        tooltip=[alt.Tooltip("date:T", title="Date"), alt.Tooltip(f"{val_col}:Q", title="CCI", format=".1f")],
-                    )
-                    .properties(height=220)
+            ch = (
+                alt.Chart(cci_df)
+                .mark_line(point=True)
+                .encode(
+                    x=alt.X("date:T", title=None),
+                    y=alt.Y("value:Q", title="Consumer Confidence Index"),
+                    tooltip=[
+                        alt.Tooltip("date:T", title="Date"),
+                        alt.Tooltip("value:Q", title="CCI", format=".1f"),
+                    ],
                 )
-                st.altair_chart(ch, use_container_width=True)
+                .properties(height=220)
+            )
+            st.altair_chart(ch, use_container_width=True)
 
     with c2:
         if ridx_df.empty:
             st.info("Retail index series is empty for this window.")
         else:
-            val_col = None
-            for cand in ["value", "index", "retail_index", "Value"]:
-                if cand in ridx_df.columns:
-                    val_col = cand
-                    break
-            if val_col is None:
-                num_cols = [c for c in ridx_df.columns if c != "date"]
-                val_col = num_cols[0] if num_cols else None
-
-            if val_col is None:
-                st.info("Retail index value column not found.")
-            else:
-                ridx_df[val_col] = pd.to_numeric(ridx_df[val_col], errors="coerce")
-                ch = (
-                    alt.Chart(ridx_df.dropna(subset=[val_col]))
-                    .mark_line(point=True)
-                    .encode(
-                        x=alt.X("date:T", title=None),
-                        y=alt.Y(f"{val_col}:Q", title="Retail Index"),
-                        tooltip=[alt.Tooltip("date:T", title="Date"), alt.Tooltip(f"{val_col}:Q", title="Index", format=".1f")],
-                    )
-                    .properties(height=220)
+            ch = (
+                alt.Chart(ridx_df)
+                .mark_line(point=True)
+                .encode(
+                    x=alt.X("date:T", title=None),
+                    y=alt.Y("value:Q", title="Retail Index"),
+                    tooltip=[
+                        alt.Tooltip("date:T", title="Date"),
+                        alt.Tooltip("value:Q", title="Index", format=".1f"),
+                    ],
                 )
-                st.altair_chart(ch, use_container_width=True)
+                .properties(height=220)
+            )
+            st.altair_chart(ch, use_container_width=True)
 
     st.markdown("</div>", unsafe_allow_html=True)
-
 # ----------------------
 # MAIN
 # ----------------------
@@ -1013,7 +1014,7 @@ def main():
     dd_region = df_region_daily.copy()
     dd_region["date"] = pd.to_datetime(dd_region["date"], errors="coerce")
     dd_region = dd_region.dropna(subset=["date"])
-    dd_region["week_start"] = dd_region["date"].dt.to_period("W-SAT").dt.start_time
+    dd_region["week_start"] = dd_region["date"].dt.to_period("W-SUN").dt.start_time
 
     store_week = (
         dd_region.groupby(["id", "week_start"], as_index=False)
@@ -1628,6 +1629,8 @@ def main():
         st.write("Pathzz rows (all):", 0 if pathzz_all is None else len(pathzz_all))
         st.write("Pathzz rows (period):", 0 if pathzz_period is None else len(pathzz_period))
         st.write("Pathzz rows (region):", 0 if pathzz_region is None else len(pathzz_region))
+        st.write("Pathzz week_start sample:", pathzz_region["week_start"].head(3) if not pathzz_region.empty else None)
+    st.write("Vemcount week_start sample:", store_week["week_start"].head(3) if "store_week" in locals() else None)
         st.write("capture_store_week head:", capture_store_week.head(10) if "capture_store_week" in locals() else None)
         st.write("region_weekly head:", region_weekly.head(10) if "region_weekly" in locals() else None)
         st.write("df_daily_store cols:", df_daily_store.columns.tolist())
