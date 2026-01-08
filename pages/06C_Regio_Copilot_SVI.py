@@ -697,11 +697,11 @@ def plot_macro_panel(macro_start, macro_end):
     ridx_df = _prep(ridx)
 
     with st.expander("🔎 Debug macro (CBS/CCI)"):
-    st.write("macro_start/end:", macro_start, macro_end)
-    st.write("CCI raw type:", type(cci))
-    st.write("Retail raw type:", type(ridx))
-    st.write("CCI df cols:", [] if cci_df is None else cci_df.columns.tolist())
-    st.write("Retail df cols:", [] if ridx_df is None else ridx_df.columns.tolist())
+        st.write("macro_start/end:", macro_start, macro_end)
+        st.write("CCI raw type:", type(cci))
+        st.write("Retail raw type:", type(ridx))
+        st.write("CCI df cols:", [] if cci_df is None else cci_df.columns.tolist())
+        st.write("Retail df cols:", [] if ridx_df is None else ridx_df.columns.tolist())
     if cci_df is not None and not cci_df.empty:
         st.write("CCI date min/max:", cci_df["date"].min(), cci_df["date"].max())
         st.write(cci_df.head(3))
