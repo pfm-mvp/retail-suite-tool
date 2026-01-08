@@ -1630,7 +1630,7 @@ def main():
         st.write("Pathzz rows (period):", 0 if pathzz_period is None else len(pathzz_period))
         st.write("Pathzz rows (region):", 0 if pathzz_region is None else len(pathzz_region))
         st.write("Pathzz week_start sample:", pathzz_region["week_start"].head(3) if not pathzz_region.empty else None)
-    st.write("Vemcount week_start sample:", store_week["week_start"].head(3) if "store_week" in locals() else None)
+        st.write("Vemcount week_start sample:", store_week["week_start"].head(3) if "store_week" in locals() else None)
         st.write("capture_store_week head:", capture_store_week.head(10) if "capture_store_week" in locals() else None)
         st.write("region_weekly head:", region_weekly.head(10) if "region_weekly" in locals() else None)
         st.write("df_daily_store cols:", df_daily_store.columns.tolist())
