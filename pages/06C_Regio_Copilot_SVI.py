@@ -618,9 +618,41 @@ def plot_macro_panel(macro_start, macro_end):
             return pd.DataFrame(columns=["date", "value"])
 
         # --- CBS-style: often has Perioden ---
+        import re
+        
         if "Perioden" in df.columns:
             tmp = df.copy()
-            tmp["date"] = pd.to_datetime(tmp["Perioden"], errors="coerce")
+        
+            def _parse_cbs_period(p):
+                if pd.isna(p):
+                    return pd.NaT
+                s = str(p).strip()
+        
+                # 2024M07
+                m = re.match(r"^(\d{4})M(\d{2})$", s)
+                if m:
+                    return pd.Timestamp(int(m.group(1)), int(m.group(2)), 1)
+        
+                # 2024MM07 (komt ook voor)
+                m = re.match(r"^(\d{4})MM(\d{2})$", s)
+                if m:
+                    return pd.Timestamp(int(m.group(1)), int(m.group(2)), 1)
+        
+                # 2024-07 of 2024/07
+                m = re.match(r"^(\d{4})[-/](\d{2})$", s)
+                if m:
+                    return pd.Timestamp(int(m.group(1)), int(m.group(2)), 1)
+        
+                # 202407 (yyyymm)
+                m = re.match(r"^(\d{4})(\d{2})$", s)
+                if m:
+                    return pd.Timestamp(int(m.group(1)), int(m.group(2)), 1)
+        
+                # fallback
+                dt = pd.to_datetime(s, errors="coerce")
+                return dt
+        
+            tmp["date"] = tmp["Perioden"].apply(_parse_cbs_period)
 
             # pick first numeric-ish column that's not Perioden/date
             value_candidates = [c for c in tmp.columns if c not in ("Perioden", "date")]
@@ -664,6 +696,19 @@ def plot_macro_panel(macro_start, macro_end):
     # prep series
     cci_df = _prep(cci)
     ridx_df = _prep(ridx)
+
+    with st.expander("🔎 Debug macro (CBS/CCI)"):
+    st.write("macro_start/end:", macro_start, macro_end)
+    st.write("CCI raw type:", type(cci))
+    st.write("Retail raw type:", type(ridx))
+    st.write("CCI df cols:", [] if cci_df is None else cci_df.columns.tolist())
+    st.write("Retail df cols:", [] if ridx_df is None else ridx_df.columns.tolist())
+    if cci_df is not None and not cci_df.empty:
+        st.write("CCI date min/max:", cci_df["date"].min(), cci_df["date"].max())
+        st.write(cci_df.head(3))
+    if ridx_df is not None and not ridx_df.empty:
+        st.write("Retail date min/max:", ridx_df["date"].min(), ridx_df["date"].max())
+        st.write(ridx_df.head(3))
 
     # filter to macro window (THIS was missing / broken)
     ms = pd.to_datetime(macro_start)
