@@ -7,15 +7,15 @@ BASE_URL = "https://opendata.cbs.nl/ODataApi/OData"
 
 
 def _fetch_typed_dataset(dataset: str, top: int = 5000) -> List[Dict]:
-    """
-    Haalt ruwe records op uit CBS OData TypedDataSet.
-    """
     url = f"{BASE_URL}/{dataset}/TypedDataSet?$top={top}"
     resp = requests.get(url, timeout=20)
     resp.raise_for_status()
     js = resp.json()
-    return js.get("value", [])
 
+    if "value" not in js:
+        raise RuntimeError(f"CBS response missing 'value'. Keys={list(js.keys())}")
+
+    return js["value"]
 
 def get_cci_series(months_back: int = 24) -> List[Dict]:
     """
