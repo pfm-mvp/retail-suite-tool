@@ -246,31 +246,71 @@ def get_locations_by_company(company_id: int) -> pd.DataFrame:
 # Pathzz (store-level weekly) helpers
 # ----------------------
 @st.cache_data(ttl=600)
+@st.cache_data(ttl=600)
 def load_pathzz_weekly_store(csv_path: str = "data/pathzz_sample_weekly.csv") -> pd.DataFrame:
     """
-    Expected columns (semicolon separated):
-      Region;Week;Visits;store_type;shop_id
+    Accepts semicolon separated Pathzz weekly store export.
+
+    Supported headers:
+      - Region;Week;Visits;shop_id
+      - Region;Week;Visits;store_type;shop_id
 
     Week format:
-      "2023-12-31 To 2024-01-06"  (start date is the week_start)
+      "2023-12-31 To 2024-01-06"  (start date is week_start)
     """
-    expected = ["Region", "Week", "Visits", "shop_id"]
     try:
         df = pd.read_csv(csv_path, sep=";", dtype=str, engine="python")
     except Exception:
         return pd.DataFrame(columns=["region", "week", "week_start", "visits", "shop_id"])
 
-    if any(c not in df.columns for c in expected):
+    if df is None or df.empty:
         return pd.DataFrame(columns=["region", "week", "week_start", "visits", "shop_id"])
 
+    # normalize column names
     df = df.rename(columns={"Region": "region", "Week": "week", "Visits": "visits"}).copy()
 
+    # Must-have columns
+    for c in ["region", "week", "visits"]:
+        if c not in df.columns:
+            return pd.DataFrame(columns=["region", "week", "week_start", "visits", "shop_id"])
+
+    # Ensure shop_id exists as a column (some exports may omit it)
+    if "shop_id" not in df.columns:
+        # try common fallback names
+        for cand in ["ShopId", "shopid", "store_id", "StoreId"]:
+            if cand in df.columns:
+                df = df.rename(columns={cand: "shop_id"})
+                break
+
+    # If still no shop_id, try: last column might actually be shop id
+    if "shop_id" not in df.columns and df.shape[1] >= 4:
+        df["shop_id"] = df.iloc[:, -1]
+
+    # ---- Clean fields ----
     df["region"] = df["region"].astype(str).str.strip()
+
+    # visits EU format: "45.654" -> 45654
+    df["visits"] = df["visits"].astype(str).str.strip().replace("", np.nan)
+
+    # IMPORTANT: handle broken rows where shop_id landed in store_type
+    # Case: header includes store_type + shop_id, but some lines have only 4 fields
+    # => shop_id becomes NaN, store_type contains digits (the real shop_id)
+    if "shop_id" in df.columns and "store_type" in df.columns:
+        shop_id_missing = df["shop_id"].isna() | (df["shop_id"].astype(str).str.strip() == "")
+        store_type_numeric = df["store_type"].astype(str).str.fullmatch(r"\d+")
+        fix_mask = shop_id_missing & store_type_numeric.fillna(False)
+        df.loc[fix_mask, "shop_id"] = df.loc[fix_mask, "store_type"]
+        df.loc[fix_mask, "store_type"] = np.nan  # optional
+
+    # Now coerce shop_id safely
+    if "shop_id" not in df.columns:
+        return pd.DataFrame(columns=["region", "week", "week_start", "visits", "shop_id"])
+
     df["shop_id"] = pd.to_numeric(df["shop_id"], errors="coerce").astype("Int64")
 
-    # visits can be "1.234" or "1,234" etc.
-    df["visits"] = df["visits"].astype(str).str.strip().replace("", np.nan)
     df = df.dropna(subset=["visits", "shop_id"])
+    if df.emptyif df.empty:
+        return pd.DataFrame(columns=["region", "week", "week_start", "visits", "shop_id"])
 
     df["visits"] = (
         df["visits"]
@@ -283,10 +323,10 @@ def load_pathzz_weekly_store(csv_path: str = "data/pathzz_sample_weekly.csv") ->
         if isinstance(s, str) and "To" in s:
             return pd.to_datetime(s.split("To")[0].strip(), errors="coerce")
         return pd.NaT
-    
+
     df["week_start"] = df["week"].apply(_parse_week_start)
     df = df.dropna(subset=["week_start"])
-    
+
     return df[["region", "week", "week_start", "visits", "shop_id"]].reset_index(drop=True)
 
 def filter_pathzz_for_period(df_pathzz: pd.DataFrame, start_date, end_date) -> pd.DataFrame:
@@ -1632,6 +1672,12 @@ def main():
         st.write("Pathzz rows (all):", 0 if pathzz_all is None else len(pathzz_all))
         st.write("Pathzz rows (period):", 0 if pathzz_period is None else len(pathzz_period))
         st.write("Pathzz rows (region):", 0 if pathzz_region is None else len(pathzz_region))
+        pz = load_pathzz_weekly_store("data/pathzz_sample_weekly.csv")
+        st.write("Pathzz cols:", [] if pz is None else pz.columns.tolist())
+        st.write("Pathzz rows:", 0 if pz is None else len(pz))
+        if pz is not None and not pz.empty:
+        st.write("Pathzz sample:", pz.head(5))
+        st.write("Pathzz shop_id nulls:", int(pz["shop_id"].isna().sum()))
         st.write("Unique Pathzz shop_ids in region:", pathzz_region["shop_id"].dropna().nunique())
         st.write("Unique Vemcount store ids in region:", store_week["id"].dropna().nunique())
         st.write("Matched store-week rows:", len(capture_store_week) if "capture_store_week" in locals() else 0)
