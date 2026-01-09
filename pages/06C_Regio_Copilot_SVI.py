@@ -646,25 +646,6 @@ def compute_svi_explainable(vals_a: dict, vals_b: dict, floor: float, cap: float
     svi = ratio_to_score_0_100(avg_ratio, floor=float(floor), cap=float(cap))
     return float(svi), float(avg_ratio), bd.drop(columns=["include"])
 
-    def style_heatmap_ratio(val):
-        try:
-            if pd.isna(val):
-                return ""
-            v = float(val)
-    
-            # Good (>=110): soft green tint
-            if v >= 110:
-                return "background-color: #ECFDF3; color:#14532D; font-weight:800;"
-    
-            # Neutral (95-110): soft amber tint
-            if v >= 95:
-                return "background-color: #FFFBEB; color:#92400E; font-weight:800;"
-    
-            # Under (<95): soft red tint (PFM-ish warning)
-            return "background-color: #FFF1F2; color:#9F1239; font-weight:800;"
-        except Exception:
-            return ""
-
 # ----------------------
 # Macro charts (FIXED)
 # ----------------------
