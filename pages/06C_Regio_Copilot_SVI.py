@@ -112,6 +112,7 @@ st.markdown(
         border-radius: 14px;
         background: white;
         padding: 0.75rem 1rem;
+        min-height: 92px;
       }}
       .panel-title {{
         font-weight: 800;
