@@ -563,18 +563,24 @@ def compute_svi_explainable(vals_a: dict, vals_b: dict, floor: float, cap: float
     svi = ratio_to_score_0_100(avg_ratio, floor=float(floor), cap=float(cap))
     return float(svi), float(avg_ratio), bd.drop(columns=["include"])
 
-def style_heatmap_ratio(val):
-    try:
-        if pd.isna(val):
+    def style_heatmap_ratio(val):
+        try:
+            if pd.isna(val):
+                return ""
+            v = float(val)
+    
+            # Good (>=110): soft green tint
+            if v >= 110:
+                return "background-color: #ECFDF3; color:#14532D; font-weight:800;"
+    
+            # Neutral (95-110): soft amber tint
+            if v >= 95:
+                return "background-color: #FFFBEB; color:#92400E; font-weight:800;"
+    
+            # Under (<95): soft red tint (PFM-ish warning)
+            return "background-color: #FFF1F2; color:#9F1239; font-weight:800;"
+        except Exception:
             return ""
-        v = float(val)
-        if v >= 110:
-            return "background-color: #ecfdf5; color:#065f46; font-weight:800;"
-        if v >= 95:
-            return "background-color: #fffbeb; color:#92400e; font-weight:800;"
-        return "background-color: #fff1f2; color:#9f1239; font-weight:800;"
-    except Exception:
-        return ""
 
 # ----------------------
 # Macro charts (FIXED)
@@ -695,7 +701,7 @@ def plot_macro_panel(df_region_daily: pd.DataFrame, macro_start, macro_end):
         "month:T",
         title=None,
         scale=alt.Scale(domain=[ms, me]),
-        axis=alt.Axis(format="%b %Y", labelAngle=-35, labelOverlap=False, labelPadding=8)
+        axis=alt.Axis(format="%b %Y", labelAngle=30, labelOverlap=False, labelPadding=14)
     )
 
     reg_long = region_m.melt(
@@ -705,13 +711,18 @@ def plot_macro_panel(df_region_daily: pd.DataFrame, macro_start, macro_end):
         value_name="idx",
     )
 
+    region_color_scale = alt.Scale(
+        domain=["Region footfall-index", "Region omzet-index"],
+        range=[PFM_PURPLE, PFM_RED],
+    )
+    
     region_lines = (
         alt.Chart(reg_long)
         .mark_line(point=True)
         .encode(
             x=x_enc,
             y=alt.Y("idx:Q", title="Regio-index (100 = start)"),
-            color=alt.Color("series:N", legend=alt.Legend(title="", orient="right")),
+            color=alt.Color("series:N", scale=region_color_scale, legend=alt.Legend(title="", orient="right")),
             tooltip=[
                 alt.Tooltip("month:T", title="Maand"),
                 alt.Tooltip("series:N", title="Reeks"),
@@ -1043,66 +1054,6 @@ def main():
 
     st.markdown(f"## {selected_client['brand']} — Region **{region_choice}** · {start_period} → {end_period}")
 
-    # ----------------------
-    # Macro charts (FIXED)
-    # ----------------------
-    if show_macro:
-        macro_start = (pd.to_datetime(start_period) - pd.Timedelta(days=365)).date()
-        macro_end = pd.to_datetime(end_period).date()
-
-        # We need macro-window region daily data (not just selected period)
-        with st.spinner("Fetching macro-window data (region indices)..."):
-            try:
-                resp_macro = fetch_report(
-                    cfg=cfg,
-                    shop_ids=all_shop_ids,
-                    data_outputs=["count_in", "turnover"],
-                    period="date",
-                    step="day",
-                    source="shops",
-                    date_from=macro_start,
-                    date_to=macro_end,
-                    timeout=120,
-                )
-            except Exception as e:
-                st.info(f"Macro window fetch failed: {e}")
-                resp_macro = None
-
-        if resp_macro is not None:
-            df_macro = normalize_vemcount_response(
-                resp_macro, kpi_keys=["count_in", "turnover"]
-            ).rename(columns={"count_in": "footfall", "turnover": "turnover"})
-
-            if df_macro is not None and not df_macro.empty:
-                # Ensure store id column exists (same as earlier)
-                if store_key_col not in df_macro.columns:
-                    for cand in ["shop_id", "id", "location_id"]:
-                        if cand in df_macro.columns:
-                            store_key_col_macro = cand
-                            break
-                    else:
-                        store_key_col_macro = store_key_col
-                else:
-                    store_key_col_macro = store_key_col
-
-                df_macro = collapse_to_daily_store(df_macro, store_key_col=store_key_col_macro)
-
-                # Join region mapping
-                df_macro = df_macro.merge(
-                    merged[["id", "region"]].drop_duplicates(),
-                    left_on=store_key_col_macro,
-                    right_on="id",
-                    how="left",
-                )
-
-                df_region_macro = df_macro[df_macro["region"] == region_choice].copy()
-
-                plot_macro_panel(df_region_macro, macro_start, macro_end)
-            else:
-                st.info("Macro window data returned empty (no region indices available).")
-        else:
-            st.info("Macro window data not available right now.")
-
     foot_total = float(pd.to_numeric(df_region_daily["footfall"], errors="coerce").dropna().sum()) if "footfall" in df_region_daily.columns else 0.0
     turn_total = float(pd.to_numeric(df_region_daily["turnover"], errors="coerce").dropna().sum()) if "turnover" in df_region_daily.columns else 0.0
     trans_total = float(pd.to_numeric(df_region_daily["transactions"], errors="coerce").dropna().sum()) if "transactions" in df_region_daily.columns else 0.0
@@ -1329,6 +1280,66 @@ def main():
         st.dataframe(bd_show, use_container_width=True, hide_index=True)
 
     st.markdown("</div>", unsafe_allow_html=True)
+
+        # ----------------------
+    # Macro charts (FIXED)
+    # ----------------------
+    if show_macro:
+        macro_start = (pd.to_datetime(start_period) - pd.Timedelta(days=365)).date()
+        macro_end = pd.to_datetime(end_period).date()
+
+        # We need macro-window region daily data (not just selected period)
+        with st.spinner("Fetching macro-window data (region indices)..."):
+            try:
+                resp_macro = fetch_report(
+                    cfg=cfg,
+                    shop_ids=all_shop_ids,
+                    data_outputs=["count_in", "turnover"],
+                    period="date",
+                    step="day",
+                    source="shops",
+                    date_from=macro_start,
+                    date_to=macro_end,
+                    timeout=120,
+                )
+            except Exception as e:
+                st.info(f"Macro window fetch failed: {e}")
+                resp_macro = None
+
+        if resp_macro is not None:
+            df_macro = normalize_vemcount_response(
+                resp_macro, kpi_keys=["count_in", "turnover"]
+            ).rename(columns={"count_in": "footfall", "turnover": "turnover"})
+
+            if df_macro is not None and not df_macro.empty:
+                # Ensure store id column exists (same as earlier)
+                if store_key_col not in df_macro.columns:
+                    for cand in ["shop_id", "id", "location_id"]:
+                        if cand in df_macro.columns:
+                            store_key_col_macro = cand
+                            break
+                    else:
+                        store_key_col_macro = store_key_col
+                else:
+                    store_key_col_macro = store_key_col
+
+                df_macro = collapse_to_daily_store(df_macro, store_key_col=store_key_col_macro)
+
+                # Join region mapping
+                df_macro = df_macro.merge(
+                    merged[["id", "region"]].drop_duplicates(),
+                    left_on=store_key_col_macro,
+                    right_on="id",
+                    how="left",
+                )
+
+                df_region_macro = df_macro[df_macro["region"] == region_choice].copy()
+
+                plot_macro_panel(df_region_macro, macro_start, macro_end)
+            else:
+                st.info("Macro window data returned empty (no region indices available).")
+        else:
+            st.info("Macro window data not available right now.")
 
     # ======================
     # Weekly trend — Footfall vs Pathzz visits + Capture (RESTORED)
