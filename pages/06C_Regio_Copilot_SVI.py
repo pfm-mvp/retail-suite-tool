@@ -1362,15 +1362,15 @@ def main():
         )
 
     if show_quadrant:
-    st.markdown("## Quadrant — Conversion vs SPV (stores in region)")
-
-    qdf = agg.copy()  # agg bestaat al bij je heatmap prep (store-level totals)
-    qdf["conversion_rate"] = pd.to_numeric(qdf["conversion_rate"], errors="coerce")
-    qdf["sales_per_visitor"] = pd.to_numeric(qdf["sales_per_visitor"], errors="coerce")
-    qdf["turnover"] = pd.to_numeric(qdf["turnover"], errors="coerce")
-    qdf["footfall"] = pd.to_numeric(qdf["footfall"], errors="coerce")
-
-    qdf = qdf.dropna(subset=["conversion_rate", "sales_per_visitor"])
+        st.markdown("## Quadrant — Conversion vs SPV (stores in region)")
+    
+        qdf = agg.copy()  # agg bestaat al bij je heatmap prep (store-level totals)
+        qdf["conversion_rate"] = pd.to_numeric(qdf["conversion_rate"], errors="coerce")
+        qdf["sales_per_visitor"] = pd.to_numeric(qdf["sales_per_visitor"], errors="coerce")
+        qdf["turnover"] = pd.to_numeric(qdf["turnover"], errors="coerce")
+        qdf["footfall"] = pd.to_numeric(qdf["footfall"], errors="coerce")
+    
+        qdf = qdf.dropna(subset=["conversion_rate", "sales_per_visitor"])
     if qdf.empty:
         st.info("Not enough data for quadrant (missing conversion/SPV).")
     else:
