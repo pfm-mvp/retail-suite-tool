@@ -461,6 +461,89 @@ def mark_closed_days_as_nan(df: pd.DataFrame) -> pd.DataFrame:
             out.loc[base, c] = np.nan
     return out
 
+def compute_svi_by_region_companywide(
+    df_daily_store: pd.DataFrame,
+    lever_floor: float,
+    lever_cap: float,
+) -> pd.DataFrame:
+    """
+    Company-wide region leaderboard: SVI(region vs company).
+    Note: capture is set neutral/ignored here because Pathzz coverage may differ by region.
+    """
+    if df_daily_store is None or df_daily_store.empty:
+        return pd.DataFrame(columns=["region", "svi", "avg_ratio", "footfall", "turnover"])
+
+    d = df_daily_store.copy()
+    if "region" not in d.columns:
+        return pd.DataFrame(columns=["region", "svi", "avg_ratio", "footfall", "turnover"])
+
+    # Numeric coercion
+    for c in ["footfall", "turnover", "transactions", "sqm_effective"]:
+        if c in d.columns:
+            d[c] = pd.to_numeric(d[c], errors="coerce")
+
+    # Company totals (benchmark)
+    comp_tot = {
+        "footfall": float(d["footfall"].dropna().sum()) if "footfall" in d.columns else np.nan,
+        "turnover": float(d["turnover"].dropna().sum()) if "turnover" in d.columns else np.nan,
+        "transactions": float(d["transactions"].dropna().sum()) if "transactions" in d.columns else np.nan,
+        "sqm_sum": float(d["sqm_effective"].dropna().drop_duplicates().sum()) if "sqm_effective" in d.columns else np.nan,
+    }
+    comp_vals = compute_driver_values_from_period(
+        footfall=comp_tot["footfall"],
+        turnover=comp_tot["turnover"],
+        transactions=comp_tot["transactions"],
+        sqm_sum=comp_tot["sqm_sum"],
+        capture_pct=np.nan,
+    )
+
+    # For a fair leaderboard, make capture neutral and weight it out
+    weights_no_capture = dict(BASE_SVI_WEIGHTS)
+    weights_no_capture["capture_rate"] = 0.0
+
+    rows = []
+    for region, g in d.groupby("region"):
+        if pd.isna(region) or str(region).strip() == "":
+            continue
+
+        reg_tot = {
+            "footfall": float(g["footfall"].dropna().sum()) if "footfall" in g.columns else np.nan,
+            "turnover": float(g["turnover"].dropna().sum()) if "turnover" in g.columns else np.nan,
+            "transactions": float(g["transactions"].dropna().sum()) if "transactions" in g.columns else np.nan,
+            "sqm_sum": float(g["sqm_effective"].dropna().drop_duplicates().sum()) if "sqm_effective" in g.columns else np.nan,
+        }
+        reg_vals = compute_driver_values_from_period(
+            footfall=reg_tot["footfall"],
+            turnover=reg_tot["turnover"],
+            transactions=reg_tot["transactions"],
+            sqm_sum=reg_tot["sqm_sum"],
+            capture_pct=np.nan,
+        )
+
+        svi, avg_ratio, _ = compute_svi_explainable(
+            vals_a=reg_vals,
+            vals_b=comp_vals,
+            floor=float(lever_floor),
+            cap=float(lever_cap),
+            weights=weights_no_capture,
+        )
+
+        rows.append({
+            "region": str(region),
+            "svi": svi,
+            "avg_ratio": avg_ratio,
+            "footfall": reg_tot["footfall"],
+            "turnover": reg_tot["turnover"],
+        })
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return pd.DataFrame(columns=["region", "svi", "avg_ratio", "footfall", "turnover"])
+
+    out["svi"] = pd.to_numeric(out["svi"], errors="coerce")
+    out = out.dropna(subset=["svi"]).sort_values("svi", ascending=False).reset_index(drop=True)
+    return out
+
 # ----------------------
 # Lever scan score mapping
 # ----------------------
@@ -1204,22 +1287,63 @@ def main():
         unsafe_allow_html=True,
     )
 
-    # ======================
-    # 1) Explainable SVI (region vs company) — store_type aware (dominant type)
-    # ======================
-    region_svi, region_avg_ratio, region_bd = compute_svi_explainable(
-        vals_a=reg_vals,
-        vals_b=comp_vals,
-        floor=float(lever_floor),
-        cap=float(lever_cap),
-        weights=region_weights
-    )
-    status_txt, status_color = status_from_score(region_svi if pd.notna(region_svi) else 0)
-
-    c_svi_1, c_svi_2 = st.columns([1.1, 2.9])
-    with c_svi_1:
+    # --- Company-wide region leaderboard (widget) ---
+    df_region_rank = compute_svi_by_region_companywide(df_daily_store, lever_floor, lever_cap)
+    
+    # Layout: leaderboard | gauge | SVI panel
+    c_svi_rank, c_svi_gauge, c_svi_panel = st.columns([1.7, 1.0, 2.3])
+    
+    with c_svi_rank:
+        st.markdown('<div class="panel"><div class="panel-title">Region SVI — vs other regions (company-wide)</div>', unsafe_allow_html=True)
+    
+        if df_region_rank is None or df_region_rank.empty:
+            st.info("No region leaderboard available.")
+        else:
+            # Keep it readable: show top N but always include selected region
+            TOP_N = 8
+            df_plot = df_region_rank.head(TOP_N).copy()
+    
+            if region_choice not in df_plot["region"].tolist() and region_choice in df_region_rank["region"].tolist():
+                df_sel = df_region_rank[df_region_rank["region"] == region_choice].copy()
+                df_plot = pd.concat([df_plot, df_sel], ignore_index=True)
+    
+            # Sort for bar chart (top at top)
+            df_plot = df_plot.sort_values("svi", ascending=True).copy()
+    
+            bar = (
+                alt.Chart(df_plot)
+                .mark_bar(cornerRadiusEnd=4)
+                .encode(
+                    y=alt.Y("region:N", sort=df_plot["region"].tolist(), title=None),
+                    x=alt.X("svi:Q", title="SVI (0–100)", scale=alt.Scale(domain=[0, 100])),
+                    color=alt.condition(
+                        alt.datum.region == region_choice,
+                        alt.value(PFM_PURPLE),
+                        alt.value(PFM_LINE)
+                    ),
+                    tooltip=[
+                        alt.Tooltip("region:N", title="Region"),
+                        alt.Tooltip("svi:Q", title="SVI", format=".0f"),
+                        alt.Tooltip("avg_ratio:Q", title="Avg ratio vs company", format=".0f"),
+                        alt.Tooltip("turnover:Q", title="Revenue", format=",.0f"),
+                        alt.Tooltip("footfall:Q", title="Footfall", format=",.0f"),
+                    ],
+                )
+                .properties(height=260)
+            )
+    
+            st.altair_chart(bar, use_container_width=True)
+    
+            # Small caption
+            st.markdown(
+                "<div class='hint'>Highlighted = selected region. (Capture excluded for fair comparison across regions.)</div></div>",
+                unsafe_allow_html=True
+            )
+    
+    with c_svi_gauge:
         st.altair_chart(gauge_chart(region_svi if pd.notna(region_svi) else 0, status_color), use_container_width=False)
-    with c_svi_2:
+    
+    with c_svi_panel:
         st.markdown(
             f"""
             <div class="panel">
@@ -1237,49 +1361,6 @@ def main():
             """,
             unsafe_allow_html=True
         )
-
-    # Breakdown
-    st.markdown('<div class="panel"><div class="panel-title">SVI breakdown — drivers</div>', unsafe_allow_html=True)
-    bd = region_bd.copy()
-    bd["ratio_pct"] = pd.to_numeric(bd["ratio_pct"], errors="coerce")
-    bd["score"] = pd.to_numeric(bd["score"], errors="coerce")
-    bd = bd.dropna(subset=["ratio_pct", "score"])
-
-    if bd.empty:
-        st.info("Not enough data to compute drivers (check footfall / revenue / sqm / transactions).")
-    else:
-        bar = (
-            alt.Chart(bd)
-            .mark_bar(cornerRadiusEnd=4, color=PFM_PURPLE)
-            .encode(
-                x=alt.X("score:Q", title="Driver score (0–100)", scale=alt.Scale(domain=[0, 100])),
-                y=alt.Y("driver:N", sort="-x", title=None),
-                tooltip=[
-                    alt.Tooltip("driver:N", title="Driver"),
-                    alt.Tooltip("ratio_pct:Q", title="Ratio vs benchmark (%)", format=".1f"),
-                    alt.Tooltip("score:Q", title="Score", format=".0f"),
-                    alt.Tooltip("weight:Q", title="Weight", format=".2f"),
-                ],
-            )
-            .properties(height=220)
-        )
-        st.altair_chart(bar, use_container_width=True)
-
-        def _fmt_val(key, x):
-            if key in ("conversion_rate", "capture_rate"):
-                return fmt_pct(x)
-            return fmt_eur_2(x)
-
-        bd_show = bd.copy()
-        bd_show["Region"] = bd_show.apply(lambda r: _fmt_val(r["driver_key"], r["value"]), axis=1)
-        bd_show["Company"] = bd_show.apply(lambda r: _fmt_val(r["driver_key"], r["benchmark"]), axis=1)
-        bd_show["Ratio vs company"] = bd_show["ratio_pct"].apply(lambda x: "-" if pd.isna(x) else f"{x:.0f}%")
-        bd_show["Score"] = bd_show["score"].apply(lambda x: "-" if pd.isna(x) else f"{x:.0f}")
-        bd_show["Weight"] = bd_show["weight"].apply(lambda x: "-" if pd.isna(x) else f"{x:.2f}")
-        bd_show = bd_show[["driver", "Region", "Company", "Ratio vs company", "Score", "Weight"]].rename(columns={"driver": "Driver"})
-        st.dataframe(bd_show, use_container_width=True, hide_index=True)
-
-    st.markdown("</div>", unsafe_allow_html=True)
 
         # ----------------------
     # Macro charts (FIXED)
