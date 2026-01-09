@@ -1244,7 +1244,11 @@ def main():
 
     # Determine "dominant" store_type for region (for region-level SVI weighting)
     region_types = merged.loc[merged["region"] == region_choice, "store_type"] if "store_type" in merged.columns else pd.Series([], dtype=str)
-    dominant_store_type = region_types.dropna().astype(str).value_counts().index[0] if len(region_types.dropna()) else ""
+    dominant_store_type = ""
+    if region_types is not None and len(region_types.dropna()):
+        dominant_store_type = str(region_types.dropna().astype(str).value_counts().index[0]).strip()
+        if dominant_store_type.lower() == "nan":
+            dominant_store_type = ""
     region_weights = get_svi_weights_for_store_type(dominant_store_type)
 
     region_svi, region_avg_ratio, region_bd = compute_svi_explainable(
@@ -1281,59 +1285,16 @@ def main():
     df_region_rank = compute_svi_by_region_companywide(df_daily_store, lever_floor, lever_cap)
     
     # Layout: leaderboard | gauge | SVI panel
-    c_svi_rank, c_svi_gauge, c_svi_panel = st.columns([1.7, 1.0, 2.3])
+    c_left, c_right = st.columns([1.7, 3.3])
     
-    with c_svi_rank:
-        st.markdown('<div class="panel"><div class="panel-title">Region SVI — vs other regions (company-wide)</div>', unsafe_allow_html=True)
+    with c_left:
+        # jouw region bar chart (df_region_rank) blijft hier
     
-        if df_region_rank is None or df_region_rank.empty:
-            st.info("No region leaderboard available.")
-        else:
-            # Keep it readable: show top N but always include selected region
-            TOP_N = 8
-            df_plot = df_region_rank.head(TOP_N).copy()
-    
-            if region_choice not in df_plot["region"].tolist() and region_choice in df_region_rank["region"].tolist():
-                df_sel = df_region_rank[df_region_rank["region"] == region_choice].copy()
-                df_plot = pd.concat([df_plot, df_sel], ignore_index=True)
-    
-            # Sort for bar chart (top at top)
-            df_plot = df_plot.sort_values("svi", ascending=True).copy()
-    
-            bar = (
-                alt.Chart(df_plot)
-                .mark_bar(cornerRadiusEnd=4)
-                .encode(
-                    y=alt.Y("region:N", sort=df_plot["region"].tolist(), title=None),
-                    x=alt.X("svi:Q", title="SVI (0–100)", scale=alt.Scale(domain=[0, 100])),
-                    color=alt.condition(
-                        alt.datum.region == region_choice,
-                        alt.value(PFM_PURPLE),
-                        alt.value(PFM_LINE)
-                    ),
-                    tooltip=[
-                        alt.Tooltip("region:N", title="Region"),
-                        alt.Tooltip("svi:Q", title="SVI", format=".0f"),
-                        alt.Tooltip("avg_ratio:Q", title="Avg ratio vs company", format=".0f"),
-                        alt.Tooltip("turnover:Q", title="Revenue", format=",.0f"),
-                        alt.Tooltip("footfall:Q", title="Footfall", format=",.0f"),
-                    ],
-                )
-                .properties(height=260)
-            )
-    
-            st.altair_chart(bar, use_container_width=True)
-    
-            # Small caption
-            st.markdown(
-                "<div class='hint'>Highlighted = selected region. (Capture excluded for fair comparison across regions.)</div></div>",
-                unsafe_allow_html=True
-            )
-    
-    with c_svi_gauge:
+    with c_right:
+        # donut boven
         st.altair_chart(gauge_chart(region_svi if pd.notna(region_svi) else 0, status_color), use_container_width=False)
     
-    with c_svi_panel:
+        # daarna jouw SVI panel tekst (zelfde HTML panel)
         st.markdown(
             f"""
             <div class="panel">
@@ -1352,7 +1313,48 @@ def main():
             unsafe_allow_html=True
         )
 
-        # ----------------------
+    if show_quadrant:
+    st.markdown("## Quadrant — Conversion vs SPV (stores in region)")
+
+    qdf = agg.copy()  # agg bestaat al bij je heatmap prep (store-level totals)
+    qdf["conversion_rate"] = pd.to_numeric(qdf["conversion_rate"], errors="coerce")
+    qdf["sales_per_visitor"] = pd.to_numeric(qdf["sales_per_visitor"], errors="coerce")
+    qdf["turnover"] = pd.to_numeric(qdf["turnover"], errors="coerce")
+    qdf["footfall"] = pd.to_numeric(qdf["footfall"], errors="coerce")
+
+    qdf = qdf.dropna(subset=["conversion_rate", "sales_per_visitor"])
+    if qdf.empty:
+        st.info("Not enough data for quadrant (missing conversion/SPV).")
+    else:
+        x_mean = float(qdf["conversion_rate"].mean())
+        y_mean = float(qdf["sales_per_visitor"].mean())
+
+        scatter = (
+            alt.Chart(qdf)
+            .mark_circle(size=120, opacity=0.85)
+            .encode(
+                x=alt.X("conversion_rate:Q", title="Conversion (%)"),
+                y=alt.Y("sales_per_visitor:Q", title="SPV (€/visitor)"),
+                tooltip=[
+                    alt.Tooltip("store_display:N", title="Store"),
+                    alt.Tooltip("conversion_rate:Q", title="Conversion", format=".1f"),
+                    alt.Tooltip("sales_per_visitor:Q", title="SPV", format=".2f"),
+                    alt.Tooltip("turnover:Q", title="Revenue", format=",.0f"),
+                    alt.Tooltip("footfall:Q", title="Footfall", format=",.0f"),
+                ],
+                color=alt.value(PFM_PURPLE),
+            )
+            .properties(height=320)
+        )
+
+        vline = alt.Chart(pd.DataFrame({"x":[x_mean]})).mark_rule(strokeDash=[6,4]).encode(x="x:Q")
+        hline = alt.Chart(pd.DataFrame({"y":[y_mean]})).mark_rule(strokeDash=[6,4]).encode(y="y:Q")
+
+        st.altair_chart((scatter + vline + hline).configure_view(strokeWidth=0), use_container_width=True)
+
+        st.caption("Quadrants use region averages as reference lines. Top-right = high SPV + high conversion.")
+
+    # ----------------------
     # Macro charts (FIXED)
     # ----------------------
     if show_macro:
@@ -1650,19 +1652,38 @@ def main():
 
     def style_heatmap_ratio(val):
         """
-        Styles percentage index cells in heatmap (e.g. 110% good, 95-110 ok, <95 weak).
-        Expects val like 107, 92, etc (float/int). Returns CSS string.
+        PFM heatmap styling for index cells.
+        - >=110%  : strong (PFM purple tint)
+        - 95-110% : ok/neutral (PFM amber tint)
+        - <95%    : weak (PFM red tint)
         """
         try:
             if pd.isna(val):
                 return ""
             v = float(val)
     
+            # Strong
             if v >= 110:
-                return "background-color: #ecfdf5; color:#065f46; font-weight:800;"
+                return (
+                    "background-color:#F5F3FF;"  # soft purple tint
+                    "color:#4C1D95;"
+                    "font-weight:900;"
+                )
+    
+            # Neutral
             if v >= 95:
-                return "background-color: #fffbeb; color:#92400e; font-weight:800;"
-            return "background-color: #fff1f2; color:#9f1239; font-weight:800;"
+                return (
+                    "background-color:#FFF7ED;"  # soft amber tint
+                    "color:#9A3412;"
+                    "font-weight:900;"
+                )
+    
+            # Weak
+            return (
+                "background-color:#FFF1F2;"      # soft red tint
+                "color:#9F1239;"
+                "font-weight:900;"
+            )
         except Exception:
             return ""
 
