@@ -1247,6 +1247,15 @@ def main():
     dominant_store_type = region_types.dropna().astype(str).value_counts().index[0] if len(region_types.dropna()) else ""
     region_weights = get_svi_weights_for_store_type(dominant_store_type)
 
+    region_svi, region_avg_ratio, region_bd = compute_svi_explainable(
+        vals_a=reg_vals,
+        vals_b=comp_vals,
+        floor=float(lever_floor),
+        cap=float(lever_cap),
+        weights=region_weights,
+    )
+    status_txt, status_color = status_from_score(region_svi if pd.notna(region_svi) else 0)
+
     # KPI cards
     k1, k2, k3, k4, k5 = st.columns([1, 1, 1, 1, 1])
     with k1:
@@ -1640,27 +1649,22 @@ def main():
         show_heat_styling = st.toggle("Show heatmap colors", value=True)
 
     def style_heatmap_ratio(val):
-    """
-    Styles percentage index cells in heatmap (e.g. 110% good, 95-110 ok, <95 weak).
-    Expects val like 107, 92, etc (float/int). Returns CSS string.
-    """
-    try:
-        if pd.isna(val):
+        """
+        Styles percentage index cells in heatmap (e.g. 110% good, 95-110 ok, <95 weak).
+        Expects val like 107, 92, etc (float/int). Returns CSS string.
+        """
+        try:
+            if pd.isna(val):
+                return ""
+            v = float(val)
+    
+            if v >= 110:
+                return "background-color: #ecfdf5; color:#065f46; font-weight:800;"
+            if v >= 95:
+                return "background-color: #fffbeb; color:#92400e; font-weight:800;"
+            return "background-color: #fff1f2; color:#9f1239; font-weight:800;"
+        except Exception:
             return ""
-        v = float(val)
-
-        # Green-ish for strong
-        if v >= 110:
-            return "background-color: #ecfdf5; color:#065f46; font-weight:800;"
-
-        # Amber-ish for neutral
-        if v >= 95:
-            return "background-color: #fffbeb; color:#92400e; font-weight:800;"
-
-        # Red-ish for underperformance
-        return "background-color: #fff1f2; color:#9f1239; font-weight:800;"
-    except Exception:
-        return ""
 
     if not show_heat_styling:
         disp = heat_show.copy()
