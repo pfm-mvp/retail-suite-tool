@@ -1361,46 +1361,65 @@ def main():
             unsafe_allow_html=True
         )
 
+    # ======================
+    # Quadrant — Conversion vs SPV (stores in region)
+    # ======================
     if show_quadrant:
         st.markdown("## Quadrant — Conversion vs SPV (stores in region)")
     
-        qdf = agg.copy()  # agg bestaat al bij je heatmap prep (store-level totals)
-        qdf["conversion_rate"] = pd.to_numeric(qdf["conversion_rate"], errors="coerce")
-        qdf["sales_per_visitor"] = pd.to_numeric(qdf["sales_per_visitor"], errors="coerce")
-        qdf["turnover"] = pd.to_numeric(qdf["turnover"], errors="coerce")
-        qdf["footfall"] = pd.to_numeric(qdf["footfall"], errors="coerce")
+        # Aggregate per store (period totals)
+        q = df_daily_store[df_daily_store["region"] == region_choice].copy()
     
-        qdf = qdf.dropna(subset=["conversion_rate", "sales_per_visitor"])
-    if qdf.empty:
-        st.info("Not enough data for quadrant (missing conversion/SPV).")
-    else:
-        x_mean = float(qdf["conversion_rate"].mean())
-        y_mean = float(qdf["sales_per_visitor"].mean())
-
-        scatter = (
-            alt.Chart(qdf)
-            .mark_circle(size=120, opacity=0.85)
-            .encode(
-                x=alt.X("conversion_rate:Q", title="Conversion (%)"),
-                y=alt.Y("sales_per_visitor:Q", title="SPV (€/visitor)"),
-                tooltip=[
-                    alt.Tooltip("store_display:N", title="Store"),
-                    alt.Tooltip("conversion_rate:Q", title="Conversion", format=".1f"),
-                    alt.Tooltip("sales_per_visitor:Q", title="SPV", format=".2f"),
-                    alt.Tooltip("turnover:Q", title="Revenue", format=",.0f"),
-                    alt.Tooltip("footfall:Q", title="Footfall", format=",.0f"),
-                ],
-                color=alt.value(PFM_PURPLE),
+        if q.empty:
+            st.info("No store data for quadrant.")
+        else:
+            q_agg = q.groupby(["id", "store_display"], as_index=False).agg(
+                footfall=("footfall", "sum"),
+                turnover=("turnover", "sum"),
+                transactions=("transactions", "sum"),
             )
-            .properties(height=320)
-        )
-
-        vline = alt.Chart(pd.DataFrame({"x":[x_mean]})).mark_rule(strokeDash=[6,4]).encode(x="x:Q")
-        hline = alt.Chart(pd.DataFrame({"y":[y_mean]})).mark_rule(strokeDash=[6,4]).encode(y="y:Q")
-
-        st.altair_chart((scatter + vline + hline).configure_view(strokeWidth=0), use_container_width=True)
-
-        st.caption("Quadrants use region averages as reference lines. Top-right = high SPV + high conversion.")
+    
+            q_agg["conversion_rate"] = np.where(
+                q_agg["footfall"] > 0,
+                q_agg["transactions"] / q_agg["footfall"] * 100.0,
+                np.nan
+            )
+            q_agg["sales_per_visitor"] = np.where(
+                q_agg["footfall"] > 0,
+                q_agg["turnover"] / q_agg["footfall"],
+                np.nan
+            )
+    
+            q_agg = q_agg.dropna(subset=["conversion_rate", "sales_per_visitor"])
+            if q_agg.empty:
+                st.info("Not enough data to plot quadrant (missing conversion/SPV).")
+            else:
+                x_med = float(q_agg["conversion_rate"].median())
+                y_med = float(q_agg["sales_per_visitor"].median())
+    
+                base = alt.Chart(q_agg).mark_circle(size=140).encode(
+                    x=alt.X("conversion_rate:Q", title="Conversion (%)"),
+                    y=alt.Y("sales_per_visitor:Q", title="SPV (€/visitor)"),
+                    tooltip=[
+                        alt.Tooltip("store_display:N", title="Store"),
+                        alt.Tooltip("conversion_rate:Q", title="Conversion", format=".1f"),
+                        alt.Tooltip("sales_per_visitor:Q", title="SPV", format=",.2f"),
+                        alt.Tooltip("turnover:Q", title="Revenue", format=",.0f"),
+                        alt.Tooltip("footfall:Q", title="Footfall", format=",.0f"),
+                    ],
+                    color=alt.value(PFM_PURPLE),
+                )
+    
+                vline = alt.Chart(pd.DataFrame({"x": [x_med]})).mark_rule(strokeDash=[6, 4]).encode(x="x:Q")
+                hline = alt.Chart(pd.DataFrame({"y": [y_med]})).mark_rule(strokeDash=[6, 4]).encode(y="y:Q")
+    
+                st.altair_chart(
+                    alt.layer(base, vline, hline).properties(height=360).configure_view(strokeWidth=0),
+                    use_container_width=True
+                )
+    else:
+        # optional: keep page quiet when toggle is off
+        pass
 
     # ----------------------
     # Macro charts (FIXED)
