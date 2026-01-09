@@ -846,126 +846,126 @@ def plot_macro_panel(df_region_daily: pd.DataFrame, macro_start, macro_end):
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-# ----------------------
-# Header + controls (clean grid)
-# ----------------------
-st.markdown("<div style='height:0.35rem'></div>", unsafe_allow_html=True)
-
-# Row 1: title left, selection stack right
-h_left, h_right = st.columns([2.3, 1.7], vertical_alignment="top")
-
-with h_left:
-    st.markdown(
-        f"""
-        <div class="pfm-header">
-          <div>
-            <div class="pfm-title">PFM Region Performance Copilot <span class="pill">v2</span></div>
-            <div class="pfm-sub">Region-level: explainable SVI + heatmap scanning + value upside + drilldown + macro context</div>
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+    # ----------------------
+    # Header + controls (clean grid)
+    # ----------------------
+    st.markdown("<div style='height:0.35rem'></div>", unsafe_allow_html=True)
+    
+    # Row 1: title left, selection stack right
+    h_left, h_right = st.columns([2.3, 1.7], vertical_alignment="top")
+    
+    with h_left:
+        st.markdown(
+            f"""
+            <div class="pfm-header">
+              <div>
+                <div class="pfm-title">PFM Region Performance Copilot <span class="pill">v2</span></div>
+                <div class="pfm-sub">Region-level: explainable SVI + heatmap scanning + value upside + drilldown + macro context</div>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    
+    clients = load_clients("clients.json")
+    clients_df = pd.DataFrame(clients)
+    clients_df["label"] = clients_df.apply(
+        lambda r: f"{r['brand']} – {r['name']} (company_id {r['company_id']})",
+        axis=1,
     )
-
-clients = load_clients("clients.json")
-clients_df = pd.DataFrame(clients)
-clients_df["label"] = clients_df.apply(
-    lambda r: f"{r['brand']} – {r['name']} (company_id {r['company_id']})",
-    axis=1,
-)
-
-today = datetime.today().date()
-periods = period_catalog(today)
-period_labels = list(periods.keys())
-
-# We need region list to show region under client.
-# So first pick client + period in the right column, then load locations + regions, then show region.
-with h_right:
-    st.markdown('<div class="panel"><div class="panel-title">Selection</div>', unsafe_allow_html=True)
-
-    client_label = st.selectbox(
-        "Retailer",
-        clients_df["label"].tolist(),
-        label_visibility="collapsed",
-        key="rcp_client",
-    )
-
-    period_choice = st.selectbox(
-        "Period",
-        period_labels,
-        index=period_labels.index("Q3 2024") if "Q3 2024" in period_labels else 0,
-        label_visibility="collapsed",
-        key="rcp_period",
-    )
-
-    st.markdown("</div>", unsafe_allow_html=True)
-
-selected_client = clients_df[clients_df["label"] == client_label].iloc[0].to_dict()
-company_id = int(selected_client["company_id"])
-start_period = periods[period_choice].start
-end_period = periods[period_choice].end
-
-# Load locations + regions based on selected client (so region dropdown is stable and accurate)
-try:
-    locations_df = get_locations_by_company(company_id)
-except requests.exceptions.RequestException as e:
-    st.error(f"Error fetching stores from FastAPI: {e}")
-    return
-
-if locations_df.empty:
-    st.error("No stores found for this retailer.")
-    return
-
-region_map = load_region_mapping()
-if region_map.empty:
-    st.error("No valid data/regions.csv found (min required: shop_id;region).")
-    return
-
-locations_df["id"] = pd.to_numeric(locations_df["id"], errors="coerce").astype("Int64")
-merged = locations_df.merge(region_map, left_on="id", right_on="shop_id", how="inner")
-if merged.empty:
-    st.warning("No stores matched your region mapping for this retailer.")
-    return
-
-# store display name
-if "store_label" in merged.columns and merged["store_label"].notna().any():
-    merged["store_display"] = merged["store_label"]
-else:
-    merged["store_display"] = merged["name"] if "name" in merged.columns else merged["id"].astype(str)
-
-available_regions = sorted(merged["region"].dropna().unique().tolist())
-
-# Row 2: Region under Client/Period + toggles aligned + SVI floor + Run button fixed on the right
-c_reg, c_tog, c_floor, c_btn = st.columns([1.2, 1.8, 1.0, 0.9], vertical_alignment="bottom")
-
-with c_reg:
-    st.markdown('<div class="panel"><div class="panel-title">Region</div>', unsafe_allow_html=True)
-    region_choice = st.selectbox(
-        "Region",
-        available_regions,
-        label_visibility="collapsed",
-        key="rcp_region",
-    )
-    st.markdown("</div>", unsafe_allow_html=True)
-
-with c_tog:
-    st.markdown('<div class="panel"><div class="panel-title">Options</div>', unsafe_allow_html=True)
-    t1, t2 = st.columns(2)
-    with t1:
-        show_macro = st.toggle("Show macro context (CBS/CCI)", value=True, key="rcp_macro")
-    with t2:
-        show_quadrant = st.toggle("Show quadrant", value=True, key="rcp_quadrant")
-    st.markdown("</div>", unsafe_allow_html=True)
-
-with c_floor:
-    st.markdown('<div class="panel"><div class="panel-title">SVI sensitivity</div>', unsafe_allow_html=True)
-    lever_floor = st.selectbox("SVI floor", [70, 75, 80, 85], index=2, label_visibility="collapsed", key="rcp_floor")
-    st.markdown("</div>", unsafe_allow_html=True)
-
-with c_btn:
-    run_btn = st.button("Run analysis", type="primary", key="rcp_run")
-
-lever_cap = 200 - lever_floor  # e.g. 80 -> 120 ; 85 -> 115
+    
+    today = datetime.today().date()
+    periods = period_catalog(today)
+    period_labels = list(periods.keys())
+    
+    # We need region list to show region under client.
+    # So first pick client + period in the right column, then load locations + regions, then show region.
+    with h_right:
+        st.markdown('<div class="panel"><div class="panel-title">Selection</div>', unsafe_allow_html=True)
+    
+        client_label = st.selectbox(
+            "Retailer",
+            clients_df["label"].tolist(),
+            label_visibility="collapsed",
+            key="rcp_client",
+        )
+    
+        period_choice = st.selectbox(
+            "Period",
+            period_labels,
+            index=period_labels.index("Q3 2024") if "Q3 2024" in period_labels else 0,
+            label_visibility="collapsed",
+            key="rcp_period",
+        )
+    
+        st.markdown("</div>", unsafe_allow_html=True)
+    
+    selected_client = clients_df[clients_df["label"] == client_label].iloc[0].to_dict()
+    company_id = int(selected_client["company_id"])
+    start_period = periods[period_choice].start
+    end_period = periods[period_choice].end
+    
+    # Load locations + regions based on selected client (so region dropdown is stable and accurate)
+    try:
+        locations_df = get_locations_by_company(company_id)
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error fetching stores from FastAPI: {e}")
+        return
+    
+    if locations_df.empty:
+        st.error("No stores found for this retailer.")
+        return
+    
+    region_map = load_region_mapping()
+    if region_map.empty:
+        st.error("No valid data/regions.csv found (min required: shop_id;region).")
+        return
+    
+    locations_df["id"] = pd.to_numeric(locations_df["id"], errors="coerce").astype("Int64")
+    merged = locations_df.merge(region_map, left_on="id", right_on="shop_id", how="inner")
+    if merged.empty:
+        st.warning("No stores matched your region mapping for this retailer.")
+        return
+    
+    # store display name
+    if "store_label" in merged.columns and merged["store_label"].notna().any():
+        merged["store_display"] = merged["store_label"]
+    else:
+        merged["store_display"] = merged["name"] if "name" in merged.columns else merged["id"].astype(str)
+    
+    available_regions = sorted(merged["region"].dropna().unique().tolist())
+    
+    # Row 2: Region under Client/Period + toggles aligned + SVI floor + Run button fixed on the right
+    c_reg, c_tog, c_floor, c_btn = st.columns([1.2, 1.8, 1.0, 0.9], vertical_alignment="bottom")
+    
+    with c_reg:
+        st.markdown('<div class="panel"><div class="panel-title">Region</div>', unsafe_allow_html=True)
+        region_choice = st.selectbox(
+            "Region",
+            available_regions,
+            label_visibility="collapsed",
+            key="rcp_region",
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+    
+    with c_tog:
+        st.markdown('<div class="panel"><div class="panel-title">Options</div>', unsafe_allow_html=True)
+        t1, t2 = st.columns(2)
+        with t1:
+            show_macro = st.toggle("Show macro context (CBS/CCI)", value=True, key="rcp_macro")
+        with t2:
+            show_quadrant = st.toggle("Show quadrant", value=True, key="rcp_quadrant")
+        st.markdown("</div>", unsafe_allow_html=True)
+    
+    with c_floor:
+        st.markdown('<div class="panel"><div class="panel-title">SVI sensitivity</div>', unsafe_allow_html=True)
+        lever_floor = st.selectbox("SVI floor", [70, 75, 80, 85], index=2, label_visibility="collapsed", key="rcp_floor")
+        st.markdown("</div>", unsafe_allow_html=True)
+    
+    with c_btn:
+        run_btn = st.button("Run analysis", type="primary", key="rcp_run")
+    
+    lever_cap = 200 - lever_floor  # e.g. 80 -> 120 ; 85 -> 115
 
     run_key = (company_id, region_choice, str(start_period), str(end_period), int(lever_floor), int(lever_cap))
     should_fetch = run_btn or (st.session_state.rcp_last_key != run_key) or (not st.session_state.rcp_ran)
