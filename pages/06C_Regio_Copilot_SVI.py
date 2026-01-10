@@ -954,7 +954,31 @@ def main():
     with c_btn:
         run_btn = st.button("Run analysis", type="primary", key="rcp_run")
 
+    st.write("DEBUG:", {"run_btn": run_btn, "should_fetch": should_fetch, "last_key": st.session_state.rcp_last_key, "run_key": run_key})
+
     lever_cap = 200 - lever_floor  # e.g. 80 -> 120 ; 85 -> 115
+
+    # ----------------------
+    # Session state defaults (MUST exist before should_fetch)
+    # ----------------------
+    if "rcp_last_key" not in st.session_state:
+        st.session_state.rcp_last_key = None
+    if "rcp_payload" not in st.session_state:
+        st.session_state.rcp_payload = None
+    if "rcp_ran" not in st.session_state:
+        st.session_state.rcp_ran = False
+    
+    run_key = (company_id, region_choice, str(start_period), str(end_period), int(lever_floor), int(lever_cap))
+    
+    # Fetch rules:
+    # - Always fetch when user clicks Run
+    # - Otherwise fetch if selection changed or never ran yet
+    selection_changed = st.session_state.rcp_last_key != run_key
+    should_fetch = bool(run_btn) or bool(selection_changed) or (not bool(st.session_state.rcp_ran))
+    
+    # Tiny UI feedback so you SEE it reruns
+    if run_btn:
+        st.toast("Running analysis…", icon="🚀")
 
     run_key = (company_id, region_choice, str(start_period), str(end_period), int(lever_floor), int(lever_cap))
     should_fetch = bool(run_btn) or (st.session_state.rcp_last_key != run_key) or (not st.session_state.rcp_ran)
