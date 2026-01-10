@@ -954,7 +954,37 @@ def main():
     with c_btn:
         run_btn = st.button("Run analysis", type="primary", key="rcp_run")
 
-    st.write("DEBUG:", {"run_btn": run_btn, "should_fetch": should_fetch, "last_key": st.session_state.rcp_last_key, "run_key": run_key})
+    # --- session defaults (must exist BEFORE we compute should_fetch) ---
+    if "rcp_last_key" not in st.session_state:
+        st.session_state.rcp_last_key = None
+    if "rcp_payload" not in st.session_state:
+        st.session_state.rcp_payload = None
+    if "rcp_ran" not in st.session_state:
+        st.session_state.rcp_ran = False
+    
+    lever_cap = 200 - lever_floor  # e.g. 80 -> 120 ; 85 -> 115
+    run_key = (company_id, region_choice, str(start_period), str(end_period), int(lever_floor), int(lever_cap))
+    
+    selection_changed = st.session_state.rcp_last_key != run_key
+    should_fetch = bool(run_btn) or bool(selection_changed) or (not bool(st.session_state.rcp_ran))
+    
+    # Optional: visible feedback
+    if run_btn:
+        st.toast("Running analysis…", icon="🚀")
+    
+    # Debug AFTER vars exist
+    st.write(
+        "DEBUG:",
+        {
+            "run_btn": run_btn,
+            "should_fetch": should_fetch,
+            "selection_changed": selection_changed,
+            "last_key": st.session_state.rcp_last_key,
+            "run_key": run_key,
+            "ran": st.session_state.rcp_ran,
+            "payload_is_none": st.session_state.rcp_payload is None,
+        },
+    )
 
     lever_cap = 200 - lever_floor  # e.g. 80 -> 120 ; 85 -> 115
 
@@ -979,9 +1009,6 @@ def main():
     # Tiny UI feedback so you SEE it reruns
     if run_btn:
         st.toast("Running analysis…", icon="🚀")
-
-    run_key = (company_id, region_choice, str(start_period), str(end_period), int(lever_floor), int(lever_cap))
-    should_fetch = bool(run_btn) or (st.session_state.rcp_last_key != run_key) or (not st.session_state.rcp_ran)
 
     if (not should_fetch) and (st.session_state.rcp_payload is None):
         st.info("Select retailer / region / period and click **Run analysis**.")
