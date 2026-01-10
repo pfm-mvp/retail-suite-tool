@@ -1,4 +1,4 @@
-# pages/06C_Region_Copilot_V2.py
+# pages/06C_Region_Copilot_SVI.py
 # ------------------------------------------------------------
 # PFM Region Copilot v2 — FIXED "main()" + indentation + state
 # ------------------------------------------------------------
