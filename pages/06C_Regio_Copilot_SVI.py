@@ -343,7 +343,7 @@ def gauge_chart(score_0_100: float, fill_color: str):
     )
     arc = (
         alt.Chart(gauge_df)
-        .mark_arc(innerRadius=50, outerRadius=64)
+        .mark_arc(innerRadius=54, outerRadius=70)
         .encode(
             theta="value:Q",
             color=alt.Color(
@@ -847,125 +847,106 @@ def plot_macro_panel(df_region_daily: pd.DataFrame, macro_start, macro_end):
     st.markdown("</div>", unsafe_allow_html=True)
 
 # ----------------------
-# Header + controls (clean grid)
+# MAIN
 # ----------------------
-st.markdown("<div style='height:0.35rem'></div>", unsafe_allow_html=True)
+def main():
+    # Session state to prevent wipe on drilldown
+    if "rcp_last_key" not in st.session_state:
+        st.session_state.rcp_last_key = None
+    if "rcp_payload" not in st.session_state:
+        st.session_state.rcp_payload = None
+    if "rcp_ran" not in st.session_state:
+        st.session_state.rcp_ran = False
 
-# Row 1: title left, selection stack right
-h_left, h_right = st.columns([2.3, 1.7], vertical_alignment="top")
+    st.markdown("<div style='height:0.35rem'></div>", unsafe_allow_html=True)
 
-with h_left:
-    st.markdown(
-        f"""
-        <div class="pfm-header">
-          <div>
-            <div class="pfm-title">PFM Region Performance Copilot <span class="pill">v2</span></div>
-            <div class="pfm-sub">Region-level: explainable SVI + heatmap scanning + value upside + drilldown + macro context</div>
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+    header_left, header_right = st.columns([2.2, 1.8])
+
+    with header_left:
+        st.markdown(
+            f"""
+            <div class="pfm-header">
+              <div>
+                <div class="pfm-title">PFM Region Performance Copilot <span class="pill">v2</span></div>
+                <div class="pfm-sub">Region-level: explainable SVI + heatmap scanning + value upside + drilldown + macro context</div>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    clients = load_clients("clients.json")
+    clients_df = pd.DataFrame(clients)
+    clients_df["label"] = clients_df.apply(
+        lambda r: f"{r['brand']} – {r['name']} (company_id {r['company_id']})",
+        axis=1,
     )
 
-clients = load_clients("clients.json")
-clients_df = pd.DataFrame(clients)
-clients_df["label"] = clients_df.apply(
-    lambda r: f"{r['brand']} – {r['name']} (company_id {r['company_id']})",
-    axis=1,
-)
+    today = datetime.today().date()
+    periods = period_catalog(today)
+    period_labels = list(periods.keys())
 
-today = datetime.today().date()
-periods = period_catalog(today)
-period_labels = list(periods.keys())
+    with header_right:
+        c1, c2 = st.columns(2)
+        with c1:
+            client_label = st.selectbox("Retailer", clients_df["label"].tolist(), label_visibility="collapsed")
+        with c2:
+            period_choice = st.selectbox(
+                "Period",
+                period_labels,
+                index=period_labels.index("Q3 2024") if "Q3 2024" in period_labels else 0,
+                label_visibility="collapsed",
+            )
 
-# We need region list to show region under client.
-# So first pick client + period in the right column, then load locations + regions, then show region.
-with h_right:
-    st.markdown('<div class="panel"><div class="panel-title">Selection</div>', unsafe_allow_html=True)
+    selected_client = clients_df[clients_df["label"] == client_label].iloc[0].to_dict()
+    company_id = int(selected_client["company_id"])
 
-    client_label = st.selectbox(
-        "Retailer",
-        clients_df["label"].tolist(),
-        label_visibility="collapsed",
-        key="rcp_client",
-    )
+    start_period = periods[period_choice].start
+    end_period = periods[period_choice].end
 
-    period_choice = st.selectbox(
-        "Period",
-        period_labels,
-        index=period_labels.index("Q3 2024") if "Q3 2024" in period_labels else 0,
-        label_visibility="collapsed",
-        key="rcp_period",
-    )
+    # Load locations + regions
+    try:
+        locations_df = get_locations_by_company(company_id)
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error fetching stores from FastAPI: {e}")
+        return
 
-    st.markdown("</div>", unsafe_allow_html=True)
+    if locations_df.empty:
+        st.error("No stores found for this retailer.")
+        return
 
-selected_client = clients_df[clients_df["label"] == client_label].iloc[0].to_dict()
-company_id = int(selected_client["company_id"])
-start_period = periods[period_choice].start
-end_period = periods[period_choice].end
+    region_map = load_region_mapping()
+    if region_map.empty:
+        st.error("No valid data/regions.csv found (min required: shop_id;region).")
+        return
 
-# Load locations + regions based on selected client (so region dropdown is stable and accurate)
-try:
-    locations_df = get_locations_by_company(company_id)
-except requests.exceptions.RequestException as e:
-    st.error(f"Error fetching stores from FastAPI: {e}")
-    return
+    locations_df["id"] = pd.to_numeric(locations_df["id"], errors="coerce").astype("Int64")
+    merged = locations_df.merge(region_map, left_on="id", right_on="shop_id", how="inner")
+    if merged.empty:
+        st.warning("No stores matched your region mapping for this retailer.")
+        return
 
-if locations_df.empty:
-    st.error("No stores found for this retailer.")
-    return
+    # store display name
+    if "store_label" in merged.columns and merged["store_label"].notna().any():
+        merged["store_display"] = merged["store_label"]
+    else:
+        merged["store_display"] = merged["name"] if "name" in merged.columns else merged["id"].astype(str)
 
-region_map = load_region_mapping()
-if region_map.empty:
-    st.error("No valid data/regions.csv found (min required: shop_id;region).")
-    return
+    available_regions = sorted(merged["region"].dropna().unique().tolist())
 
-locations_df["id"] = pd.to_numeric(locations_df["id"], errors="coerce").astype("Int64")
-merged = locations_df.merge(region_map, left_on="id", right_on="shop_id", how="inner")
-if merged.empty:
-    st.warning("No stores matched your region mapping for this retailer.")
-    return
+    top_controls = st.columns([1.2, 1.2, 1.2, 1.2, 1.2])
+    with top_controls[0]:
+        region_choice = st.selectbox("Region", available_regions)
+    with top_controls[1]:
+        show_macro = st.toggle("Show macro context (CBS/CCI)", value=True)
+    with top_controls[2]:
+        show_quadrant = st.toggle("Show quadrant", value=True)  # kept for future use
+    with top_controls[3]:
+        lever_floor = st.selectbox("SVI sensitivity (floor)", [70, 75, 80, 85], index=2)
+    with top_controls[4]:
+        run_btn = st.button("Run analysis", type="primary")
 
-# store display name
-if "store_label" in merged.columns and merged["store_label"].notna().any():
-    merged["store_display"] = merged["store_label"]
-else:
-    merged["store_display"] = merged["name"] if "name" in merged.columns else merged["id"].astype(str)
-
-available_regions = sorted(merged["region"].dropna().unique().tolist())
-
-# Row 2: Region under Client/Period + toggles aligned + SVI floor + Run button fixed on the right
-c_reg, c_tog, c_floor, c_btn = st.columns([1.2, 1.8, 1.0, 0.9], vertical_alignment="bottom")
-
-with c_reg:
-    st.markdown('<div class="panel"><div class="panel-title">Region</div>', unsafe_allow_html=True)
-    region_choice = st.selectbox(
-        "Region",
-        available_regions,
-        label_visibility="collapsed",
-        key="rcp_region",
-    )
-    st.markdown("</div>", unsafe_allow_html=True)
-
-with c_tog:
-    st.markdown('<div class="panel"><div class="panel-title">Options</div>', unsafe_allow_html=True)
-    t1, t2 = st.columns(2)
-    with t1:
-        show_macro = st.toggle("Show macro context (CBS/CCI)", value=True, key="rcp_macro")
-    with t2:
-        show_quadrant = st.toggle("Show quadrant", value=True, key="rcp_quadrant")
-    st.markdown("</div>", unsafe_allow_html=True)
-
-with c_floor:
-    st.markdown('<div class="panel"><div class="panel-title">SVI sensitivity</div>', unsafe_allow_html=True)
-    lever_floor = st.selectbox("SVI floor", [70, 75, 80, 85], index=2, label_visibility="collapsed", key="rcp_floor")
-    st.markdown("</div>", unsafe_allow_html=True)
-
-with c_btn:
-    run_btn = st.button("Run analysis", type="primary", key="rcp_run")
-
-lever_cap = 200 - lever_floor  # e.g. 80 -> 120 ; 85 -> 115
+    lever_cap = 200 - lever_floor  # e.g. 80 -> 120 ; 85 -> 115
 
     run_key = (company_id, region_choice, str(start_period), str(end_period), int(lever_floor), int(lever_cap))
     should_fetch = run_btn or (st.session_state.rcp_last_key != run_key) or (not st.session_state.rcp_ran)
@@ -1304,64 +1285,16 @@ lever_cap = 200 - lever_floor  # e.g. 80 -> 120 ; 85 -> 115
     df_region_rank = compute_svi_by_region_companywide(df_daily_store, lever_floor, lever_cap)
     
     # Layout: leaderboard | gauge | SVI panel
-    # Layout B: left = region leaderboard | right = donut + SVI explanation
     c_left, c_right = st.columns([1.7, 3.3])
     
     with c_left:
-        st.markdown(
-            '<div class="panel"><div class="panel-title">Region SVI — vs other regions (company-wide)</div>',
-            unsafe_allow_html=True
-        )
-    
-        if df_region_rank is None or df_region_rank.empty:
-            st.info("No region leaderboard available.")
-        else:
-            TOP_N = 8
-            df_plot = df_region_rank.head(TOP_N).copy()
-    
-            if region_choice not in df_plot["region"].tolist() and region_choice in df_region_rank["region"].tolist():
-                df_sel = df_region_rank[df_region_rank["region"] == region_choice].copy()
-                df_plot = pd.concat([df_plot, df_sel], ignore_index=True)
-    
-            df_plot = df_plot.sort_values("svi", ascending=True).copy()
-    
-            bar = (
-                alt.Chart(df_plot)
-                .mark_bar(cornerRadiusEnd=4)
-                .encode(
-                    y=alt.Y("region:N", sort=df_plot["region"].tolist(), title=None),
-                    x=alt.X("svi:Q", title="SVI (0–100)", scale=alt.Scale(domain=[0, 100])),
-                    color=alt.condition(
-                        alt.datum.region == region_choice,
-                        alt.value(PFM_PURPLE),
-                        alt.value(PFM_LINE)
-                    ),
-                    tooltip=[
-                        alt.Tooltip("region:N", title="Region"),
-                        alt.Tooltip("svi:Q", title="SVI", format=".0f"),
-                        alt.Tooltip("avg_ratio:Q", title="Avg ratio vs company", format=".0f"),
-                        alt.Tooltip("turnover:Q", title="Revenue", format=",.0f"),
-                        alt.Tooltip("footfall:Q", title="Footfall", format=",.0f"),
-                    ],
-                )
-                .properties(height=260)
-            )
-    
-            st.altair_chart(bar, use_container_width=True)
-    
-            st.markdown(
-                "<div class='hint'>Highlighted = selected region. (Capture excluded for fair comparison across regions.)</div></div>",
-                unsafe_allow_html=True
-            )
+        # jouw region bar chart (df_region_rank) blijft hier
     
     with c_right:
         # donut boven
-        st.altair_chart(
-            gauge_chart(region_svi if pd.notna(region_svi) else 0, status_color),
-            use_container_width=False
-        )
+        st.altair_chart(gauge_chart(region_svi if pd.notna(region_svi) else 0, status_color), use_container_width=False)
     
-        # toelichting onder donut
+        # daarna jouw SVI panel tekst (zelfde HTML panel)
         st.markdown(
             f"""
             <div class="panel">
@@ -1379,6 +1312,47 @@ lever_cap = 200 - lever_floor  # e.g. 80 -> 120 ; 85 -> 115
             """,
             unsafe_allow_html=True
         )
+
+    if show_quadrant:
+    st.markdown("## Quadrant — Conversion vs SPV (stores in region)")
+
+    qdf = agg.copy()  # agg bestaat al bij je heatmap prep (store-level totals)
+    qdf["conversion_rate"] = pd.to_numeric(qdf["conversion_rate"], errors="coerce")
+    qdf["sales_per_visitor"] = pd.to_numeric(qdf["sales_per_visitor"], errors="coerce")
+    qdf["turnover"] = pd.to_numeric(qdf["turnover"], errors="coerce")
+    qdf["footfall"] = pd.to_numeric(qdf["footfall"], errors="coerce")
+
+    qdf = qdf.dropna(subset=["conversion_rate", "sales_per_visitor"])
+    if qdf.empty:
+        st.info("Not enough data for quadrant (missing conversion/SPV).")
+    else:
+        x_mean = float(qdf["conversion_rate"].mean())
+        y_mean = float(qdf["sales_per_visitor"].mean())
+
+        scatter = (
+            alt.Chart(qdf)
+            .mark_circle(size=120, opacity=0.85)
+            .encode(
+                x=alt.X("conversion_rate:Q", title="Conversion (%)"),
+                y=alt.Y("sales_per_visitor:Q", title="SPV (€/visitor)"),
+                tooltip=[
+                    alt.Tooltip("store_display:N", title="Store"),
+                    alt.Tooltip("conversion_rate:Q", title="Conversion", format=".1f"),
+                    alt.Tooltip("sales_per_visitor:Q", title="SPV", format=".2f"),
+                    alt.Tooltip("turnover:Q", title="Revenue", format=",.0f"),
+                    alt.Tooltip("footfall:Q", title="Footfall", format=",.0f"),
+                ],
+                color=alt.value(PFM_PURPLE),
+            )
+            .properties(height=320)
+        )
+
+        vline = alt.Chart(pd.DataFrame({"x":[x_mean]})).mark_rule(strokeDash=[6,4]).encode(x="x:Q")
+        hline = alt.Chart(pd.DataFrame({"y":[y_mean]})).mark_rule(strokeDash=[6,4]).encode(y="y:Q")
+
+        st.altair_chart((scatter + vline + hline).configure_view(strokeWidth=0), use_container_width=True)
+
+        st.caption("Quadrants use region averages as reference lines. Top-right = high SPV + high conversion.")
 
     # ----------------------
     # Macro charts (FIXED)
@@ -1795,66 +1769,6 @@ lever_cap = 200 - lever_floor  # e.g. 80 -> 120 ; 85 -> 115
             "Upside (annualized)": opp["up_annual"].apply(fmt_eur).values,
         })
         st.dataframe(show_opp, use_container_width=True, hide_index=True)
-
-    # ======================
-    # Quadrant — Conversion vs SPV (stores in region)
-    # ======================
-    if show_quadrant:
-        st.markdown("## Quadrant — Conversion vs SPV (stores in region)")
-    
-        # Aggregate per store (period totals)
-        q = df_daily_store[df_daily_store["region"] == region_choice].copy()
-    
-        if q.empty:
-            st.info("No store data for quadrant.")
-        else:
-            q_agg = q.groupby(["id", "store_display"], as_index=False).agg(
-                footfall=("footfall", "sum"),
-                turnover=("turnover", "sum"),
-                transactions=("transactions", "sum"),
-            )
-    
-            q_agg["conversion_rate"] = np.where(
-                q_agg["footfall"] > 0,
-                q_agg["transactions"] / q_agg["footfall"] * 100.0,
-                np.nan
-            )
-            q_agg["sales_per_visitor"] = np.where(
-                q_agg["footfall"] > 0,
-                q_agg["turnover"] / q_agg["footfall"],
-                np.nan
-            )
-    
-            q_agg = q_agg.dropna(subset=["conversion_rate", "sales_per_visitor"])
-            if q_agg.empty:
-                st.info("Not enough data to plot quadrant (missing conversion/SPV).")
-            else:
-                x_med = float(q_agg["conversion_rate"].median())
-                y_med = float(q_agg["sales_per_visitor"].median())
-    
-                base = alt.Chart(q_agg).mark_circle(size=140).encode(
-                    x=alt.X("conversion_rate:Q", title="Conversion (%)"),
-                    y=alt.Y("sales_per_visitor:Q", title="SPV (€/visitor)"),
-                    tooltip=[
-                        alt.Tooltip("store_display:N", title="Store"),
-                        alt.Tooltip("conversion_rate:Q", title="Conversion", format=".1f"),
-                        alt.Tooltip("sales_per_visitor:Q", title="SPV", format=",.2f"),
-                        alt.Tooltip("turnover:Q", title="Revenue", format=",.0f"),
-                        alt.Tooltip("footfall:Q", title="Footfall", format=",.0f"),
-                    ],
-                    color=alt.value(PFM_PURPLE),
-                )
-    
-                vline = alt.Chart(pd.DataFrame({"x": [x_med]})).mark_rule(strokeDash=[6, 4]).encode(x="x:Q")
-                hline = alt.Chart(pd.DataFrame({"y": [y_med]})).mark_rule(strokeDash=[6, 4]).encode(y="y:Q")
-    
-                st.altair_chart(
-                    alt.layer(base, vline, hline).properties(height=360).configure_view(strokeWidth=0),
-                    use_container_width=True
-                )
-    else:
-        # optional: keep page quiet when toggle is off
-        pass
 
     # ----------------------
     # Store drilldown (store_type-aware weights)
