@@ -343,7 +343,7 @@ def gauge_chart(score_0_100: float, fill_color: str):
     )
     arc = (
         alt.Chart(gauge_df)
-        .mark_arc(innerRadius=54, outerRadius=70)
+        .mark_arc(innerRadius=50, outerRadius=64)
         .encode(
             theta="value:Q",
             color=alt.Color(
@@ -1285,16 +1285,64 @@ def main():
     df_region_rank = compute_svi_by_region_companywide(df_daily_store, lever_floor, lever_cap)
     
     # Layout: leaderboard | gauge | SVI panel
+    # Layout B: left = region leaderboard | right = donut + SVI explanation
     c_left, c_right = st.columns([1.7, 3.3])
     
     with c_left:
-        # jouw region bar chart (df_region_rank) blijft hier
+        st.markdown(
+            '<div class="panel"><div class="panel-title">Region SVI — vs other regions (company-wide)</div>',
+            unsafe_allow_html=True
+        )
+    
+        if df_region_rank is None or df_region_rank.empty:
+            st.info("No region leaderboard available.")
+        else:
+            TOP_N = 8
+            df_plot = df_region_rank.head(TOP_N).copy()
+    
+            if region_choice not in df_plot["region"].tolist() and region_choice in df_region_rank["region"].tolist():
+                df_sel = df_region_rank[df_region_rank["region"] == region_choice].copy()
+                df_plot = pd.concat([df_plot, df_sel], ignore_index=True)
+    
+            df_plot = df_plot.sort_values("svi", ascending=True).copy()
+    
+            bar = (
+                alt.Chart(df_plot)
+                .mark_bar(cornerRadiusEnd=4)
+                .encode(
+                    y=alt.Y("region:N", sort=df_plot["region"].tolist(), title=None),
+                    x=alt.X("svi:Q", title="SVI (0–100)", scale=alt.Scale(domain=[0, 100])),
+                    color=alt.condition(
+                        alt.datum.region == region_choice,
+                        alt.value(PFM_PURPLE),
+                        alt.value(PFM_LINE)
+                    ),
+                    tooltip=[
+                        alt.Tooltip("region:N", title="Region"),
+                        alt.Tooltip("svi:Q", title="SVI", format=".0f"),
+                        alt.Tooltip("avg_ratio:Q", title="Avg ratio vs company", format=".0f"),
+                        alt.Tooltip("turnover:Q", title="Revenue", format=",.0f"),
+                        alt.Tooltip("footfall:Q", title="Footfall", format=",.0f"),
+                    ],
+                )
+                .properties(height=260)
+            )
+    
+            st.altair_chart(bar, use_container_width=True)
+    
+            st.markdown(
+                "<div class='hint'>Highlighted = selected region. (Capture excluded for fair comparison across regions.)</div></div>",
+                unsafe_allow_html=True
+            )
     
     with c_right:
         # donut boven
-        st.altair_chart(gauge_chart(region_svi if pd.notna(region_svi) else 0, status_color), use_container_width=False)
+        st.altair_chart(
+            gauge_chart(region_svi if pd.notna(region_svi) else 0, status_color),
+            use_container_width=False
+        )
     
-        # daarna jouw SVI panel tekst (zelfde HTML panel)
+        # toelichting onder donut
         st.markdown(
             f"""
             <div class="panel">
