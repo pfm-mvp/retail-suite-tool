@@ -895,12 +895,13 @@ def main():
     # ======================
     # ROW 1 — Title + Client + Run button (aligned)
     # ======================
-    r1_left, r1_right = st.columns([2.8, 1.6], vertical_alignment="center")
-
+    # --- Header row (title | client + run) ---
+    r1_left, r1_right = st.columns([3.6, 2.0], vertical_alignment="center")
+    
     with r1_left:
         st.markdown(
             f"""
-            <div class="pfm-header">
+            <div class="pfm-header pfm-header--fixed">
               <div>
                 <div class="pfm-title">PFM Region Performance Copilot <span class="pill">v2</span></div>
                 <div class="pfm-sub">Region-level: explainable SVI + heatmap scanning + value upside + drilldown + macro context</div>
@@ -909,31 +910,23 @@ def main():
             """,
             unsafe_allow_html=True,
         )
-
-    clients = load_clients("clients.json")
-    clients_df = pd.DataFrame(clients)
-    clients_df["label"] = clients_df.apply(
-        lambda r: f"{r['brand']} – {r['name']} (company_id {r['company_id']})",
-        axis=1,
-    )
-
-    today = datetime.today().date()
-    periods = period_catalog(today)
-    period_labels = list(periods.keys())
-
-    with r1_right:
-        client_label = st.selectbox(
-            "Client",
-            clients_df["label"].tolist(),
-            label_visibility="collapsed",
-            key="rcp_client",
-        )
     
-        run_btn = st.button(
-            "Run analysis",
-            type="primary",
-            key="rcp_run",
-        )
+    with r1_right:
+        st.markdown('<div class="pfm-header pfm-header--fixed pfm-header-right">', unsafe_allow_html=True)
+    
+        c_sel, c_btn = st.columns([3.0, 1.3], vertical_alignment="center")
+        with c_sel:
+            client_label = st.selectbox(
+                "Client",
+                clients_df["label"].tolist(),
+                label_visibility="collapsed",
+                key="rcp_client",
+            )
+    
+        with c_btn:
+            run_btn = st.button("Run analysis", type="primary", key="rcp_run")
+    
+        st.markdown("</div>", unsafe_allow_html=True)
 
     selected_client = clients_df[clients_df["label"] == client_label].iloc[0].to_dict()
     company_id = int(selected_client["company_id"])
