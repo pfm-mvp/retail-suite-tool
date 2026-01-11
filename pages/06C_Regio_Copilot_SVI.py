@@ -180,6 +180,18 @@ st.markdown(
         padding: 0.65rem 1rem !important;
         font-weight: 800 !important;
       }}
+      /* Header alignment: force select + button height to match title card */
+      div[data-testid="stSelectbox"] > div {
+          height: 58px;
+      }
+      div[data-testid="stSelectbox"] div[role="combobox"] {
+          height: 58px;
+          align-items: center;
+      }
+      div.stButton > button {
+          height: 58px !important;
+          margin-top: 0 !important;
+      }
     </style>
     """,
     unsafe_allow_html=True,
@@ -910,8 +922,6 @@ def main():
     period_labels = list(periods.keys())
 
     with r1_right:
-        st.markdown('<div class="pfm-header-right">', unsafe_allow_html=True)
-    
         client_label = st.selectbox(
             "Client",
             clients_df["label"].tolist(),
@@ -919,9 +929,11 @@ def main():
             key="rcp_client",
         )
     
-        run_btn = st.button("Run analysis", type="primary", key="rcp_run")
-    
-        st.markdown("</div>", unsafe_allow_html=True)
+        run_btn = st.button(
+            "Run analysis",
+            type="primary",
+            key="rcp_run",
+        )
 
     selected_client = clients_df[clients_df["label"] == client_label].iloc[0].to_dict()
     company_id = int(selected_client["company_id"])
