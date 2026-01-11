@@ -63,7 +63,7 @@ else:
     REPORT_URL = raw_api_url + "/get-report"
 
 # ----------------------
-# Minimal CSS (FIXED)
+# Minimal CSS (FINAL)
 # ----------------------
 st.markdown(
     f"""
@@ -85,25 +85,25 @@ st.markdown(
         margin-bottom: 0.75rem;
       }}
 
-      /* Force both header cards to match height and align content */
+      /* Fixed height so left & right are identical */
       .pfm-header--fixed {{
         height: 92px;
         display: flex;
         align-items: center;
       }}
 
-      /* Right header is also a "card" now (same styling as left) */
+      /* Right card: stacked (select top, button bottom) */
       .pfm-header-right {{
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 0.75rem;
-        padding: 0.75rem 1rem;
         border: 1px solid {PFM_LINE};
         border-radius: 14px;
         background: white;
-        margin-bottom: 0.75rem;
+        padding: 0.75rem 1rem;
         height: 92px;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        gap: 0.5rem;
+        margin-bottom: 0.75rem;
       }}
 
       .pfm-title {{
@@ -181,6 +181,23 @@ st.markdown(
         font-size: 0.82rem;
       }}
 
+      /* ---------------- CALLOUT ---------------- */
+      .callout {{
+        border: 1px solid {PFM_LINE};
+        border-radius: 14px;
+        background: #fff7ed;
+        padding: 0.75rem 1rem;
+      }}
+      .callout-title {{
+        font-weight: 900;
+        color: {PFM_DARK};
+        margin-bottom: 0.15rem;
+      }}
+      .callout-sub {{
+        color: {PFM_GRAY};
+        font-size: 0.86rem;
+      }}
+
       /* ---------------- BUTTON (GLOBAL STYLE) ---------------- */
       div.stButton > button {{
         background: {PFM_RED} !important;
@@ -189,28 +206,26 @@ st.markdown(
         border-radius: 12px !important;
         padding: 0.65rem 1rem !important;
         font-weight: 800 !important;
+        width: 100% !important;
       }}
 
-      /* ---------------- HEADER ALIGNMENT FIX (SCOPED) ---------------- */
-      /* Only affect the select + button INSIDE the right header card */
-      .pfm-header-right div[data-testid="stSelectbox"] {{
-        margin-top: 0 !important;
+      /* ---------------- HEADER WIDGET COMPACTING ---------------- */
+      /* Remove extra empty label space */
+      div[data-testid="stSelectbox"] label {{
+        display: none !important;
+        height: 0 !important;
+        margin: 0 !important;
+        padding: 0 !important;
       }}
 
-      .pfm-header-right div[data-testid="stSelectbox"] > div {{
-        height: 56px !important;
+      /* Make select compact and consistent */
+      div[data-testid="stSelectbox"] > div {{
+        min-height: 44px !important;
       }}
-
-      .pfm-header-right div[data-testid="stSelectbox"] div[role="combobox"] {{
-        height: 56px !important;
+      div[data-testid="stSelectbox"] div[role="combobox"] {{
+        min-height: 44px !important;
         display: flex !important;
         align-items: center !important;
-      }}
-
-      .pfm-header-right div.stButton > button {{
-        height: 56px !important;
-        margin-top: 0 !important;
-        width: 100%;
       }}
 
     </style>
@@ -933,45 +948,52 @@ def main():
         lambda r: f"{r['brand']} – {r['name']} (company_id {r['company_id']})",
         axis=1,
     )
+    
+    # ----------------------
+    # Periods (MUST be before Row 2)
+    # ----------------------
+    periods = period_catalog()
+    if not isinstance(periods, dict) or len(periods) == 0:
+        st.error("period_catalog() returned no periods.")
+        return
+    
+    period_labels = list(periods.keys())
 
     # ======================
-    # ROW 1 — Title + Client + Run button (aligned)
+    # ROW 1 — Title + Client + Run button (ALIGNED + STACKED RIGHT)
     # ======================
-    # --- Header row (title | client + run) ---
-    r1_left, r1_right = st.columns([3.6, 2.0], vertical_alignment="center")
+    r1_left, r1_right = st.columns([3.6, 2.0], vertical_alignment="top")
     
-    with r1_left:
-        st.markdown(
-            f"""
-            <div class="pfm-header pfm-header--fixed">
-              <div>
-                <div class="pfm-title">PFM Region Performance Copilot <span class="pill">v2</span></div>
-                <div class="pfm-sub">Region-level: explainable SVI + heatmap scanning + value upside + drilldown + macro context</div>
-              </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    
-    with r1_right:
-        st.markdown('<div class="pfm-header pfm-header--fixed pfm-header-right">', unsafe_allow_html=True)
-    
-        c_sel, c_btn = st.columns([3.0, 1.3], vertical_alignment="center")
-        with c_sel:
+        with r1_left:
+            st.markdown(
+                f"""
+                <div class="pfm-header pfm-header--fixed">
+                  <div>
+                    <div class="pfm-title">PFM Region Performance Copilot <span class="pill">v2</span></div>
+                    <div class="pfm-sub">Region-level: explainable SVI + heatmap scanning + value upside + drilldown + macro context</div>
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        
+        with r1_right:
+            # IMPORTANT: wrapper div stays open so the widgets render INSIDE it
+            st.markdown('<div class="pfm-header-right">', unsafe_allow_html=True)
+        
             client_label = st.selectbox(
                 "Client",
                 clients_df["label"].tolist(),
                 label_visibility="collapsed",
                 key="rcp_client",
             )
-    
-        with c_btn:
+        
             run_btn = st.button("Run analysis", type="primary", key="rcp_run")
-    
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    selected_client = clients_df[clients_df["label"] == client_label].iloc[0].to_dict()
-    company_id = int(selected_client["company_id"])
+        
+            st.markdown("</div>", unsafe_allow_html=True)
+        
+        selected_client = clients_df[clients_df["label"] == client_label].iloc[0].to_dict()
+        company_id = int(selected_client["company_id"])
 
     # Load locations + regions based on selected client (stable region dropdown)
     try:
