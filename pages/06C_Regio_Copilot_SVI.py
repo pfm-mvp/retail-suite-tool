@@ -129,6 +129,16 @@ st.markdown(
         min-height: 42px;           /* compacter input */
       }}
       }}
+      .pfm-header-right {
+        display: flex;
+        align-items: center;      /* 🔑 dit is de fix */
+        gap: 0.75rem;
+        padding: 0.75rem 1rem;
+        border: 1px solid #E5E7EB;
+        border-radius: 14px;
+        background: white;
+        height: 100%;
+      }
       .pill {{
         display:inline-block;
         padding: 0.15rem 0.55rem;
