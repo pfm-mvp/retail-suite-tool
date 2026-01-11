@@ -118,13 +118,16 @@ st.markdown(
         border: 1px solid {PFM_LINE};
         border-radius: 14px;
         background: white;
-        padding: 0.75rem 1rem;
-        min-height: 92px;
+        padding: 0.55rem 0.75rem;   /* compacter */
+        min-height: unset;          /* WEG met die witregel */
       }}
       .panel-title {{
         font-weight: 800;
         color: {PFM_DARK};
-        margin-bottom: 0.5rem;
+        margin-bottom: 0.25rem;     /* minder ruimte onder titel */
+        div[data-baseweb="select"] > div {{
+        min-height: 42px;           /* compacter input */
+      }}
       }}
       .pill {{
         display:inline-block;
@@ -865,12 +868,14 @@ def main():
     if "rcp_ran" not in st.session_state:
         st.session_state.rcp_ran = False
 
-    st.markdown("<div style='height:0.35rem'></div>", unsafe_allow_html=True)
+    st.markdown("<div style='height:0.25rem'></div>", unsafe_allow_html=True)
 
-    # Row 1: title left, selection stack right
-    h_left, h_right = st.columns([2.3, 1.7], vertical_alignment="top")
+    # ======================
+    # ROW 1 — Title + Client + Run button (aligned)
+    # ======================
+    r1_left, r1_mid, r1_right = st.columns([2.4, 1.2, 0.6], vertical_alignment="center")
 
-    with h_left:
+    with r1_left:
         st.markdown(
             f"""
             <div class="pfm-header">
@@ -894,33 +899,25 @@ def main():
     periods = period_catalog(today)
     period_labels = list(periods.keys())
 
-    # Client + period selection
-    with h_right:
-        st.markdown('<div class="panel"><div class="panel-title">Selection</div>', unsafe_allow_html=True)
-
+    with r1_mid:
+        st.markdown('<div class="panel"><div class="panel-title">Client</div>', unsafe_allow_html=True)
         client_label = st.selectbox(
             "Retailer",
             clients_df["label"].tolist(),
             label_visibility="collapsed",
             key="rcp_client",
         )
-
-        period_choice = st.selectbox(
-            "Period",
-            period_labels,
-            index=period_labels.index("Q3 2024") if "Q3 2024" in period_labels else 0,
-            label_visibility="collapsed",
-            key="rcp_period",
-        )
-
         st.markdown("</div>", unsafe_allow_html=True)
+
+    with r1_right:
+        # Button aligned with client box
+        st.markdown("<div style='height:1.55rem'></div>", unsafe_allow_html=True)  # aligns button vertically with inputs
+        run_btn = st.button("Run analysis", type="primary", key="rcp_run")
 
     selected_client = clients_df[clients_df["label"] == client_label].iloc[0].to_dict()
     company_id = int(selected_client["company_id"])
-    start_period = periods[period_choice].start
-    end_period = periods[period_choice].end
 
-    # Load locations + regions
+    # Load locations + regions based on selected client (stable region dropdown)
     try:
         locations_df = get_locations_by_company(company_id)
     except requests.exceptions.RequestException as e:
@@ -942,7 +939,6 @@ def main():
         st.warning("No stores matched your region mapping for this retailer.")
         return
 
-    # Store display name
     if "store_label" in merged.columns and merged["store_label"].notna().any():
         merged["store_display"] = merged["store_label"]
     else:
@@ -950,8 +946,25 @@ def main():
 
     available_regions = sorted(merged["region"].dropna().unique().tolist())
 
-    # Row 2: Region + toggles + SVI floor + Run
-    c_reg, c_tog, c_floor, c_btn = st.columns([1.2, 1.8, 1.0, 0.9], vertical_alignment="bottom")
+    # ======================
+    # ROW 2 — Selection (period) + Region + Options + SVI
+    # Selection panel now LEFT of the three boxes
+    # ======================
+    c_sel, c_reg, c_opt, c_svi = st.columns([1.1, 1.0, 1.4, 0.9], vertical_alignment="bottom")
+
+    with c_sel:
+        st.markdown('<div class="panel"><div class="panel-title">Selection</div>', unsafe_allow_html=True)
+        period_choice = st.selectbox(
+            "Period",
+            period_labels,
+            index=period_labels.index("Q3 2024") if "Q3 2024" in period_labels else 0,
+            label_visibility="collapsed",
+            key="rcp_period",
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    start_period = periods[period_choice].start
+    end_period = periods[period_choice].end
 
     with c_reg:
         st.markdown('<div class="panel"><div class="panel-title">Region</div>', unsafe_allow_html=True)
@@ -963,24 +976,27 @@ def main():
         )
         st.markdown("</div>", unsafe_allow_html=True)
 
-    with c_tog:
+    with c_opt:
         st.markdown('<div class="panel"><div class="panel-title">Options</div>', unsafe_allow_html=True)
         t1, t2 = st.columns(2)
         with t1:
-            show_macro = st.toggle("Show macro context (CBS/CCI)", value=True, key="rcp_macro")
+            show_macro = st.toggle("Show macro context", value=True, key="rcp_macro")   # (CBS/CCI) removed
         with t2:
             show_quadrant = st.toggle("Show quadrant", value=True, key="rcp_quadrant")
         st.markdown("</div>", unsafe_allow_html=True)
 
-    with c_floor:
+    with c_svi:
         st.markdown('<div class="panel"><div class="panel-title">SVI sensitivity</div>', unsafe_allow_html=True)
-        lever_floor = st.selectbox("SVI floor", [70, 75, 80, 85], index=2, label_visibility="collapsed", key="rcp_floor")
+        lever_floor = st.selectbox(
+            "SVI floor",
+            [70, 75, 80, 85],
+            index=2,
+            label_visibility="collapsed",
+            key="rcp_floor"
+        )
         st.markdown("</div>", unsafe_allow_html=True)
 
-    with c_btn:
-        run_btn = st.button("Run analysis", type="primary", key="rcp_run")
-
-    lever_cap = 200 - lever_floor  # e.g. 80 -> 120 ; 85 -> 115
+    lever_cap = 200 - lever_floor
     run_key = (company_id, region_choice, str(start_period), str(end_period), int(lever_floor), int(lever_cap))
 
     selection_changed = st.session_state.rcp_last_key != run_key
