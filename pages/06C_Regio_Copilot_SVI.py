@@ -63,7 +63,7 @@ else:
     REPORT_URL = raw_api_url + "/get-report"
 
 # ----------------------
-# Minimal CSS
+# Minimal CSS (FIXED)
 # ----------------------
 st.markdown(
     f"""
@@ -72,75 +72,84 @@ st.markdown(
         padding-top: 2.25rem;
         padding-bottom: 2rem;
       }}
+
+      /* ---------------- HEADER ---------------- */
       .pfm-header {{
-        display:flex;
-        align-items:center;
-        justify-content:space-between;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
         padding: 0.75rem 1rem;
         border: 1px solid {PFM_LINE};
         border-radius: 14px;
         background: white;
         margin-bottom: 0.75rem;
       }}
+
+      .pfm-header-right {{
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 0;
+        border: none;
+        background: transparent;
+      }}
+
       .pfm-title {{
         font-size: 1.25rem;
         font-weight: 800;
         color: {PFM_DARK};
       }}
+
       .pfm-sub {{
         color: {PFM_GRAY};
         font-size: 0.9rem;
         margin-top: 0.15rem;
       }}
+
+      /* ---------------- KPI CARDS ---------------- */
       .kpi-card {{
         border: 1px solid {PFM_LINE};
         border-radius: 14px;
         background: white;
         padding: 0.85rem 1rem;
       }}
+
       .kpi-label {{
         color: {PFM_GRAY};
         font-size: 0.85rem;
         font-weight: 600;
       }}
+
       .kpi-value {{
         color: {PFM_DARK};
         font-size: 1.45rem;
         font-weight: 900;
         margin-top: 0.2rem;
       }}
+
       .kpi-help {{
         color: {PFM_GRAY};
         font-size: 0.8rem;
         margin-top: 0.25rem;
       }}
+
+      /* ---------------- PANELS ---------------- */
       .panel {{
         border: 1px solid {PFM_LINE};
         border-radius: 14px;
         background: white;
-        padding: 0.55rem 0.75rem;   /* compacter */
-        min-height: unset;          /* WEG met die witregel */
+        padding: 0.55rem 0.75rem;
       }}
+
       .panel-title {{
         font-weight: 800;
         color: {PFM_DARK};
-        margin-bottom: 0.25rem;     /* minder ruimte onder titel */
-        div[data-baseweb="select"] > div {{
-        min-height: 42px;           /* compacter input */
+        margin-bottom: 0.25rem;
       }}
-      }}
-      .pfm-header-right {{
-        display: flex;
-        align-items: center;      /* 🔑 dit is de fix */
-        gap: 0.75rem;
-        padding: 0.75rem 1rem;
-        border: 1px solid #E5E7EB;
-        border-radius: 14px;
-        background: white;
-        height: 100%;
-      }}
+
+      /* ---------------- PILL / TEXT ---------------- */
       .pill {{
-        display:inline-block;
+        display: inline-block;
         padding: 0.15rem 0.55rem;
         border-radius: 999px;
         font-size: 0.82rem;
@@ -149,49 +158,40 @@ st.markdown(
         background: {PFM_LIGHT};
         color: {PFM_DARK};
       }}
+
       .muted {{
         color: {PFM_GRAY};
         font-size: 0.86rem;
       }}
+
       .hint {{
         color: {PFM_GRAY};
         font-size: 0.82rem;
       }}
-      .callout {{
-        border: 1px solid {PFM_LINE};
-        border-radius: 14px;
-        background: #fff7ed;
-        padding: 0.75rem 1rem;
-      }}
-      .callout-title {{
-        font-weight: 900;
-        color: {PFM_DARK};
-        margin-bottom: 0.15rem;
-      }}
-      .callout-sub {{
-        color: {PFM_GRAY};
-        font-size: 0.86rem;
-      }}
+
+      /* ---------------- BUTTON ---------------- */
       div.stButton > button {{
         background: {PFM_RED} !important;
         color: white !important;
-        border: 0px !important;
+        border: 0 !important;
         border-radius: 12px !important;
         padding: 0.65rem 1rem !important;
         font-weight: 800 !important;
+        height: 58px;
+        margin-top: 0;
       }}
-      /* Header alignment: force select + button height to match title card */
-      div[data-testid="stSelectbox"] > div {
-          height: 58px;
-      }
-      div[data-testid="stSelectbox"] div[role="combobox"] {
-          height: 58px;
-          align-items: center;
-      }
-      div.stButton > button {
-          height: 58px !important;
-          margin-top: 0 !important;
-      }
+
+      /* ---------------- HEADER ALIGNMENT FIX ---------------- */
+      div[data-testid="stSelectbox"] > div {{
+        height: 58px;
+      }}
+
+      div[data-testid="stSelectbox"] div[role="combobox"] {{
+        height: 58px;
+        display: flex;
+        align-items: center;
+      }}
+
     </style>
     """,
     unsafe_allow_html=True,
