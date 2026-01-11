@@ -913,6 +913,27 @@ def main():
 
     st.markdown("<div style='height:0.25rem'></div>", unsafe_allow_html=True)
 
+    # ----------------------
+    # Load clients (MUST be before Row 1)
+    # ----------------------
+    clients = load_clients("clients.json")
+    clients_df = pd.DataFrame(clients)
+
+    if clients_df.empty:
+        st.error("No clients found in clients.json")
+        return
+
+    # Defensive: ensure required columns exist
+    required_cols = {"brand", "name", "company_id"}
+    if not required_cols.issubset(set(clients_df.columns)):
+        st.error(f"clients.json missing columns. Required: {sorted(required_cols)}")
+        return
+
+    clients_df["label"] = clients_df.apply(
+        lambda r: f"{r['brand']} – {r['name']} (company_id {r['company_id']})",
+        axis=1,
+    )
+
     # ======================
     # ROW 1 — Title + Client + Run button (aligned)
     # ======================
