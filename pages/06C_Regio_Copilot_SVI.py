@@ -883,7 +883,7 @@ def main():
     # ======================
     # ROW 1 — Title + Client + Run button (aligned)
     # ======================
-    r1_left, r1_mid, r1_right = st.columns([2.4, 1.2, 0.6], vertical_alignment="center")
+    r1_left, r1_right = st.columns([2.8, 1.6], vertical_alignment="center")
 
     with r1_left:
         st.markdown(
@@ -909,20 +909,19 @@ def main():
     periods = period_catalog(today)
     period_labels = list(periods.keys())
 
-    with r1_mid:
-        st.markdown('<div class="panel"><div class="panel-title">Client</div>', unsafe_allow_html=True)
+    with r1_right:
+        st.markdown('<div class="pfm-header-right">', unsafe_allow_html=True)
+    
         client_label = st.selectbox(
-            "Retailer",
+            "Client",
             clients_df["label"].tolist(),
             label_visibility="collapsed",
             key="rcp_client",
         )
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    with r1_right:
-        # Button aligned with client box
-        st.markdown("<div style='height:1.55rem'></div>", unsafe_allow_html=True)  # aligns button vertically with inputs
+    
         run_btn = st.button("Run analysis", type="primary", key="rcp_run")
+    
+        st.markdown("</div>", unsafe_allow_html=True)
 
     selected_client = clients_df[clients_df["label"] == client_label].iloc[0].to_dict()
     company_id = int(selected_client["company_id"])
