@@ -85,13 +85,25 @@ st.markdown(
         margin-bottom: 0.75rem;
       }}
 
+      /* Force both header cards to match height and align content */
+      .pfm-header--fixed {{
+        height: 92px;
+        display: flex;
+        align-items: center;
+      }}
+
+      /* Right header is also a "card" now (same styling as left) */
       .pfm-header-right {{
         display: flex;
         align-items: center;
+        justify-content: space-between;
         gap: 0.75rem;
-        padding: 0;
-        border: none;
-        background: transparent;
+        padding: 0.75rem 1rem;
+        border: 1px solid {PFM_LINE};
+        border-radius: 14px;
+        background: white;
+        margin-bottom: 0.75rem;
+        height: 92px;
       }}
 
       .pfm-title {{
@@ -169,7 +181,7 @@ st.markdown(
         font-size: 0.82rem;
       }}
 
-      /* ---------------- BUTTON ---------------- */
+      /* ---------------- BUTTON (GLOBAL STYLE) ---------------- */
       div.stButton > button {{
         background: {PFM_RED} !important;
         color: white !important;
@@ -177,19 +189,28 @@ st.markdown(
         border-radius: 12px !important;
         padding: 0.65rem 1rem !important;
         font-weight: 800 !important;
-        height: 58px;
-        margin-top: 0;
       }}
 
-      /* ---------------- HEADER ALIGNMENT FIX ---------------- */
-      div[data-testid="stSelectbox"] > div {{
-        height: 58px;
+      /* ---------------- HEADER ALIGNMENT FIX (SCOPED) ---------------- */
+      /* Only affect the select + button INSIDE the right header card */
+      .pfm-header-right div[data-testid="stSelectbox"] {{
+        margin-top: 0 !important;
       }}
 
-      div[data-testid="stSelectbox"] div[role="combobox"] {{
-        height: 58px;
-        display: flex;
-        align-items: center;
+      .pfm-header-right div[data-testid="stSelectbox"] > div {{
+        height: 56px !important;
+      }}
+
+      .pfm-header-right div[data-testid="stSelectbox"] div[role="combobox"] {{
+        height: 56px !important;
+        display: flex !important;
+        align-items: center !important;
+      }}
+
+      .pfm-header-right div.stButton > button {{
+        height: 56px !important;
+        margin-top: 0 !important;
+        width: 100%;
       }}
 
     </style>
