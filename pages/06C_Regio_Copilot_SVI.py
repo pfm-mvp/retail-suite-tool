@@ -13,6 +13,7 @@ import os
 import re
 import streamlit as st
 import altair as alt
+import streamlit.components.v1 as components
 
 from datetime import datetime
 
@@ -1504,9 +1505,6 @@ def main():
             )
     
         st.markdown("</div>", unsafe_allow_html=True)
-    
-    # -------- (2) MIDDLE: Donut + SVI card --------
-    import streamlit.components.v1 as components
     
     # -------- (2) MIDDLE: SVI card --------
     with col_donut:
