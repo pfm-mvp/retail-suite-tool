@@ -1510,7 +1510,7 @@ def main():
     with col_donut:
         big_score = 0 if pd.isna(region_svi) else float(region_svi)
         st.markdown(
-            '<div class="panel"><div class="panel-title">Region SVI — vs other regions (company-wide)</div>',
+            '<div class="panel"><div class="panel-title">Store Vitality Index (SVI) — region vs company-wide</div>',
             unsafe_allow_html=True
         )
     
@@ -1518,7 +1518,7 @@ def main():
             f"""
             <!-- SVI CARD START -->
             <div class="panel">
-              <div class="panel-title">Store Vitality Index (SVI) — region vs company</div>
+              <div class="panel-title">Store Vitality Index (SVI)</div>
     
               <div style="height:0.55rem"></div>
     
