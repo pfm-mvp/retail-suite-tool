@@ -1548,41 +1548,90 @@ def main():
     
     # -------- (3) RIGHT: Store types table --------
     with col_types:
-        # ✅ BELANGRIJK: hier plakken we NIETS nieuws.
-        # We verplaatsen alleen je bestaande "store types table" rendering code naar hier.
-        # Dus: knip het blok dat nu de store type tabel tekent (st.markdown panel + st.dataframe)
-        # en plak dat blok EXACT hier.
+        st.markdown(
+            '<div class="panel"><div class="panel-title">Store types in this region — vs company (same store type)</div>',
+            unsafe_allow_html=True
+        )
     
-        # --- PASTE YOUR EXISTING STORE TYPES TABLE BLOCK HERE ---
-        st.markdown('<div class="panel"><div class="panel-title">Store types in this region — vs company (same store type)</div>', unsafe_allow_html=True)
-
         if mix_g.empty:
             st.info("No store_type mix available (check regions.csv store_type column).")
         else:
             # join mix + idx for quick table
             show = mix_g.merge(
-                type_idx[["store_type","SPV idx","CR idx","Sales/m² idx","ATV idx","Capture idx"]],
+                type_idx[["store_type", "SPV idx", "CR idx", "Sales/m² idx", "ATV idx", "Capture idx"]],
                 on="store_type",
                 how="left"
             ).sort_values("Stores", ascending=False)
-        
+    
             # compact display
-            disp = show.rename(columns={"store_type":"Store type"}).copy()
-            for c in ["Store share","SPV idx","CR idx","Sales/m² idx","ATV idx","Capture idx"]:
+            disp = show.rename(columns={"store_type": "Store type"}).copy()
+    
+            # --- keep a numeric copy for styling thresholds ---
+            idx_cols = ["SPV idx", "CR idx", "Sales/m² idx", "ATV idx", "Capture idx"]
+    
+            # ensure numeric for share + idx cols
+            if "Store share" in disp.columns:
+                disp["Store share"] = pd.to_numeric(disp["Store share"], errors="coerce")
+    
+            for c in idx_cols:
                 if c in disp.columns:
                     disp[c] = pd.to_numeric(disp[c], errors="coerce")
-        
-            disp["Store share"] = disp["Store share"].apply(lambda x: "-" if pd.isna(x) else f"{x:.0f}%")
-            for c in ["SPV idx","CR idx","Sales/m² idx","ATV idx","Capture idx"]:
-                if c in disp.columns:
-                    disp[c] = disp[c].apply(lambda x: "-" if pd.isna(x) else f"{x:.0f}%")
-        
-            st.dataframe(
-                disp[["Store type","Stores","Store share","SPV idx","CR idx","Sales/m² idx","ATV idx","Capture idx"]],
-                use_container_width=True,
-                hide_index=True
-            )
-        
+    
+            # ---------- Styling helpers ----------
+            def _idx_style(v):
+                try:
+                    if pd.isna(v):
+                        return ""
+                    v = float(v)
+                    # thresholds around 100
+                    if v >= 115:
+                        return "background-color:#ECFDF5; color:#065F46; font-weight:900;"
+                    if v >= 105:
+                        return "background-color:#F0FDF4; color:#166534; font-weight:800;"
+                    if v >= 95:
+                        return "background-color:#FFFFFF; color:#111827; font-weight:700;"
+                    if v >= 85:
+                        return "background-color:#FFF7ED; color:#9A3412; font-weight:800;"
+                    return "background-color:#FFF1F2; color:#9F1239; font-weight:900;"
+                except Exception:
+                    return ""
+    
+            def _share_style(v):
+                # subtle emphasis on the mix column
+                try:
+                    if pd.isna(v):
+                        return ""
+                    return "background-color:#F9FAFB; font-weight:800; color:#111827;"
+                except Exception:
+                    return ""
+    
+            # ---------- Build styler ----------
+            show_cols = ["Store type", "Stores", "Store share"] + [c for c in idx_cols if c in disp.columns]
+            df_show = disp[show_cols].copy()
+    
+            styler = df_show.style
+    
+            # apply heatmap on idx columns
+            heat_cols = [c for c in idx_cols if c in df_show.columns]
+            if heat_cols:
+                styler = styler.applymap(_idx_style, subset=heat_cols)
+    
+            # highlight store share a bit (optional but nice)
+            if "Store share" in df_show.columns:
+                styler = styler.applymap(_share_style, subset=["Store share"])
+    
+            # formatting (keep it consistent with your UI)
+            fmt = {}
+            if "Store share" in df_show.columns:
+                fmt["Store share"] = lambda x: "-" if pd.isna(x) else f"{float(x):.0f}%"
+            for c in heat_cols:
+                fmt[c] = lambda x: "-" if pd.isna(x) else f"{float(x):.0f}%"
+    
+            if fmt:
+                styler = styler.format(fmt)
+    
+            st.dataframe(styler, use_container_width=True, hide_index=True)
+    
         st.markdown("</div>", unsafe_allow_html=True)
 
     # --- Macro charts ---
