@@ -584,6 +584,30 @@ def get_svi_weights_for_store_type(store_type: str) -> dict:
 
     return w
 
+def get_svi_weights_for_region_mix(store_types_series: pd.Series) -> dict:
+    """
+    Compute region-level SVI weights as a weighted mix of store-type specific weights.
+    Weight = share of stores per store_type in the region (simple store-count share).
+    """
+    if store_types_series is None or store_types_series.dropna().empty:
+        return dict(BASE_SVI_WEIGHTS)
+
+    s = store_types_series.dropna().astype(str).str.strip()
+    s = s[s.str.lower() != "nan"]
+    if s.empty:
+        return dict(BASE_SVI_WEIGHTS)
+
+    shares = s.value_counts(normalize=True).to_dict()
+
+    # start at zeros
+    mix = {k: 0.0 for k in BASE_SVI_WEIGHTS.keys()}
+    for stype, w_share in shares.items():
+        w = get_svi_weights_for_store_type(stype)
+        for k in mix.keys():
+            mix[k] += float(w.get(k, 0.0)) * float(w_share)
+
+    return mix
+
 def compute_driver_values_from_period(footfall, turnover, transactions, sqm_sum, capture_pct):
     spv = safe_div(turnover, footfall)
     spsqm = safe_div(turnover, sqm_sum)
@@ -1372,7 +1396,8 @@ def main():
         dominant_store_type = str(region_types.dropna().astype(str).value_counts().index[0]).strip()
         if dominant_store_type.lower() == "nan":
             dominant_store_type = ""
-    region_weights = get_svi_weights_for_store_type(dominant_store_type)
+    region_types = merged.loc[merged["region"] == region_choice, "store_type"] if "store_type" in merged.columns else pd.Series([], dtype=str)
+    region_weights = get_svi_weights_for_region_mix(region_types)
 
     region_svi, region_avg_ratio, region_bd = compute_svi_explainable(
         vals_a=reg_vals,
@@ -1474,27 +1499,37 @@ def main():
     
     # -------- (2) MIDDLE: Donut + SVI card --------
     with col_donut:
-        # No donut (prevents wrapping / keeps row clean)
         big_score = 0 if pd.isna(region_svi) else float(region_svi)
     
         st.markdown(
             f"""
-            <div class="panel" style="height:100%;">
-              <div class="panel-title">Store Vitality Index (SVI) — region vs company</div>
+            <div class="panel" style="height:100%; display:flex; flex-direction:column; justify-content:space-between;">
+              
+              <div>
+                <div class="panel-title">Store Vitality Index (SVI) — region vs company</div>
     
-              <div style="display:flex; align-items:baseline; gap:0.5rem; margin-top:0.35rem;">
-                <div style="font-size:3.1rem;font-weight:950;line-height:1;color:{status_color};">
-                  {big_score:.0f}
+                <div style="height:0.35rem"></div>
+    
+                <div style="display:flex; align-items:baseline; gap:0.5rem;">
+                  <div style="font-size:3.2rem;font-weight:950;line-height:1;color:{status_color};">
+                    {big_score:.0f}
+                  </div>
+                  <div class="pill">/ 100</div>
                 </div>
-                <div class="pill">/ 100</div>
+    
+                <div style="height:0.45rem"></div>
+    
+                <div class="muted">
+                  Status: <span style="font-weight:900;color:{status_color}">{status_txt}</span><br/>
+                  Weighted driver ratio vs company ≈ <b>{"" if pd.isna(region_avg_ratio) else f"{region_avg_ratio:.0f}%"} </b>
+                  <span class="hint">(ratios clipped {lever_floor}–{lever_cap}% → 0–100)</span>
+                </div>
               </div>
     
-              <div class="muted" style="margin-top:0.45rem;">
-                Status: <span style="font-weight:900;color:{status_color}">{status_txt}</span><br/>
-                Weighted driver ratio vs company ≈ <b>{"" if pd.isna(region_avg_ratio) else f"{region_avg_ratio:.0f}%"} </b>
-                <span class="hint">(ratios clipped {lever_floor}–{lever_cap}% → 0–100)</span><br/>
-                Store type weighting: <span class="pill">{dominant_store_type if dominant_store_type else "unknown"}</span>
+              <div class="hint" style="margin-top:0.75rem">
+                Weighting: region store-type mix (see table right)
               </div>
+    
             </div>
             """,
             unsafe_allow_html=True
