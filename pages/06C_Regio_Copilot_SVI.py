@@ -1412,11 +1412,99 @@ def main():
         capture_store_week=capture_store_week if "capture_store_week" in locals() else None
     )
 
+    # --- Company-wide region leaderboard ---
     df_region_rank = compute_svi_by_region_companywide(df_daily_store, lever_floor, lever_cap)
-
-    c_left, c_right = st.columns([1.7, 3.3])
-
-    with c_left:
+    
+    # ======================
+    # SVI ROW — 3 blocks on 1 row
+    # (1) Region vs regions bar (left)
+    # (2) Donut + SVI card (middle)
+    # (3) Store types table (right)
+    # ======================
+    col_bar, col_donut, col_types = st.columns([2.2, 1.6, 2.2], vertical_alignment="top")
+    
+    # -------- (1) LEFT: Region SVI bar --------
+    with col_bar:
+        st.markdown(
+            '<div class="panel"><div class="panel-title">Region SVI — vs other regions (company-wide)</div>',
+            unsafe_allow_html=True
+        )
+    
+        if df_region_rank is None or df_region_rank.empty:
+            st.info("No region leaderboard available.")
+        else:
+            TOP_N = 8
+            df_plot = df_region_rank.head(TOP_N).copy()
+    
+            if region_choice not in df_plot["region"].tolist() and region_choice in df_region_rank["region"].tolist():
+                df_sel = df_region_rank[df_region_rank["region"] == region_choice].copy()
+                df_plot = pd.concat([df_plot, df_sel], ignore_index=True)
+    
+            df_plot = df_plot.sort_values("svi", ascending=True).copy()
+    
+            bar = (
+                alt.Chart(df_plot)
+                .mark_bar(cornerRadiusEnd=4)
+                .encode(
+                    y=alt.Y("region:N", sort=df_plot["region"].tolist(), title=None),
+                    x=alt.X("svi:Q", title="SVI (0–100)", scale=alt.Scale(domain=[0, 100])),
+                    color=alt.condition(
+                        alt.datum.region == region_choice,
+                        alt.value(PFM_PURPLE),
+                        alt.value(PFM_LINE)
+                    ),
+                    tooltip=[
+                        alt.Tooltip("region:N", title="Region"),
+                        alt.Tooltip("svi:Q", title="SVI", format=".0f"),
+                        alt.Tooltip("avg_ratio:Q", title="Avg ratio vs company", format=".0f"),
+                        alt.Tooltip("turnover:Q", title="Revenue", format=",.0f"),
+                        alt.Tooltip("footfall:Q", title="Footfall", format=",.0f"),
+                    ],
+                )
+                .properties(height=250)
+            )
+    
+            st.altair_chart(bar, use_container_width=True)
+            st.markdown(
+                "<div class='hint'>Highlighted = selected region. (Capture excluded for fair comparison across regions.)</div>",
+                unsafe_allow_html=True
+            )
+    
+        st.markdown("</div>", unsafe_allow_html=True)
+    
+    # -------- (2) MIDDLE: Donut + SVI card --------
+    with col_donut:
+        st.altair_chart(
+            gauge_chart(region_svi if pd.notna(region_svi) else 0, status_color),
+            use_container_width=True
+        )
+    
+        st.markdown(
+            f"""
+            <div class="panel">
+              <div class="panel-title">Store Vitality Index (SVI) — region vs company</div>
+              <div style="font-size:2rem;font-weight:900;color:{PFM_DARK};line-height:1.1">
+                {"" if pd.isna(region_svi) else f"{region_svi:.0f}"} <span class="pill">/ 100</span>
+              </div>
+              <div class="muted" style="margin-top:0.35rem">
+                Status: <span style="font-weight:900;color:{status_color}">{status_txt}</span><br/>
+                Weighted driver ratio vs company ≈ <b>{"" if pd.isna(region_avg_ratio) else f"{region_avg_ratio:.0f}%"} </b>
+                <span class="hint">(ratios clipped {lever_floor}–{lever_cap}% → 0–100)</span><br/>
+                Store type weighting: <span class="pill">{dominant_store_type if dominant_store_type else "unknown"}</span>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    
+    # -------- (3) RIGHT: Store types table --------
+    with col_types:
+        # ✅ BELANGRIJK: hier plakken we NIETS nieuws.
+        # We verplaatsen alleen je bestaande "store types table" rendering code naar hier.
+        # Dus: knip het blok dat nu de store type tabel tekent (st.markdown panel + st.dataframe)
+        # en plak dat blok EXACT hier.
+    
+        # --- PASTE YOUR EXISTING STORE TYPES TABLE BLOCK HERE ---
         st.markdown('<div class="panel"><div class="panel-title">Store types in this region — vs company (same store type)</div>', unsafe_allow_html=True)
 
         if mix_g.empty:
@@ -1447,75 +1535,6 @@ def main():
             )
         
         st.markdown("</div>", unsafe_allow_html=True)
-        st.markdown(
-            '<div class="panel"><div class="panel-title">Region SVI — vs other regions (company-wide)</div>',
-            unsafe_allow_html=True
-        )
-
-        if df_region_rank is None or df_region_rank.empty:
-            st.info("No region leaderboard available.")
-        else:
-            TOP_N = 8
-            df_plot = df_region_rank.head(TOP_N).copy()
-
-            if region_choice not in df_plot["region"].tolist() and region_choice in df_region_rank["region"].tolist():
-                df_sel = df_region_rank[df_region_rank["region"] == region_choice].copy()
-                df_plot = pd.concat([df_plot, df_sel], ignore_index=True)
-
-            df_plot = df_plot.sort_values("svi", ascending=True).copy()
-
-            bar = (
-                alt.Chart(df_plot)
-                .mark_bar(cornerRadiusEnd=4)
-                .encode(
-                    y=alt.Y("region:N", sort=df_plot["region"].tolist(), title=None),
-                    x=alt.X("svi:Q", title="SVI (0–100)", scale=alt.Scale(domain=[0, 100])),
-                    color=alt.condition(
-                        alt.datum.region == region_choice,
-                        alt.value(PFM_PURPLE),
-                        alt.value(PFM_LINE)
-                    ),
-                    tooltip=[
-                        alt.Tooltip("region:N", title="Region"),
-                        alt.Tooltip("svi:Q", title="SVI", format=".0f"),
-                        alt.Tooltip("avg_ratio:Q", title="Avg ratio vs company", format=".0f"),
-                        alt.Tooltip("turnover:Q", title="Revenue", format=",.0f"),
-                        alt.Tooltip("footfall:Q", title="Footfall", format=",.0f"),
-                    ],
-                )
-                .properties(height=260)
-            )
-
-            st.altair_chart(bar, use_container_width=True)
-
-            st.markdown(
-                "<div class='hint'>Highlighted = selected region. (Capture excluded for fair comparison across regions.)</div></div>",
-                unsafe_allow_html=True
-            )
-
-    with c_right:
-        st.altair_chart(
-            gauge_chart(region_svi if pd.notna(region_svi) else 0, status_color),
-            use_container_width=False
-        )
-
-        st.markdown(
-            f"""
-            <div class="panel">
-              <div class="panel-title">Store Vitality Index (SVI) — region vs company</div>
-              <div style="font-size:2rem;font-weight:900;color:{PFM_DARK};line-height:1.1">
-                {"" if pd.isna(region_svi) else f"{region_svi:.0f}"} <span class="pill">/ 100</span>
-              </div>
-              <div class="muted" style="margin-top:0.35rem">
-                Status: <span style="font-weight:900;color:{status_color}">{status_txt}</span><br/>
-                Weighted driver ratio vs company ≈ <b>{"" if pd.isna(region_avg_ratio) else f"{region_avg_ratio:.0f}%"} </b>
-                <span class="hint">(ratios clipped {lever_floor}–{lever_cap}% → 0–100)</span><br/>
-                Store type weighting: <span class="pill">{dominant_store_type if dominant_store_type else "unknown"}</span>
-              </div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
 
     # --- Macro charts ---
     if show_macro:
