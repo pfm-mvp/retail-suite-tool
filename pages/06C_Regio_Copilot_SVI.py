@@ -26,6 +26,17 @@ from services.cbs_service import (
     get_retail_index,
 )
 
+from stylesheet import inject_css
+
+inject_css(
+    PFM_PURPLE=PFM_PURPLE,
+    PFM_RED=PFM_RED,
+    PFM_DARK=PFM_DARK,
+    PFM_GRAY=PFM_GRAY,
+    PFM_LIGHT=PFM_LIGHT,
+    PFM_LINE=PFM_LINE,
+)
+
 # ----------------------
 # Page config
 # ----------------------
@@ -60,216 +71,6 @@ if raw_api_url.endswith("/get-report"):
 else:
     FASTAPI_BASE_URL = raw_api_url
     REPORT_URL = raw_api_url + "/get-report"
-
-# ----------------------
-# Minimal CSS (FINAL)
-# ----------------------
-st.markdown(
-    f"""
-    <style>
-      .block-container {{
-        padding-top: 2.25rem;
-        padding-bottom: 2rem;
-      }}
-
-      /* ---------------- HEADER ---------------- */
-      .pfm-header {{
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        padding: 0.75rem 1rem;
-        border: 1px solid {PFM_LINE};
-        border-radius: 14px;
-        background: white;
-        margin-bottom: 0.75rem;
-      }}
-
-      /* Fixed height so left & right are identical */
-      .pfm-header--fixed {{
-        height: 92px;
-        display: flex;
-        align-items: center;
-      }}
-
-      /* Right card: stacked (select top, button bottom) */
-      .pfm-header-right {{
-        display: flex;
-        flex-direction: column;        /* 🔑 stack content vertically */
-        justify-content: flex-start;   /* 🔑 push content to top */
-        gap: 0.45rem;                  /* spacing tussen select & button */
-
-        padding: 0.75rem 1rem;
-        border: 1px solid #E5E7EB;
-        border-radius: 14px;
-        background: white;
-
-        height: 92px;                  /* exact gelijk aan title card */
-      }}
-
-      .pfm-title {{
-        font-size: 1.25rem;
-        font-weight: 800;
-        color: {PFM_DARK};
-      }}
-
-      .pfm-sub {{
-        color: {PFM_GRAY};
-        font-size: 0.9rem;
-        margin-top: 0.15rem;
-      }}
-
-      /* ---------------- KPI CARDS ---------------- */
-      .kpi-card {{
-        border: 1px solid {PFM_LINE};
-        border-radius: 14px;
-        background: white;
-        padding: 0.85rem 1rem;
-      }}
-
-      .kpi-label {{
-        color: {PFM_GRAY};
-        font-size: 0.85rem;
-        font-weight: 600;
-      }}
-
-      .kpi-value {{
-        color: {PFM_DARK};
-        font-size: 1.45rem;
-        font-weight: 900;
-        margin-top: 0.2rem;
-      }}
-
-      .kpi-help {{
-        color: {PFM_GRAY};
-        font-size: 0.8rem;
-        margin-top: 0.25rem;
-      }}
-
-      /* ---------------- PANELS ---------------- */
-      .panel {{
-        border: 1px solid {PFM_LINE};
-        border-radius: 14px;
-        background: white;
-        padding: 0.55rem 0.75rem;
-      }}
-
-      .panel-title {{
-        font-weight: 800;
-        color: {PFM_DARK};
-        margin-bottom: 0.25rem;
-      }}
-
-      /* ---------------- PILL / TEXT ---------------- */
-      .pill {{
-        display: inline-block;
-        padding: 0.15rem 0.55rem;
-        border-radius: 999px;
-        font-size: 0.82rem;
-        font-weight: 800;
-        border: 1px solid {PFM_LINE};
-        background: {PFM_LIGHT};
-        color: {PFM_DARK};
-      }}
-
-      .muted {{
-        color: {PFM_GRAY};
-        font-size: 0.86rem;
-      }}
-
-      .hint {{
-        color: {PFM_GRAY};
-        font-size: 0.82rem;
-      }}
-
-      /* ---------------- CALLOUT ---------------- */
-      .callout {{
-        border: 1px solid {PFM_LINE};
-        border-radius: 14px;
-        background: #fff7ed;
-        padding: 0.75rem 1rem;
-      }}
-      .callout-title {{
-        font-weight: 900;
-        color: {PFM_DARK};
-        margin-bottom: 0.15rem;
-      }}
-      .callout-sub {{
-        color: {PFM_GRAY};
-        font-size: 0.86rem;
-      }}
-
-      /* ---------------- BUTTON (GLOBAL STYLE) ---------------- */
-      div.stButton > button {{
-        background: {PFM_RED} !important;
-        color: white !important;
-        border: 0 !important;
-        border-radius: 12px !important;
-        padding: 0.65rem 1rem !important;
-        font-weight: 800 !important;
-        width: 100% !important;
-      }}
-
-      /* ---------------- HEADER WIDGET COMPACTING (SCOPED) ---------------- */
-      /* Alleen in de rechter header card, zodat de rest van je app intact blijft */
-
-      .pfm-header-right div[data-testid="stSelectbox"] label {{
-        display: none !important;
-        height: 0 !important;
-        margin: 0 !important;
-        padding: 0 !important;
-      }}
-
-      .pfm-header-right div[data-testid="stSelectbox"] > div {{
-        min-height: 44px !important;
-      }}
-
-      .pfm-header-right div[data-testid="stSelectbox"] div[role="combobox"] {{
-        min-height: 44px !important;
-        display: flex !important;
-        align-items: center !important;
-      }}
-
-      .pfm-header-right div.stButton > button {{
-        min-height: 44px !important;
-        margin-top: 0 !important;
-      }}
-      /* --- Header controls (rechts naast title card) --- */
-      .pfm-header-controls {{
-          height: 92px;                /* match title card */
-          display: flex;
-          align-items: flex-start;         /* verticaal uitlijnen */
-          justify-content: flex-end;
-          padding-top: 0.75rem;                  /* geen extra hoogte */
-          margin-bottom: 0 0 0.75rem 0;      /* match .pfm-header */
-      }}
-      /* Houd select en button compact en gelijk hoog *
-      .pfm-header-controls div[data-testid="stSelectbox"] > div {{
-          min-height: 44px !important;
-      }}
-      .pfm-header-controls div[data-testid="stSelectbox"] div[role="combobox"] {{
-          min-height: 44px !important;
-          display: flex !important;
-          align-items: center !important;
-      }}
-      /* Button: minder hoog, zelfde als select */
-      .pfm-header-controls div.stButton > button {{
-          height: 44px !important;
-          padding: 0.45rem 0.9rem !important;
-          margin-top: 0 !important;
-          width: 100% !important;
-      }}
-      /* Optioneel: verwijder labelruimte alleen in header controls */
-      .pfm-header-controls div[data-testid="stSelectbox"] label {{
-          display: none !important;
-          height: 0 !important;
-          margin: 0 !important;
-          padding: 0 !important;
-      }}
-
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
 
 # ----------------------
 # Format helpers
