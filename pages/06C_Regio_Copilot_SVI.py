@@ -493,10 +493,10 @@ def compute_store_type_benchmarks(
 
     if capture_store_week is not None:
         cap_reg = _capture_by_type(
-            capture_store_week.merge(store_dim[["id","region"]], on="id", how="left"),
-            store_dim_[store_dim["region"] == region_choice].copy()
+            capture_store_week.merge(store_dim[["id", "region"]], on="id", how="left"),
+            store_dim[store_dim["region"] == region_choice].copy()
         ) if "region" in store_dim.columns else pd.DataFrame()
-
+    
         cap_com = _capture_by_type(capture_store_week, store_dim)
 
         if not cap_reg.empty:
