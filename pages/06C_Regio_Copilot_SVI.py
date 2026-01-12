@@ -1446,176 +1446,176 @@ def main():
         capture_store_week=capture_store_week if "capture_store_week" in locals() else None
     )
 
-# --- Company-wide region leaderboard ---
-df_region_rank = compute_svi_by_region_companywide(df_daily_store, lever_floor, lever_cap)
-
-# ======================
-# SVI ROW — 3 blocks on 1 row
-# (1) Region vs regions bar (left)
-# (2) SVI card (middle)
-# (3) Store types table (right)
-# ======================
-col_bar, col_mid, col_types = st.columns([2.2, 1.6, 2.2], vertical_alignment="top")
-
-# -------- (1) LEFT: Region SVI bar --------
-with col_bar:
-    st.markdown(
-        '<div class="panel"><div class="panel-title">Region SVI — vs other regions (company-wide)</div>',
-        unsafe_allow_html=True
-    )
-
-    if df_region_rank is None or df_region_rank.empty:
-        st.info("No region leaderboard available.")
-    else:
-        TOP_N = 8
-        df_plot = df_region_rank.head(TOP_N).copy()
-
-        if region_choice not in df_plot["region"].tolist() and region_choice in df_region_rank["region"].tolist():
-            df_sel = df_region_rank[df_region_rank["region"] == region_choice].copy()
-            df_plot = pd.concat([df_plot, df_sel], ignore_index=True)
-
-        df_plot = df_plot.sort_values("svi", ascending=True).copy()
-
-        bar = (
-            alt.Chart(df_plot)
-            .mark_bar(cornerRadiusEnd=4)
-            .encode(
-                y=alt.Y("region:N", sort=df_plot["region"].tolist(), title=None),
-                x=alt.X("svi:Q", title="SVI (0–100)", scale=alt.Scale(domain=[0, 100])),
-                color=alt.condition(
-                    alt.datum.region == region_choice,
-                    alt.value(PFM_PURPLE),
-                    alt.value(PFM_LINE)
-                ),
-                tooltip=[
-                    alt.Tooltip("region:N", title="Region"),
-                    alt.Tooltip("svi:Q", title="SVI", format=".0f"),
-                    alt.Tooltip("avg_ratio:Q", title="Avg ratio vs company", format=".0f"),
-                    alt.Tooltip("turnover:Q", title="Revenue", format=",.0f"),
-                    alt.Tooltip("footfall:Q", title="Footfall", format=",.0f"),
-                ],
-            )
-            .properties(height=250)
-        )
-
-        st.altair_chart(bar, use_container_width=True)
+    # --- Company-wide region leaderboard ---
+    df_region_rank = compute_svi_by_region_companywide(df_daily_store, lever_floor, lever_cap)
+    
+    # ======================
+    # SVI ROW — 3 blocks on 1 row
+    # (1) Region vs regions bar (left)
+    # (2) SVI card (middle)
+    # (3) Store types table (right)
+    # ======================
+    col_bar, col_mid, col_types = st.columns([2.2, 1.6, 2.2], vertical_alignment="top")
+    
+    # -------- (1) LEFT: Region SVI bar --------
+    with col_bar:
         st.markdown(
-            "<div class='hint'>Highlighted = selected region. (Capture excluded for fair comparison across regions.)</div>",
+            '<div class="panel"><div class="panel-title">Region SVI — vs other regions (company-wide)</div>',
             unsafe_allow_html=True
         )
-
-    st.markdown("</div>", unsafe_allow_html=True)
-
-# -------- (2) MIDDLE: SVI card --------
-with col_mid:
-    big_score = 0 if pd.isna(region_svi) else float(region_svi)
-
-    st.markdown(
-        f"""
-        <div class="panel">
-          <div class="panel-title">Store Vitality Index (SVI) — region vs company-wide</div>
-
-          <div style="height:0.55rem"></div>
-
-          <div style="display:flex; align-items:baseline; gap:0.55rem;">
-            <div style="font-size:3.9rem;font-weight:950;line-height:1;color:{status_color};letter-spacing:-0.02em;">
-              {big_score:.0f}
+    
+        if df_region_rank is None or df_region_rank.empty:
+            st.info("No region leaderboard available.")
+        else:
+            TOP_N = 8
+            df_plot = df_region_rank.head(TOP_N).copy()
+    
+            if region_choice not in df_plot["region"].tolist() and region_choice in df_region_rank["region"].tolist():
+                df_sel = df_region_rank[df_region_rank["region"] == region_choice].copy()
+                df_plot = pd.concat([df_plot, df_sel], ignore_index=True)
+    
+            df_plot = df_plot.sort_values("svi", ascending=True).copy()
+    
+            bar = (
+                alt.Chart(df_plot)
+                .mark_bar(cornerRadiusEnd=4)
+                .encode(
+                    y=alt.Y("region:N", sort=df_plot["region"].tolist(), title=None),
+                    x=alt.X("svi:Q", title="SVI (0–100)", scale=alt.Scale(domain=[0, 100])),
+                    color=alt.condition(
+                        alt.datum.region == region_choice,
+                        alt.value(PFM_PURPLE),
+                        alt.value(PFM_LINE)
+                    ),
+                    tooltip=[
+                        alt.Tooltip("region:N", title="Region"),
+                        alt.Tooltip("svi:Q", title="SVI", format=".0f"),
+                        alt.Tooltip("avg_ratio:Q", title="Avg ratio vs company", format=".0f"),
+                        alt.Tooltip("turnover:Q", title="Revenue", format=",.0f"),
+                        alt.Tooltip("footfall:Q", title="Footfall", format=",.0f"),
+                    ],
+                )
+                .properties(height=250)
+            )
+    
+            st.altair_chart(bar, use_container_width=True)
+            st.markdown(
+                "<div class='hint'>Highlighted = selected region. (Capture excluded for fair comparison across regions.)</div>",
+                unsafe_allow_html=True
+            )
+    
+        st.markdown("</div>", unsafe_allow_html=True)
+    
+    # -------- (2) MIDDLE: SVI card --------
+    with col_mid:
+        big_score = 0 if pd.isna(region_svi) else float(region_svi)
+    
+        st.markdown(
+            f"""
+            <div class="panel">
+              <div class="panel-title">Store Vitality Index (SVI) — region vs company-wide</div>
+    
+              <div style="height:0.55rem"></div>
+    
+              <div style="display:flex; align-items:baseline; gap:0.55rem;">
+                <div style="font-size:3.9rem;font-weight:950;line-height:1;color:{status_color};letter-spacing:-0.02em;">
+                  {big_score:.0f}
+                </div>
+                <div class="pill">/ 100</div>
+              </div>
+    
+              <div style="height:0.6rem"></div>
+    
+              <div class="muted" style="line-height:1.35;">
+                Status: <span style="font-weight:900;color:{status_color}">{status_txt}</span><br/>
+                Weighted driver ratio vs company ≈ <b>{"" if pd.isna(region_avg_ratio) else f"{region_avg_ratio:.0f}%"} </b>
+                <span class="hint">(ratios clipped {lever_floor}–{lever_cap}% → 0–100)</span>
+              </div>
+    
+              <div class="hint" style="margin-top:0.7rem">
+                Weighting: region store-type mix <span class="pill">see table</span>
+              </div>
             </div>
-            <div class="pill">/ 100</div>
-          </div>
-
-          <div style="height:0.6rem"></div>
-
-          <div class="muted" style="line-height:1.35;">
-            Status: <span style="font-weight:900;color:{status_color}">{status_txt}</span><br/>
-            Weighted driver ratio vs company ≈ <b>{"" if pd.isna(region_avg_ratio) else f"{region_avg_ratio:.0f}%"} </b>
-            <span class="hint">(ratios clipped {lever_floor}–{lever_cap}% → 0–100)</span>
-          </div>
-
-          <div class="hint" style="margin-top:0.7rem">
-            Weighting: region store-type mix <span class="pill">see table</span>
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-# -------- (3) RIGHT: Store types table --------
-with col_types:
-    st.markdown(
-        '<div class="panel"><div class="panel-title">Store types in this region — vs company (same store type)</div>',
-        unsafe_allow_html=True
-    )
-
-    if mix_g.empty:
-        st.info("No store_type mix available (check regions.csv store_type column).")
-    else:
-        show = mix_g.merge(
-            type_idx[["store_type", "SPV idx", "CR idx", "Sales/m² idx", "ATV idx", "Capture idx"]],
-            on="store_type",
-            how="left"
-        ).sort_values("Stores", ascending=False)
-
-        disp = show.rename(columns={"store_type": "Store type"}).copy()
-
-        idx_cols = ["SPV idx", "CR idx", "Sales/m² idx", "ATV idx", "Capture idx"]
-
-        if "Store share" in disp.columns:
-            disp["Store share"] = pd.to_numeric(disp["Store share"], errors="coerce")
-
-        for c in idx_cols:
-            if c in disp.columns:
-                disp[c] = pd.to_numeric(disp[c], errors="coerce")
-
-        def _idx_style(v):
-            try:
-                if pd.isna(v):
+            """,
+            unsafe_allow_html=True
+        )
+    
+    # -------- (3) RIGHT: Store types table --------
+    with col_types:
+        st.markdown(
+            '<div class="panel"><div class="panel-title">Store types in this region — vs company (same store type)</div>',
+            unsafe_allow_html=True
+        )
+    
+        if mix_g.empty:
+            st.info("No store_type mix available (check regions.csv store_type column).")
+        else:
+            show = mix_g.merge(
+                type_idx[["store_type", "SPV idx", "CR idx", "Sales/m² idx", "ATV idx", "Capture idx"]],
+                on="store_type",
+                how="left"
+            ).sort_values("Stores", ascending=False)
+    
+            disp = show.rename(columns={"store_type": "Store type"}).copy()
+    
+            idx_cols = ["SPV idx", "CR idx", "Sales/m² idx", "ATV idx", "Capture idx"]
+    
+            if "Store share" in disp.columns:
+                disp["Store share"] = pd.to_numeric(disp["Store share"], errors="coerce")
+    
+            for c in idx_cols:
+                if c in disp.columns:
+                    disp[c] = pd.to_numeric(disp[c], errors="coerce")
+    
+            def _idx_style(v):
+                try:
+                    if pd.isna(v):
+                        return ""
+                    v = float(v)
+    
+                    if v >= 115:
+                        return f"background-color:{PFM_PURPLE}1A; color:{PFM_DARK}; font-weight:900;"
+                    if v >= 105:
+                        return f"background-color:{PFM_PURPLE}0F; color:{PFM_DARK}; font-weight:800;"
+                    if v >= 95:
+                        return f"background-color:#FFFFFF; color:{PFM_DARK}; font-weight:700;"
+                    if v >= 85:
+                        return f"background-color:{PFM_RED}12; color:{PFM_DARK}; font-weight:800;"
+                    return f"background-color:{PFM_RED}22; color:{PFM_DARK}; font-weight:900;"
+                except Exception:
                     return ""
-                v = float(v)
-
-                if v >= 115:
-                    return f"background-color:{PFM_PURPLE}1A; color:{PFM_DARK}; font-weight:900;"
-                if v >= 105:
-                    return f"background-color:{PFM_PURPLE}0F; color:{PFM_DARK}; font-weight:800;"
-                if v >= 95:
-                    return f"background-color:#FFFFFF; color:{PFM_DARK}; font-weight:700;"
-                if v >= 85:
-                    return f"background-color:{PFM_RED}12; color:{PFM_DARK}; font-weight:800;"
-                return f"background-color:{PFM_RED}22; color:{PFM_DARK}; font-weight:900;"
-            except Exception:
-                return ""
-
-        def _share_style(v):
-            try:
-                if pd.isna(v):
+    
+            def _share_style(v):
+                try:
+                    if pd.isna(v):
+                        return ""
+                    return f"background-color:{PFM_LIGHT}; font-weight:800; color:{PFM_DARK};"
+                except Exception:
                     return ""
-                return f"background-color:{PFM_LIGHT}; font-weight:800; color:{PFM_DARK};"
-            except Exception:
-                return ""
-
-        show_cols = ["Store type", "Stores", "Store share"] + [c for c in idx_cols if c in disp.columns]
-        df_show = disp[show_cols].copy()
-
-        styler = df_show.style
-
-        heat_cols = [c for c in idx_cols if c in df_show.columns]
-        if heat_cols:
-            styler = styler.applymap(_idx_style, subset=heat_cols)
-
-        if "Store share" in df_show.columns:
-            styler = styler.applymap(_share_style, subset=["Store share"])
-
-        fmt = {}
-        if "Store share" in df_show.columns:
-            fmt["Store share"] = lambda x: "-" if pd.isna(x) else f"{float(x):.0f}%"
-        for c in heat_cols:
-            fmt[c] = lambda x: "-" if pd.isna(x) else f"{float(x):.0f}%"
-
-        styler = styler.format(fmt)
-
-        st.dataframe(styler, use_container_width=True, hide_index=True)
-
-    st.markdown("</div>", unsafe_allow_html=True)
+    
+            show_cols = ["Store type", "Stores", "Store share"] + [c for c in idx_cols if c in disp.columns]
+            df_show = disp[show_cols].copy()
+    
+            styler = df_show.style
+    
+            heat_cols = [c for c in idx_cols if c in df_show.columns]
+            if heat_cols:
+                styler = styler.applymap(_idx_style, subset=heat_cols)
+    
+            if "Store share" in df_show.columns:
+                styler = styler.applymap(_share_style, subset=["Store share"])
+    
+            fmt = {}
+            if "Store share" in df_show.columns:
+                fmt["Store share"] = lambda x: "-" if pd.isna(x) else f"{float(x):.0f}%"
+            for c in heat_cols:
+                fmt[c] = lambda x: "-" if pd.isna(x) else f"{float(x):.0f}%"
+    
+            styler = styler.format(fmt)
+    
+            st.dataframe(styler, use_container_width=True, hide_index=True)
+    
+        st.markdown("</div>", unsafe_allow_html=True)
 
     # --- Macro charts ---
     if show_macro:
