@@ -1518,12 +1518,12 @@ def main():
             f"""
             <!-- SVI CARD START -->
             <div class="panel">
-              <div class="panel-title">Store Vitality Index (SVI)</div>
+              <div class="panel-title">SVI</div>
     
-              <div style="height:0.55rem"></div>
+              <div style="height:0.59rem"></div>
     
               <div style="display:flex; align-items:baseline; gap:0.55rem;">
-                <div style="font-size:3.1rem;font-weight:950;line-height:1;color:{status_color};letter-spacing:-0.02em;">
+                <div style="font-size:3.9rem;font-weight:950;line-height:1;color:{status_color};letter-spacing:-0.02em;">
                   {big_score:.0f}
                 </div>
                 <div class="pill">/ 100</div>
