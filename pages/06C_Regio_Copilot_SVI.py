@@ -1474,19 +1474,22 @@ def main():
     
     # -------- (2) MIDDLE: Donut + SVI card --------
     with col_donut:
-        st.altair_chart(
-            gauge_chart(region_svi if pd.notna(region_svi) else 0, status_color),
-            use_container_width=True
-        )
+        # No donut (prevents wrapping / keeps row clean)
+        big_score = 0 if pd.isna(region_svi) else float(region_svi)
     
         st.markdown(
             f"""
-            <div class="panel">
+            <div class="panel" style="height:100%;">
               <div class="panel-title">Store Vitality Index (SVI) — region vs company</div>
-              <div style="font-size:2rem;font-weight:900;color:{PFM_DARK};line-height:1.1">
-                {"" if pd.isna(region_svi) else f"{region_svi:.0f}"} <span class="pill">/ 100</span>
+    
+              <div style="display:flex; align-items:baseline; gap:0.5rem; margin-top:0.35rem;">
+                <div style="font-size:3.1rem;font-weight:950;line-height:1;color:{status_color};">
+                  {big_score:.0f}
+                </div>
+                <div class="pill">/ 100</div>
               </div>
-              <div class="muted" style="margin-top:0.35rem">
+    
+              <div class="muted" style="margin-top:0.45rem;">
                 Status: <span style="font-weight:900;color:{status_color}">{status_txt}</span><br/>
                 Weighted driver ratio vs company ≈ <b>{"" if pd.isna(region_avg_ratio) else f"{region_avg_ratio:.0f}%"} </b>
                 <span class="hint">(ratios clipped {lever_floor}–{lever_cap}% → 0–100)</span><br/>
