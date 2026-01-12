@@ -369,6 +369,178 @@ def mark_closed_days_as_nan(df: pd.DataFrame) -> pd.DataFrame:
             out.loc[base, c] = np.nan
     return out
 
+def _ensure_store_type(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    if "store_type" not in out.columns:
+        out["store_type"] = "Unknown"
+    out["store_type"] = out["store_type"].fillna("Unknown").astype(str).str.strip()
+    out.loc[out["store_type"].isin(["", "nan", "None"]), "store_type"] = "Unknown"
+    return out
+
+def agg_store_type_kpis(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Weighted aggregation per store_type.
+    Assumes daily rows with: turnover, footfall, transactions, sqm_effective (store-level field).
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    d = _ensure_store_type(df)
+
+    # numeric coercion
+    for c in ["turnover", "footfall", "transactions", "sqm_effective", "avg_basket_size"]:
+        if c in d.columns:
+            d[c] = pd.to_numeric(d[c], errors="coerce")
+
+    # base sums
+    g = d.groupby("store_type", as_index=False).agg(
+        turnover=("turnover", "sum"),
+        footfall=("footfall", "sum"),
+        transactions=("transactions", "sum"),
+        # sqm_effective is store-level; in df_daily_store it's repeated per day.
+        # We'll compute sqm_sum via unique stores outside if needed; here we approximate if id exists.
+    )
+
+    # derived metrics (weighted)
+    g["conversion_rate"] = np.where(g["footfall"] > 0, g["transactions"] / g["footfall"] * 100.0, np.nan)
+    g["sales_per_visitor"] = np.where(g["footfall"] > 0, g["turnover"] / g["footfall"], np.nan)
+    g["sales_per_transaction"] = np.where(g["transactions"] > 0, g["turnover"] / g["transactions"], np.nan)
+
+    return g
+
+def add_sqm_sum_per_store_type(df_daily_store: pd.DataFrame, store_dim: pd.DataFrame) -> pd.DataFrame:
+    """
+    Adds sqm_sum per store_type using unique stores from merged/store_dim.
+    store_dim must include: id, store_type, sqm_effective
+    """
+    if store_dim is None or store_dim.empty:
+        return pd.DataFrame()
+
+    sd = store_dim.copy()
+    sd = _ensure_store_type(sd)
+    sd["sqm_effective"] = pd.to_numeric(sd.get("sqm_effective", np.nan), errors="coerce")
+
+    sqm_by_type = (
+        sd.dropna(subset=["id"])
+          .drop_duplicates(subset=["id"])
+          .groupby("store_type", as_index=False)
+          .agg(sqm_sum=("sqm_effective", "sum"), n_stores=("id", "nunique"))
+    )
+    return sqm_by_type
+
+def compute_store_type_benchmarks(
+    df_daily_store: pd.DataFrame,
+    region_choice: str,
+    store_dim: pd.DataFrame,
+    capture_store_week: pd.DataFrame | None = None
+):
+    """
+    Returns:
+      region_type_kpis (per store_type),
+      company_type_kpis (per store_type),
+      region_vs_company_index (per store_type with idx columns),
+      region_mix (store_type counts / sqm share)
+    """
+    if df_daily_store is None or df_daily_store.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    d = _ensure_store_type(df_daily_store)
+
+    region_df = d[d["region"] == region_choice].copy()
+    comp_df = d.copy()
+
+    reg_k = agg_store_type_kpis(region_df)
+    com_k = agg_store_type_kpis(comp_df)
+
+    # sqm_sum + n_stores from store_dim
+    sqm_type = add_sqm_sum_per_store_type(df_daily_store, store_dim)
+    if not sqm_type.empty:
+        reg_store_dim = _ensure_store_type(store_dim[store_dim["region"] == region_choice].copy())
+        sqm_type_reg = add_sqm_sum_per_store_type(df_daily_store, reg_store_dim)
+    else:
+        sqm_type_reg = pd.DataFrame()
+
+    if not sqm_type.empty:
+        com_k = com_k.merge(sqm_type[["store_type","sqm_sum","n_stores"]], on="store_type", how="left")
+        com_k["sales_per_sqm"] = np.where(com_k["sqm_sum"] > 0, com_k["turnover"] / com_k["sqm_sum"], np.nan)
+
+    if not sqm_type_reg.empty:
+        reg_k = reg_k.merge(sqm_type_reg[["store_type","sqm_sum","n_stores"]], on="store_type", how="left")
+        reg_k["sales_per_sqm"] = np.where(reg_k["sqm_sum"] > 0, reg_k["turnover"] / reg_k["sqm_sum"], np.nan)
+
+    # Capture per store_type (optional)
+    def _capture_by_type(csw: pd.DataFrame, store_dim_: pd.DataFrame) -> pd.DataFrame:
+        if csw is None or csw.empty:
+            return pd.DataFrame(columns=["store_type","capture_rate"])
+        tmp = csw.copy()
+        tmp["id"] = pd.to_numeric(tmp.get("id", np.nan), errors="coerce").astype("Int64")
+        sd = store_dim_[["id","store_type"]].copy()
+        sd = _ensure_store_type(sd)
+        sd["id"] = pd.to_numeric(sd["id"], errors="coerce").astype("Int64")
+
+        tmp = tmp.merge(sd.drop_duplicates("id"), on="id", how="left")
+        tmp = _ensure_store_type(tmp)
+
+        tmp["footfall"] = pd.to_numeric(tmp.get("footfall", np.nan), errors="coerce")
+        tmp["visits"] = pd.to_numeric(tmp.get("visits", np.nan), errors="coerce")
+
+        g = tmp.groupby("store_type", as_index=False).agg(
+            footfall=("footfall","sum"),
+            visits=("visits","sum")
+        )
+        g["capture_rate"] = np.where(g["visits"] > 0, g["footfall"]/g["visits"]*100.0, np.nan)
+        return g[["store_type","capture_rate"]]
+
+    if capture_store_week is not None:
+        cap_reg = _capture_by_type(
+            capture_store_week.merge(store_dim[["id","region"]], on="id", how="left"),
+            store_dim_[store_dim["region"] == region_choice].copy()
+        ) if "region" in store_dim.columns else pd.DataFrame()
+
+        cap_com = _capture_by_type(capture_store_week, store_dim)
+
+        if not cap_reg.empty:
+            reg_k = reg_k.merge(cap_reg, on="store_type", how="left")
+        if not cap_com.empty:
+            com_k = com_k.merge(cap_com, on="store_type", how="left")
+
+    # Build indices: region/store_type vs company/store_type
+    out = reg_k.merge(
+        com_k[["store_type","conversion_rate","sales_per_visitor","sales_per_transaction","sales_per_sqm","capture_rate"]]
+        .rename(columns={
+            "conversion_rate":"conv_b",
+            "sales_per_visitor":"spv_b",
+            "sales_per_transaction":"atv_b",
+            "sales_per_sqm":"spm2_b",
+            "capture_rate":"cap_b"
+        }),
+        on="store_type",
+        how="left"
+    )
+
+    def _idx(a, b):
+        return np.where((pd.notna(a) & pd.notna(b) & (b != 0)), (a/b*100.0), np.nan)
+
+    out["SPV idx"]   = _idx(out.get("sales_per_visitor", np.nan), out.get("spv_b", np.nan))
+    out["CR idx"]    = _idx(out.get("conversion_rate", np.nan), out.get("conv_b", np.nan))
+    out["ATV idx"]   = _idx(out.get("sales_per_transaction", np.nan), out.get("atv_b", np.nan))
+    out["Sales/m² idx"] = _idx(out.get("sales_per_sqm", np.nan), out.get("spm2_b", np.nan))
+    out["Capture idx"]  = _idx(out.get("capture_rate", np.nan), out.get("cap_b", np.nan))
+
+    # Region mix (counts)
+    mix = store_dim[store_dim["region"] == region_choice].copy()
+    mix = _ensure_store_type(mix)
+    mix["id"] = pd.to_numeric(mix.get("id", np.nan), errors="coerce").astype("Int64")
+    mix["sqm_effective"] = pd.to_numeric(mix.get("sqm_effective", np.nan), errors="coerce")
+
+    mix_g = mix.dropna(subset=["id"]).drop_duplicates("id").groupby("store_type", as_index=False).agg(
+        Stores=("id","nunique"),
+        sqm=("sqm_effective","sum"),
+    )
+    mix_g["Store share"] = np.where(mix_g["Stores"].sum() > 0, mix_g["Stores"]/mix_g["Stores"].sum()*100.0, np.nan)
+
+    return reg_k, com_k, out, mix_g
+
 # ----------------------
 # Lever scan score mapping
 # ----------------------
@@ -1231,11 +1403,50 @@ def main():
         unsafe_allow_html=True,
     )
 
+    store_dim = merged[["id","region","store_type","sqm_effective","store_display"]].drop_duplicates().copy() if "store_type" in merged.columns else merged[["id","region","sqm_effective","store_display"]].drop_duplicates().copy()
+    
+    reg_type_k, com_type_k, type_idx, mix_g = compute_store_type_benchmarks(
+        df_daily_store=df_daily_store,
+        region_choice=region_choice,
+        store_dim=store_dim,
+        capture_store_week=capture_store_week if "capture_store_week" in locals() else None
+    )
+
     df_region_rank = compute_svi_by_region_companywide(df_daily_store, lever_floor, lever_cap)
 
     c_left, c_right = st.columns([1.7, 3.3])
 
     with c_left:
+        st.markdown('<div class="panel"><div class="panel-title">Store types in this region — vs company (same store type)</div>', unsafe_allow_html=True)
+
+        if mix_g.empty:
+            st.info("No store_type mix available (check regions.csv store_type column).")
+        else:
+            # join mix + idx for quick table
+            show = mix_g.merge(
+                type_idx[["store_type","SPV idx","CR idx","Sales/m² idx","ATV idx","Capture idx"]],
+                on="store_type",
+                how="left"
+            ).sort_values("Stores", ascending=False)
+        
+            # compact display
+            disp = show.rename(columns={"store_type":"Store type"}).copy()
+            for c in ["Store share","SPV idx","CR idx","Sales/m² idx","ATV idx","Capture idx"]:
+                if c in disp.columns:
+                    disp[c] = pd.to_numeric(disp[c], errors="coerce")
+        
+            disp["Store share"] = disp["Store share"].apply(lambda x: "-" if pd.isna(x) else f"{x:.0f}%")
+            for c in ["SPV idx","CR idx","Sales/m² idx","ATV idx","Capture idx"]:
+                if c in disp.columns:
+                    disp[c] = disp[c].apply(lambda x: "-" if pd.isna(x) else f"{x:.0f}%")
+        
+            st.dataframe(
+                disp[["Store type","Stores","Store share","SPV idx","CR idx","Sales/m² idx","ATV idx","Capture idx"]],
+                use_container_width=True,
+                hide_index=True
+            )
+        
+        st.markdown("</div>", unsafe_allow_html=True)
         st.markdown(
             '<div class="panel"><div class="panel-title">Region SVI — vs other regions (company-wide)</div>',
             unsafe_allow_html=True
