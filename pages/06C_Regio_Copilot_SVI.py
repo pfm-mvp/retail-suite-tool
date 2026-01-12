@@ -28,15 +28,6 @@ from services.cbs_service import (
 
 from stylesheet import inject_css
 
-inject_css(
-    PFM_PURPLE=PFM_PURPLE,
-    PFM_RED=PFM_RED,
-    PFM_DARK=PFM_DARK,
-    PFM_GRAY=PFM_GRAY,
-    PFM_LIGHT=PFM_LIGHT,
-    PFM_LINE=PFM_LINE,
-)
-
 # ----------------------
 # Page config
 # ----------------------
@@ -59,6 +50,15 @@ PFM_AMBER = "#F59E0B"
 
 OTHER_REGION_PURPLE = "#C4B5FD"
 BLACK = "#111111"
+
+inject_css(
+    PFM_PURPLE=PFM_PURPLE,
+    PFM_RED=PFM_RED,
+    PFM_DARK=PFM_DARK,
+    PFM_GRAY=PFM_GRAY,
+    PFM_LIGHT=PFM_LIGHT,
+    PFM_LINE=PFM_LINE,
+)
 
 # ----------------------
 # API URL / secrets setup
