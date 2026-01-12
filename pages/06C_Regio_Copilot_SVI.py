@@ -237,10 +237,10 @@ st.markdown(
       .pfm-header-controls {{
           height: 92px;                /* match title card */
           display: flex;
-          align-items: center;         /* verticaal uitlijnen */
+          align-items: flex-start;         /* verticaal uitlijnen */
           justify-content: flex-end;
-          padding: 0;                  /* geen extra hoogte */
-          margin-bottom: 0.75rem;      /* match .pfm-header */
+          padding-top: 0.75rem;                  /* geen extra hoogte */
+          margin-bottom: 0 0 0.75rem 0;      /* match .pfm-header */
       }}
       /* Houd select en button compact en gelijk hoog *
       .pfm-header-controls div[data-testid="stSelectbox"] > div {{
@@ -255,7 +255,6 @@ st.markdown(
       .pfm-header-controls div.stButton > button {{
           height: 44px !important;
           padding: 0.45rem 0.9rem !important;
-          border-radius: 12px !important;
           margin-top: 0 !important;
           width: 100% !important;
       }}
