@@ -93,16 +93,17 @@ st.markdown(
 
       /* Right card: stacked (select top, button bottom) */
       .pfm-header-right {{
-        border: 1px solid {PFM_LINE};
+        display: flex;
+        flex-direction: column;        /* 🔑 stack content vertically */
+        justify-content: flex-start;   /* 🔑 push content to top */
+        gap: 0.45rem;                  /* spacing tussen select & button */
+
+        padding: 0.75rem 1rem;
+        border: 1px solid #E5E7EB;
         border-radius: 14px;
         background: white;
-        padding: 0.75rem 1rem;
-        height: 92px;
-        display: flex;
-        flex-direction: column;
-        justify-content: space-between;
-        gap: 0.5rem;
-        margin-bottom: 0.75rem;
+
+        height: 92px;                  /* exact gelijk aan title card */
       }}
 
       .pfm-title {{
@@ -208,23 +209,29 @@ st.markdown(
         width: 100% !important;
       }}
 
-      /* ---------------- HEADER WIDGET COMPACTING ---------------- */
-      /* Remove extra empty label space */
-      div[data-testid="stSelectbox"] label {{
+      /* ---------------- HEADER WIDGET COMPACTING (SCOPED) ---------------- */
+      /* Alleen in de rechter header card, zodat de rest van je app intact blijft */
+
+      .pfm-header-right div[data-testid="stSelectbox"] label {{
         display: none !important;
         height: 0 !important;
         margin: 0 !important;
         padding: 0 !important;
       }}
 
-      /* Make select compact and consistent */
-      div[data-testid="stSelectbox"] > div {{
+      .pfm-header-right div[data-testid="stSelectbox"] > div {{
         min-height: 44px !important;
       }}
-      div[data-testid="stSelectbox"] div[role="combobox"] {{
+
+      .pfm-header-right div[data-testid="stSelectbox"] div[role="combobox"] {{
         min-height: 44px !important;
         display: flex !important;
         align-items: center !important;
+      }}
+
+      .pfm-header-right div.stButton > button {{
+        min-height: 44px !important;
+        margin-top: 0 !important;
       }}
 
     </style>
