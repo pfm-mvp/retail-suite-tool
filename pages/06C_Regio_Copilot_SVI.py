@@ -1897,52 +1897,97 @@ def main():
         })
         st.dataframe(show_opp, use_container_width=True, hide_index=True)
 
-    # ======================
-    # Quadrant — Conversion vs SPV (stores in region)
-    # ======================
-    if show_quadrant:
-        st.markdown("## Quadrant — Conversion vs SPV (stores in region)")
+# ======================
+# Quadrant — Conversion vs SPV (stores in region) — WITH store_type
+# ======================
+if show_quadrant:
+    st.markdown("## Quadrant — Conversion vs SPV (stores in region)")
 
-        q = df_daily_store[df_daily_store["region"] == region_choice].copy()
-        if q.empty:
-            st.info("No store data for quadrant.")
-        else:
-            q_agg = q.groupby(["id", "store_display"], as_index=False).agg(
-                footfall=("footfall", "sum"),
-                turnover=("turnover", "sum"),
-                transactions=("transactions", "sum"),
+    q = df_daily_store[df_daily_store["region"] == region_choice].copy()
+    if q.empty:
+        st.info("No store data for quadrant.")
+    else:
+        q_agg = q.groupby(["id", "store_display"], as_index=False).agg(
+            footfall=("footfall", "sum"),
+            turnover=("turnover", "sum"),
+            transactions=("transactions", "sum"),
+        )
+
+        q_agg["conversion_rate"] = np.where(
+            q_agg["footfall"] > 0,
+            q_agg["transactions"] / q_agg["footfall"] * 100.0,
+            np.nan
+        )
+        q_agg["sales_per_visitor"] = np.where(
+            q_agg["footfall"] > 0,
+            q_agg["turnover"] / q_agg["footfall"],
+            np.nan
+        )
+
+        # ---- attach store_type from merged (region mapping) ----
+        # merged should contain: id, store_type (from regions.csv)
+        if "store_type" in merged.columns:
+            stype_map = merged[["id", "store_type"]].drop_duplicates().copy()
+            stype_map["id"] = pd.to_numeric(stype_map["id"], errors="coerce")
+            stype_map["store_type"] = (
+                stype_map["store_type"]
+                .fillna("Unknown")
+                .astype(str)
+                .str.strip()
+                .replace({"": "Unknown", "nan": "Unknown", "None": "Unknown"})
             )
 
-            q_agg["conversion_rate"] = np.where(q_agg["footfall"] > 0, q_agg["transactions"] / q_agg["footfall"] * 100.0, np.nan)
-            q_agg["sales_per_visitor"] = np.where(q_agg["footfall"] > 0, q_agg["turnover"] / q_agg["footfall"], np.nan)
+            q_agg["id"] = pd.to_numeric(q_agg["id"], errors="coerce")
+            q_agg = q_agg.merge(stype_map, on="id", how="left")
+        else:
+            q_agg["store_type"] = "Unknown"
 
-            q_agg = q_agg.dropna(subset=["conversion_rate", "sales_per_visitor"])
-            if q_agg.empty:
-                st.info("Not enough data to plot quadrant (missing conversion/SPV).")
-            else:
-                x_med = float(q_agg["conversion_rate"].median())
-                y_med = float(q_agg["sales_per_visitor"].median())
+        q_agg["store_type"] = (
+            q_agg["store_type"]
+            .fillna("Unknown")
+            .astype(str)
+            .str.strip()
+            .replace({"": "Unknown", "nan": "Unknown", "None": "Unknown"})
+        )
 
-                base = alt.Chart(q_agg).mark_circle(size=140).encode(
-                    x=alt.X("conversion_rate:Q", title="Conversion (%)"),
-                    y=alt.Y("sales_per_visitor:Q", title="SPV (€/visitor)"),
-                    tooltip=[
-                        alt.Tooltip("store_display:N", title="Store"),
-                        alt.Tooltip("conversion_rate:Q", title="Conversion", format=".1f"),
-                        alt.Tooltip("sales_per_visitor:Q", title="SPV", format=",.2f"),
-                        alt.Tooltip("turnover:Q", title="Revenue", format=",.0f"),
-                        alt.Tooltip("footfall:Q", title="Footfall", format=",.0f"),
-                    ],
-                    color=alt.value(PFM_PURPLE),
-                )
+        q_agg = q_agg.dropna(subset=["conversion_rate", "sales_per_visitor"])
+        if q_agg.empty:
+            st.info("Not enough data to plot quadrant (missing conversion/SPV).")
+        else:
+            x_med = float(q_agg["conversion_rate"].median())
+            y_med = float(q_agg["sales_per_visitor"].median())
 
-                vline = alt.Chart(pd.DataFrame({"x": [x_med]})).mark_rule(strokeDash=[6, 4]).encode(x="x:Q")
-                hline = alt.Chart(pd.DataFrame({"y": [y_med]})).mark_rule(strokeDash=[6, 4]).encode(y="y:Q")
+            base = alt.Chart(q_agg).mark_circle(size=140).encode(
+                x=alt.X("conversion_rate:Q", title="Conversion (%)"),
+                y=alt.Y("sales_per_visitor:Q", title="SPV (€/visitor)"),
+                color=alt.Color("store_type:N", legend=alt.Legend(title="Store type")),
+                tooltip=[
+                    alt.Tooltip("store_display:N", title="Store"),
+                    alt.Tooltip("store_type:N", title="Store type"),
+                    alt.Tooltip("conversion_rate:Q", title="Conversion", format=".1f"),
+                    alt.Tooltip("sales_per_visitor:Q", title="SPV", format=",.2f"),
+                    alt.Tooltip("turnover:Q", title="Revenue", format=",.0f"),
+                    alt.Tooltip("footfall:Q", title="Footfall", format=",.0f"),
+                ],
+            )
 
-                st.altair_chart(
-                    alt.layer(base, vline, hline).properties(height=360).configure_view(strokeWidth=0),
-                    use_container_width=True,
-                )
+            vline = (
+                alt.Chart(pd.DataFrame({"x": [x_med]}))
+                .mark_rule(strokeDash=[6, 4])
+                .encode(x="x:Q")
+            )
+            hline = (
+                alt.Chart(pd.DataFrame({"y": [y_med]}))
+                .mark_rule(strokeDash=[6, 4])
+                .encode(y="y:Q")
+            )
+
+            st.altair_chart(
+                alt.layer(base, vline, hline)
+                  .properties(height=360)
+                  .configure_view(strokeWidth=0),
+                use_container_width=True,
+            )
 
     # ----------------------
     # Store drilldown
@@ -1998,6 +2043,61 @@ def main():
         sqm_sum=sqm_eff_store,
         capture_pct=cap_store,
     )
+
+    stype = store_type_store if store_type_store else "Unknown"
+    
+    # Benchmarks for same store_type
+    reg_type_row = reg_type_k[reg_type_k["store_type"] == stype].iloc[0].to_dict() if (not reg_type_k.empty and (reg_type_k["store_type"] == stype).any()) else {}
+    com_type_row = com_type_k[com_type_k["store_type"] == stype].iloc[0].to_dict() if (not com_type_k.empty and (com_type_k["store_type"] == stype).any()) else {}
+    
+    # Values (store)
+    store_spv = store_vals.get("sales_per_visitor", np.nan)
+    store_cr  = store_vals.get("conversion_rate", np.nan)
+    store_atv = store_vals.get("sales_per_transaction", np.nan)
+    store_spm2 = safe_div(turn_s, sqm_eff_store) if pd.notna(sqm_eff_store) and sqm_eff_store > 0 else np.nan
+    store_cap = cap_store
+    
+    def idx_vs(a, b):
+        return (a/b*100.0) if (pd.notna(a) and pd.notna(b) and float(b) != 0.0) else np.nan
+    
+    # Region same-type
+    reg_spv = reg_type_row.get("sales_per_visitor", np.nan)
+    reg_cr  = reg_type_row.get("conversion_rate", np.nan)
+    reg_atv = reg_type_row.get("sales_per_transaction", np.nan)
+    reg_spm2 = reg_type_row.get("sales_per_sqm", np.nan)
+    reg_cap = reg_type_row.get("capture_rate", np.nan)
+    
+    # Company same-type
+    com_spv = com_type_row.get("sales_per_visitor", np.nan)
+    com_cr  = com_type_row.get("conversion_rate", np.nan)
+    com_atv = com_type_row.get("sales_per_transaction", np.nan)
+    com_spm2 = com_type_row.get("sales_per_sqm", np.nan)
+    com_cap = com_type_row.get("capture_rate", np.nan)
+    
+    st.markdown('<div class="panel"><div class="panel-title">This store vs same store type</div>', unsafe_allow_html=True)
+    
+    a,b = st.columns(2)
+    with a:
+        st.markdown("**vs Region (same store type)**")
+        st.write({
+            "SPV idx": "-" if pd.isna(idx_vs(store_spv, reg_spv)) else f"{idx_vs(store_spv, reg_spv):.0f}%",
+            "CR idx": "-" if pd.isna(idx_vs(store_cr, reg_cr)) else f"{idx_vs(store_cr, reg_cr):.0f}%",
+            "Sales/m² idx": "-" if pd.isna(idx_vs(store_spm2, reg_spm2)) else f"{idx_vs(store_spm2, reg_spm2):.0f}%",
+            "ATV idx": "-" if pd.isna(idx_vs(store_atv, reg_atv)) else f"{idx_vs(store_atv, reg_atv):.0f}%",
+            "Capture idx": "-" if pd.isna(idx_vs(store_cap, reg_cap)) else f"{idx_vs(store_cap, reg_cap):.0f}%",
+        })
+    
+    with b:
+        st.markdown("**vs Company (same store type)**")
+        st.write({
+            "SPV idx": "-" if pd.isna(idx_vs(store_spv, com_spv)) else f"{idx_vs(store_spv, com_spv):.0f}%",
+            "CR idx": "-" if pd.isna(idx_vs(store_cr, com_cr)) else f"{idx_vs(store_cr, com_cr):.0f}%",
+            "Sales/m² idx": "-" if pd.isna(idx_vs(store_spm2, com_spm2)) else f"{idx_vs(store_spm2, com_spm2):.0f}%",
+            "ATV idx": "-" if pd.isna(idx_vs(store_atv, com_atv)) else f"{idx_vs(store_atv, com_atv):.0f}%",
+            "Capture idx": "-" if pd.isna(idx_vs(store_cap, com_cap)) else f"{idx_vs(store_cap, com_cap):.0f}%",
+        })
+    
+    st.markdown("</div>", unsafe_allow_html=True)
 
     store_weights = get_svi_weights_for_store_type(store_type_store)
 
