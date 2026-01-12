@@ -932,7 +932,7 @@ def main():
     # ----------------------
     # Periods (MUST be before Row 2)
     # ----------------------
-    periods = period_catalog()
+    periods = period_catalog(today=datetime.now().date())
     if not isinstance(periods, dict) or len(periods) == 0:
         st.error("period_catalog() returned no periods.")
         return
