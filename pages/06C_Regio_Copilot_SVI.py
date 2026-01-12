@@ -964,18 +964,24 @@ def main():
         )
 
     with r1_right:
-        st.markdown('<div class="pfm-header-right">', unsafe_allow_html=True)
-
+        # Open wrapper (card)
+        st.markdown(
+            '<div class="pfm-header pfm-header--fixed pfm-header-right">',
+            unsafe_allow_html=True
+        )
+    
+        # Widgets MUST be rendered between open + close
         client_label = st.selectbox(
             "Client",
             clients_df["label"].tolist(),
             label_visibility="collapsed",
             key="rcp_client",
         )
-
+    
         run_btn = st.button("Run analysis", type="primary", key="rcp_run")
-
-        st.markdown("</div>", unsafe_allow_html=True)
+    
+        # Close wrapper
+    st.markdown("</div>", unsafe_allow_html=True)
 
     selected_client = clients_df[clients_df["label"] == client_label].iloc[0].to_dict()
     company_id = int(selected_client["company_id"])
