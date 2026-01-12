@@ -233,6 +233,39 @@ st.markdown(
         min-height: 44px !important;
         margin-top: 0 !important;
       }}
+      /* --- Header controls (rechts naast title card) --- */
+      .pfm-header-controls {{
+          height: 92px;                /* match title card */
+          display: flex;
+          align-items: center;         /* verticaal uitlijnen */
+          justify-content: flex-end;
+          padding: 0;                  /* geen extra hoogte */
+          margin-bottom: 0.75rem;      /* match .pfm-header */
+      }}
+      /* Houd select en button compact en gelijk hoog *
+      .pfm-header-controls div[data-testid="stSelectbox"] > div {{
+          min-height: 44px !important;
+      }}
+      .pfm-header-controls div[data-testid="stSelectbox"] div[role="combobox"] {{
+          min-height: 44px !important;
+          display: flex !important;
+          align-items: center !important;
+      }}
+      /* Button: minder hoog, zelfde als select */
+      .pfm-header-controls div.stButton > button {{
+          height: 44px !important;
+          padding: 0.45rem 0.9rem !important;
+          border-radius: 12px !important;
+          margin-top: 0 !important;
+          width: 100% !important;
+      }}
+      /* Optioneel: verwijder labelruimte alleen in header controls */
+      .pfm-header-controls div[data-testid="stSelectbox"] label {{
+          display: none !important;
+          height: 0 !important;
+          margin: 0 !important;
+          padding: 0 !important;
+      }}
 
     </style>
     """,
@@ -964,24 +997,22 @@ def main():
         )
 
     with r1_right:
-        # Open wrapper (card)
-        st.markdown(
-            '<div class="pfm-header pfm-header--fixed pfm-header-right">',
-            unsafe_allow_html=True
-        )
+        st.markdown('<div class="pfm-header-controls">', unsafe_allow_html=True)
     
-        # Widgets MUST be rendered between open + close
-        client_label = st.selectbox(
-            "Client",
-            clients_df["label"].tolist(),
-            label_visibility="collapsed",
-            key="rcp_client",
-        )
+        c_sel, c_btn = st.columns([3.2, 1.2], vertical_alignment="center")
     
-        run_btn = st.button("Run analysis", type="primary", key="rcp_run")
+        with c_sel:
+            client_label = st.selectbox(
+                "Client",
+                clients_df["label"].tolist(),
+                label_visibility="collapsed",
+                key="rcp_client",
+            )
     
-        # Close wrapper
-    st.markdown("</div>", unsafe_allow_html=True)
+        with c_btn:
+            run_btn = st.button("Run analysis", type="primary", key="rcp_run")
+    
+        st.markdown("</div>", unsafe_allow_html=True)
 
     selected_client = clients_df[clients_df["label"] == client_label].iloc[0].to_dict()
     company_id = int(selected_client["company_id"])
