@@ -1509,6 +1509,10 @@ def main():
     # -------- (2) MIDDLE: SVI card --------
     with col_donut:
         big_score = 0 if pd.isna(region_svi) else float(region_svi)
+        st.markdown(
+            '<div class="panel"><div class="panel-title">Region SVI — vs other regions (company-wide)</div>',
+            unsafe_allow_html=True
+        )
     
         st.markdown(
             f"""
