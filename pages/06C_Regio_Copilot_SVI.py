@@ -469,12 +469,12 @@ def compute_store_type_benchmarks(
         reg_k["sales_per_sqm"] = np.where(reg_k["sqm_sum"] > 0, reg_k["turnover"] / reg_k["sqm_sum"], np.nan)
 
     # Capture per store_type (optional)
-    def _capture_by_type(csw: pd.DataFrame, store_dim_: pd.DataFrame) -> pd.DataFrame:
+    def _capture_by_type(csw: pd.DataFrame, store_dim: pd.DataFrame) -> pd.DataFrame:
         if csw is None or csw.empty:
             return pd.DataFrame(columns=["store_type","capture_rate"])
         tmp = csw.copy()
         tmp["id"] = pd.to_numeric(tmp.get("id", np.nan), errors="coerce").astype("Int64")
-        sd = store_dim_[["id","store_type"]].copy()
+        sd = store_dim[["id","store_type"]].copy()
         sd = _ensure_store_type(sd)
         sd["id"] = pd.to_numeric(sd["id"], errors="coerce").astype("Int64")
 
