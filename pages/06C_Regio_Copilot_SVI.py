@@ -1390,14 +1390,22 @@ def main():
     if pd.isna(comp_vals.get("capture_rate", np.nan)):
         comp_vals["capture_rate"] = reg_vals.get("capture_rate", np.nan)
 
-    region_types = merged.loc[merged["region"] == region_choice, "store_type"] if "store_type" in merged.columns else pd.Series([], dtype=str)
-    dominant_store_type = ""
-    if region_types is not None and len(region_types.dropna()):
-        dominant_store_type = str(region_types.dropna().astype(str).value_counts().index[0]).strip()
-        if dominant_store_type.lower() == "nan":
-            dominant_store_type = ""
-    region_types = merged.loc[merged["region"] == region_choice, "store_type"] if "store_type" in merged.columns else pd.Series([], dtype=str)
+    # --- Region store-type mix weighting (instead of dominant type) ---
+    region_types = (
+        merged.loc[merged["region"] == region_choice, "store_type"]
+        if ("store_type" in merged.columns and "region" in merged.columns)
+        else pd.Series([], dtype=str)
+    )
+    
     region_weights = get_svi_weights_for_region_mix(region_types)
+    
+    # Optional: still compute dominant type for display only (NOT for weighting)
+    dominant_store_type = ""
+    if region_types is not None and not region_types.dropna().empty:
+        _rt = region_types.dropna().astype(str).str.strip()
+        _rt = _rt[_rt.str.lower() != "nan"]
+        if not _rt.empty:
+            dominant_store_type = str(_rt.value_counts().index[0]).strip()
 
     region_svi, region_avg_ratio, region_bd = compute_svi_explainable(
         vals_a=reg_vals,
@@ -1498,42 +1506,45 @@ def main():
         st.markdown("</div>", unsafe_allow_html=True)
     
     # -------- (2) MIDDLE: Donut + SVI card --------
+    import streamlit.components.v1 as components
+    
+    # -------- (2) MIDDLE: SVI card --------
     with col_donut:
         big_score = 0 if pd.isna(region_svi) else float(region_svi)
     
-        st.markdown(
-            f"""
-            <div class="panel" style="height:100%; display:flex; flex-direction:column; justify-content:space-between;">
-              
-              <div>
-                <div class="panel-title">Store Vitality Index (SVI) — region vs company</div>
+        html = f"""
+        <div class="panel" style="height:100%; display:flex; flex-direction:column; justify-content:space-between; padding:0.85rem 1rem;">
+          
+          <div>
+            <div class="panel-title">Store Vitality Index (SVI) — region vs company</div>
     
-                <div style="height:0.35rem"></div>
+            <div style="height:0.55rem"></div>
     
-                <div style="display:flex; align-items:baseline; gap:0.5rem;">
-                  <div style="font-size:3.2rem;font-weight:950;line-height:1;color:{status_color};">
-                    {big_score:.0f}
-                  </div>
-                  <div class="pill">/ 100</div>
-                </div>
-    
-                <div style="height:0.45rem"></div>
-    
-                <div class="muted">
-                  Status: <span style="font-weight:900;color:{status_color}">{status_txt}</span><br/>
-                  Weighted driver ratio vs company ≈ <b>{"" if pd.isna(region_avg_ratio) else f"{region_avg_ratio:.0f}%"} </b>
-                  <span class="hint">(ratios clipped {lever_floor}–{lever_cap}% → 0–100)</span>
-                </div>
+            <div style="display:flex; align-items:baseline; gap:0.55rem;">
+              <div style="font-size:3.35rem;font-weight:950;line-height:1;color:{status_color};letter-spacing:-0.02em;">
+                {big_score:.0f}
               </div>
-    
-              <div class="hint" style="margin-top:0.75rem">
-                Weighting: region store-type mix (see table right)
-              </div>
-    
+              <div class="pill">/ 100</div>
             </div>
-            """,
-            unsafe_allow_html=True
-        )
+    
+            <div style="height:0.65rem"></div>
+    
+            <div class="muted" style="line-height:1.35;">
+              Status: <span style="font-weight:900;color:{status_color}">{status_txt}</span><br/>
+              Weighted driver ratio vs company ≈ <b>{"" if pd.isna(region_avg_ratio) else f"{region_avg_ratio:.0f}%"} </b>
+              <span class="hint">(ratios clipped {lever_floor}–{lever_cap}% → 0–100)</span>
+            </div>
+          </div>
+    
+          <div class="hint" style="margin-top:0.75rem">
+            Weighting: region store-type mix <span class="pill">see table</span>
+          </div>
+    
+        </div>
+        """
+    
+        # Height: zet dit gelijk aan de hoogte die je column krijgt; 220–260 is meestal goed.
+        components.html(html, height=240)
     
     # -------- (3) RIGHT: Store types table --------
     with col_types:
