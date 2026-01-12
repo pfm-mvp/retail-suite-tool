@@ -1414,91 +1414,76 @@ def main():
 
     df_region_rank = compute_svi_by_region_companywide(df_daily_store, lever_floor, lever_cap)
 
-    c_left, c_right = st.columns([1.7, 3.3])
-
-    with c_left:
-        st.markdown('<div class="panel"><div class="panel-title">Store types in this region — vs company (same store type)</div>', unsafe_allow_html=True)
-
-        if mix_g.empty:
-            st.info("No store_type mix available (check regions.csv store_type column).")
-        else:
-            # join mix + idx for quick table
-            show = mix_g.merge(
-                type_idx[["store_type","SPV idx","CR idx","Sales/m² idx","ATV idx","Capture idx"]],
-                on="store_type",
-                how="left"
-            ).sort_values("Stores", ascending=False)
-        
-            # compact display
-            disp = show.rename(columns={"store_type":"Store type"}).copy()
-            for c in ["Store share","SPV idx","CR idx","Sales/m² idx","ATV idx","Capture idx"]:
-                if c in disp.columns:
-                    disp[c] = pd.to_numeric(disp[c], errors="coerce")
-        
-            disp["Store share"] = disp["Store share"].apply(lambda x: "-" if pd.isna(x) else f"{x:.0f}%")
-            for c in ["SPV idx","CR idx","Sales/m² idx","ATV idx","Capture idx"]:
-                if c in disp.columns:
-                    disp[c] = disp[c].apply(lambda x: "-" if pd.isna(x) else f"{x:.0f}%")
-        
-            st.dataframe(
-                disp[["Store type","Stores","Store share","SPV idx","CR idx","Sales/m² idx","ATV idx","Capture idx"]],
-                use_container_width=True,
-                hide_index=True
+    # ======================
+    # SVI ROW — ONE ROW: (region bars) | (donut + summary) | (store types table)
+    # ======================
+    
+    # ✅ 1) Maak je region bar chart eerst aan (zoals je al deed, maar nu als variabele)
+    region_bar_chart = None
+    if df_region_rank is not None and not df_region_rank.empty:
+        TOP_N = 8
+        df_plot = df_region_rank.head(TOP_N).copy()
+    
+        # ensure selected region is visible
+        if region_choice not in df_plot["region"].tolist() and region_choice in df_region_rank["region"].tolist():
+            df_sel = df_region_rank[df_region_rank["region"] == region_choice].copy()
+            df_plot = pd.concat([df_plot, df_sel], ignore_index=True)
+    
+        df_plot = df_plot.sort_values("svi", ascending=True).copy()
+    
+        region_bar_chart = (
+            alt.Chart(df_plot)
+            .mark_bar(cornerRadiusEnd=4)
+            .encode(
+                y=alt.Y("region:N", sort=df_plot["region"].tolist(), title=None),
+                x=alt.X("svi:Q", title="SVI (0–100)", scale=alt.Scale(domain=[0, 100])),
+                color=alt.condition(
+                    alt.datum.region == region_choice,
+                    alt.value(PFM_PURPLE),
+                    alt.value(PFM_LINE),
+                ),
+                tooltip=[
+                    alt.Tooltip("region:N", title="Region"),
+                    alt.Tooltip("svi:Q", title="SVI", format=".0f"),
+                    alt.Tooltip("avg_ratio:Q", title="Avg ratio vs company", format=".0f"),
+                    alt.Tooltip("turnover:Q", title="Revenue", format=",.0f"),
+                    alt.Tooltip("footfall:Q", title="Footfall", format=",.0f"),
+                ],
             )
-        
-        st.markdown("</div>", unsafe_allow_html=True)
+            .properties(height=260)
+        )
+    
+    # ✅ 2) Koppel je store-type tabel aan deze variabele
+    #    -> VERVANG hieronder de placeholder door jouw bestaande dataframe-naam
+    #    Voorbeeld: store_type_table = mix_g_disp  (of hoe hij bij jou heet)
+    store_type_table = store_type_table  # <-- !!! VERVANG DIT door jouw dataframe variabele
+    
+    # ✅ 3) Render alles in 1 rij
+    c_bar, c_donut, c_types = st.columns([2.2, 1.4, 2.4], vertical_alignment="top")
+    
+    # --- 1️⃣ Region SVI vs other regions (bar) ---
+    with c_bar:
         st.markdown(
             '<div class="panel"><div class="panel-title">Region SVI — vs other regions (company-wide)</div>',
-            unsafe_allow_html=True
+            unsafe_allow_html=True,
         )
-
-        if df_region_rank is None or df_region_rank.empty:
+        if region_bar_chart is None:
             st.info("No region leaderboard available.")
         else:
-            TOP_N = 8
-            df_plot = df_region_rank.head(TOP_N).copy()
-
-            if region_choice not in df_plot["region"].tolist() and region_choice in df_region_rank["region"].tolist():
-                df_sel = df_region_rank[df_region_rank["region"] == region_choice].copy()
-                df_plot = pd.concat([df_plot, df_sel], ignore_index=True)
-
-            df_plot = df_plot.sort_values("svi", ascending=True).copy()
-
-            bar = (
-                alt.Chart(df_plot)
-                .mark_bar(cornerRadiusEnd=4)
-                .encode(
-                    y=alt.Y("region:N", sort=df_plot["region"].tolist(), title=None),
-                    x=alt.X("svi:Q", title="SVI (0–100)", scale=alt.Scale(domain=[0, 100])),
-                    color=alt.condition(
-                        alt.datum.region == region_choice,
-                        alt.value(PFM_PURPLE),
-                        alt.value(PFM_LINE)
-                    ),
-                    tooltip=[
-                        alt.Tooltip("region:N", title="Region"),
-                        alt.Tooltip("svi:Q", title="SVI", format=".0f"),
-                        alt.Tooltip("avg_ratio:Q", title="Avg ratio vs company", format=".0f"),
-                        alt.Tooltip("turnover:Q", title="Revenue", format=",.0f"),
-                        alt.Tooltip("footfall:Q", title="Footfall", format=",.0f"),
-                    ],
-                )
-                .properties(height=260)
-            )
-
-            st.altair_chart(bar, use_container_width=True)
-
-            st.markdown(
-                "<div class='hint'>Highlighted = selected region. (Capture excluded for fair comparison across regions.)</div></div>",
-                unsafe_allow_html=True
-            )
-
-    with c_right:
+            st.altair_chart(region_bar_chart, use_container_width=True)
+    
+        st.markdown(
+            "<div class='hint'>Highlighted = selected region. (Capture excluded for fair comparison across regions.)</div></div>",
+            unsafe_allow_html=True,
+        )
+    
+    # --- 2️⃣ Donut + SVI summary ---
+    with c_donut:
         st.altair_chart(
             gauge_chart(region_svi if pd.notna(region_svi) else 0, status_color),
-            use_container_width=False
+            use_container_width=False,
         )
-
+    
         st.markdown(
             f"""
             <div class="panel">
@@ -1514,8 +1499,22 @@ def main():
               </div>
             </div>
             """,
-            unsafe_allow_html=True
+            unsafe_allow_html=True,
         )
+    
+    # --- 3️⃣ Store types in region vs company ---
+    with c_types:
+        st.markdown(
+            '<div class="panel"><div class="panel-title">Store types in this region — vs company (same store type)</div>',
+            unsafe_allow_html=True,
+        )
+    
+        if store_type_table is None or (hasattr(store_type_table, "empty") and store_type_table.empty):
+            st.info("No store type breakdown available (check regions.csv store_type coverage).")
+        else:
+            st.dataframe(store_type_table, use_container_width=True, hide_index=True)
+    
+        st.markdown("</div>", unsafe_allow_html=True)
 
     # --- Macro charts ---
     if show_macro:
@@ -2146,7 +2145,8 @@ def main():
     # ----------------------
     # Debug
     # ----------------------
-    with st.expander("🔧 Debug (v2)"):
+    with st.expander("🔧 Debug (v2)")
+        st.write("DEBUG vars:", list(locals().keys()))
         st.write("REPORT_URL:", REPORT_URL)
         st.write("Company:", company_id)
         st.write("Region:", region_choice)
