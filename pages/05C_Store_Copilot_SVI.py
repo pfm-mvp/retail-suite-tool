@@ -1132,62 +1132,62 @@ def main():
 
         if bd.empty:
             st.info("No driver breakdown available.")
-         else:
-            order = ["SPV", "Sales / m²", "Capture", "Conversion", "ATV"]
-
-            y_axis = alt.Axis(
-                title=None,
-                labelLimit=500,     # prevent truncation
-                labelPadding=12,    # breathing room
-                labelFontSize=12,
-                labelColor=PFM_GRAY,
-                ticks=False,
-                domain=False,
-            )
-
-            x_axis = alt.Axis(
-                title="Index (100 = benchmark)",
-                labelColor=PFM_GRAY,
-                titleColor=PFM_GRAY,
-                tickColor=PFM_LINE,
-                gridColor=PFM_LINE,
-            )
-
-            bars = (
-                alt.Chart(bd)
-                .mark_bar(cornerRadiusEnd=4)
-                .encode(
-                    y=alt.Y("driver_label:N", sort=order, axis=y_axis),
-                    x=alt.X("ratio_clip:Q", axis=x_axis, scale=alt.Scale(domain=[60, 140])),
-                    color=alt.condition(
-                        alt.datum["ratio_pct"] >= 100,
-                        alt.value(PFM_PURPLE),
-                        alt.value(PFM_RED),
-                    ),
-                    tooltip=[
-                        alt.Tooltip("driver_label:N", title="Driver"),
-                        alt.Tooltip("ratio_pct:Q", title="Index", format=".0f"),
-                        alt.Tooltip("weight:Q", title="Weight", format=".2f"),
-                    ],
+             else:
+                order = ["SPV", "Sales / m²", "Capture", "Conversion", "ATV"]
+    
+                y_axis = alt.Axis(
+                    title=None,
+                    labelLimit=500,     # prevent truncation
+                    labelPadding=12,    # breathing room
+                    labelFontSize=12,
+                    labelColor=PFM_GRAY,
+                    ticks=False,
+                    domain=False,
                 )
-                .properties(height=210)
-            )
-
-            text = (
-                alt.Chart(bd)
-                .mark_text(align="left", dx=6, fontWeight=800, color=PFM_DARK)
-                .encode(
-                    y=alt.Y("driver_label:N", sort=order),
-                    x=alt.X("ratio_clip:Q"),
-                    text=alt.Text("ratio_pct:Q", format=".0f"),
+    
+                x_axis = alt.Axis(
+                    title="Index (100 = benchmark)",
+                    labelColor=PFM_GRAY,
+                    titleColor=PFM_GRAY,
+                    tickColor=PFM_LINE,
+                    gridColor=PFM_LINE,
                 )
-            )
-
-            chart = (bars + text).configure_view(strokeWidth=0).properties(
-                padding={"left": 90, "right": 12, "top": 6, "bottom": 6}
-            )
-
-            st.altair_chart(chart, use_container_width=True)
+    
+                bars = (
+                    alt.Chart(bd)
+                    .mark_bar(cornerRadiusEnd=4)
+                    .encode(
+                        y=alt.Y("driver_label:N", sort=order, axis=y_axis),
+                        x=alt.X("ratio_clip:Q", axis=x_axis, scale=alt.Scale(domain=[60, 140])),
+                        color=alt.condition(
+                            alt.datum["ratio_pct"] >= 100,
+                            alt.value(PFM_PURPLE),
+                            alt.value(PFM_RED),
+                        ),
+                        tooltip=[
+                            alt.Tooltip("driver_label:N", title="Driver"),
+                            alt.Tooltip("ratio_pct:Q", title="Index", format=".0f"),
+                            alt.Tooltip("weight:Q", title="Weight", format=".2f"),
+                        ],
+                    )
+                    .properties(height=210)
+                )
+    
+                text = (
+                    alt.Chart(bd)
+                    .mark_text(align="left", dx=6, fontWeight=800, color=PFM_DARK)
+                    .encode(
+                        y=alt.Y("driver_label:N", sort=order),
+                        x=alt.X("ratio_clip:Q"),
+                        text=alt.Text("ratio_pct:Q", format=".0f"),
+                    )
+                )
+    
+                chart = (bars + text).configure_view(strokeWidth=0).properties(
+                    padding={"left": 90, "right": 12, "top": 6, "bottom": 6}
+                )
+    
+                st.altair_chart(chart, use_container_width=True)
 
     with col_b:
         st.markdown('<div class="panel"><div class="panel-title">Focus actions (this week)</div>', unsafe_allow_html=True)
