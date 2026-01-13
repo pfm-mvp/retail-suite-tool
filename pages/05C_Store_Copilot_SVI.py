@@ -374,46 +374,107 @@ def make_week_options_2024():
     return opts
 
 # ----------------------
-# Actions
+# Actions (improved)
 # ----------------------
-def make_actions(store_bd: pd.DataFrame):
+def make_actions(store_bd: pd.DataFrame, exclude_capture: bool = True, top_n: int = 3):
     """
     store_bd = breakdown table from compute_svi_explainable (vs chosen benchmark)
-    Picks top 3 drivers with lowest ratio, weighted by weight.
+    Picks top actions based on weighted gap (100 - ratio_pct) * weight.
+    - Only considers ratios below 100% (real underperformance).
+    - Optionally excludes capture_rate as primary action (default True).
+    Returns: list[dict]
     """
     if store_bd is None or store_bd.empty:
         return []
 
     df = store_bd.copy()
-    df["ratio_pct"] = pd.to_numeric(df["ratio_pct"], errors="coerce")
-    df["weight"] = pd.to_numeric(df["weight"], errors="coerce").fillna(0.0)
 
+    # Robust numeric
+    df["ratio_pct"] = pd.to_numeric(df.get("ratio_pct", np.nan), errors="coerce")
+    df["weight"] = pd.to_numeric(df.get("weight", np.nan), errors="coerce").fillna(0.0)
+
+    # Keep only usable rows
     df = df.dropna(subset=["ratio_pct"]).copy()
     if df.empty:
         return []
 
-    # priority = (gap) * weight
-    df["priority"] = (100.0 - df["ratio_pct"]).clip(lower=0.0) * df["weight"]
-    df = df.sort_values("priority", ascending=False)
+    # Only real gaps
+    df = df[df["ratio_pct"] < 100.0].copy()
+    if df.empty:
+        return []
 
+    # Optional: don't push capture as main action
+    if exclude_capture and "driver_key" in df.columns:
+        df = df[df["driver_key"].astype(str) != "capture_rate"].copy()
+        if df.empty:
+            return []
+
+    # Priority score = gap * weight (gap in %points vs benchmark)
+    df["gap_pp"] = (100.0 - df["ratio_pct"]).clip(lower=0.0)
+    df["priority"] = df["gap_pp"] * df["weight"]
+
+    df = df.sort_values(["priority", "gap_pp"], ascending=False)
+
+    # Severity helper
+    def _severity(gap_pp: float) -> str:
+        if pd.isna(gap_pp):
+            return "unknown"
+        g = float(gap_pp)
+        if g >= 20:
+            return "large"
+        if g >= 10:
+            return "medium"
+        return "small"
+
+    # Slightly more concrete action copy
     action_map = {
-        "conversion_rate": "Focus on converting visitors into customers (service, queue, closing routines).",
-        "sales_per_transaction": "Increase ATV (bundles, add-ons, premium options, guided selling).",
-        "sales_per_visitor": "Lift SPV by improving conversion and ATV (best lever for total revenue).",
-        "sales_per_sqm": "Optimize space productivity (hot zones, product placement, promotions per m²).",
-        "capture_rate": "Increase capture (window/entrance, local activation, signage, peak-hour staffing).",
+        "conversion_rate": {
+            "main": "Lift conversion: staff focus on greeting → need discovery → closing routines; reduce wait/queue friction.",
+            "quick": "Quick win: test 1 ‘closing script’ + assign a greeter during peak 2 hours.",
+        },
+        "sales_per_transaction": {
+            "main": "Increase ATV: bundles, add-ons, premium options, guided selling (make the upsell feel like help).",
+            "quick": "Quick win: introduce 3 default bundles at the counter and coach staff for 1 week.",
+        },
+        "sales_per_visitor": {
+            "main": "Lift SPV: improve conversion *and* ATV — this is the most direct lever on total revenue.",
+            "quick": "Quick win: pick 1 hero product + 1 add-on and train ‘pairing’ suggestions.",
+        },
+        "sales_per_sqm": {
+            "main": "Improve Sales/m²: optimize hot zones, layout, visibility, and promotions per m² (space must earn its rent).",
+            "quick": "Quick win: relocate top sellers to entrance/hot zone and measure 2-week effect.",
+        },
+        "capture_rate": {
+            "main": "Increase capture: window/entrance attraction, signage, local activation, and staffing on peak street-traffic moments.",
+            "quick": "Quick win: refresh window messaging + add 1 outside CTA during peak hour.",
+        },
     }
 
     out = []
-    for _, r in df.head(3).iterrows():
-        key = str(r.get("driver_key", ""))
+    for _, r in df.head(int(top_n)).iterrows():
+        key = str(r.get("driver_key", "")).strip()
+        label = str(r.get("driver", key)).strip()
+
+        gap_pp = float(r["gap_pp"]) if pd.notna(r["gap_pp"]) else np.nan
+        ratio = float(r["ratio_pct"]) if pd.notna(r["ratio_pct"]) else np.nan
+        w = float(r["weight"]) if pd.notna(r["weight"]) else 0.0
+
+        sev = _severity(gap_pp)
+
+        # choose main vs quick copy depending on severity
+        copy = action_map.get(key, {"main": "Improve this driver to lift SVI.", "quick": "Run a small test to improve this driver."})
+        action_txt = copy["main"] if sev in ("medium", "large") else copy.get("quick", copy["main"])
+
         out.append({
-            "driver": str(r.get("driver", key)),
+            "driver": label,
             "driver_key": key,
-            "ratio_pct": float(r["ratio_pct"]) if pd.notna(r["ratio_pct"]) else np.nan,
-            "weight": float(r["weight"]) if pd.notna(r["weight"]) else 0.0,
-            "action": action_map.get(key, "Improve this driver to lift the SVI score."),
+            "ratio_pct": ratio,
+            "gap_pp": gap_pp,
+            "severity": sev,
+            "weight": w,
+            "action": action_txt,
         })
+
     return out
 
 # ----------------------
