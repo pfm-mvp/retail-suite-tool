@@ -1134,12 +1134,16 @@ def main():
         if bd.empty:
             st.info("No driver breakdown available.")
         else:
+            # Zorg dat labels nooit leeg zijn
+            bd["driver_label"] = bd["driver_label"].fillna("")
+            
             order = ["SPV", "Sales / m²", "Capture", "Conversion", "ATV"]
             
             y_axis = alt.Axis(
                 title=None,
-                labelLimit=1000,      # geen truncation
-                labelPadding=14,      # ruimte tussen labels en bars
+                labels=True,
+                labelLimit=200,
+                labelPadding=10,
                 labelFontSize=12,
                 labelColor=PFM_GRAY,
                 ticks=False,
@@ -1163,7 +1167,7 @@ def main():
                     color=alt.condition(
                         alt.datum.ratio_pct >= 100,
                         alt.value(PFM_PURPLE),
-                        alt.value(PFM_LINE),   # grijs voor <100, zoals je voorbeeld
+                        alt.value(PFM_LINE),
                     ),
                     tooltip=[
                         alt.Tooltip("driver_label:N", title="Driver"),
@@ -1188,11 +1192,10 @@ def main():
                 (bars + text)
                 .configure_view(strokeWidth=0)
                 .configure_axis(grid=True, gridColor=PFM_LINE, tickColor=PFM_LINE, domain=False)
+                .configure(padding=0)  # <-- HARD RESET: kill any leftover padding
             )
             
             st.altair_chart(chart, use_container_width=True)
-    
-        st.markdown("</div>", unsafe_allow_html=True)
 
     with col_b:
         st.markdown('<div class="panel"><div class="panel-title">Focus actions (this week)</div>', unsafe_allow_html=True)
