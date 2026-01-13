@@ -1168,7 +1168,7 @@ def main():
                 ),
                 tooltip=[
                     alt.Tooltip(""driver_label:N"", title=""Driver""),
-                    alt.Tooltip(""ratio_pct:Q"", title=""Index"", format="".0f""),
+                    alt.Tooltip(""ratio_html:Q"", title=""Index"", format="".0f""),
                     alt.Tooltip(""weight:Q"", title=""Weight"", format="".2f""),
                 ],
             )
@@ -1181,7 +1181,7 @@ def main():
             .encode(
                 y=alt.Y(""driver_label:N"", sort=order),
                 x=alt.X(""ratio_clip:Q""),
-                text=alt.Text(""ratio_pct:Q"", format="".0f""),
+                text=alt.Text(""ratio_html:Q"", format="".0f""),
             )
         )
         
