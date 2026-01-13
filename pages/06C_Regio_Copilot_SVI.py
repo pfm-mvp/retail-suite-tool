@@ -2174,28 +2174,71 @@ def main():
     com_spm2 = com_type_row.get("sales_per_sqm", np.nan)
     com_cap = com_type_row.get("capture_rate", np.nan)
     
+    # ----------------------
+    # Store vs same store_type (PFM heatmap tables)
+    # ----------------------
     st.markdown('<div class="panel"><div class="panel-title">This store vs same store type</div>', unsafe_allow_html=True)
     
-    a,b = st.columns(2)
-    with a:
-        st.markdown("**vs Region (same store type)**")
-        st.write({
-            "SPV idx": "-" if pd.isna(idx_vs(store_spv, reg_spv)) else f"{idx_vs(store_spv, reg_spv):.0f}%",
-            "CR idx": "-" if pd.isna(idx_vs(store_cr, reg_cr)) else f"{idx_vs(store_cr, reg_cr):.0f}%",
-            "Sales/m² idx": "-" if pd.isna(idx_vs(store_spm2, reg_spm2)) else f"{idx_vs(store_spm2, reg_spm2):.0f}%",
-            "ATV idx": "-" if pd.isna(idx_vs(store_atv, reg_atv)) else f"{idx_vs(store_atv, reg_atv):.0f}%",
-            "Capture idx": "-" if pd.isna(idx_vs(store_cap, reg_cap)) else f"{idx_vs(store_cap, reg_cap):.0f}%",
-        })
+    def _idx_style(v):
+        """PFM-brand heatmap styling for index values (percent vs benchmark)."""
+        try:
+            if pd.isna(v):
+                return ""
+            v = float(v)
     
-    with b:
+            if v >= 115:
+                return f"background-color:{PFM_PURPLE}1A; color:{PFM_DARK}; font-weight:900;"
+            if v >= 105:
+                return f"background-color:{PFM_PURPLE}0F; color:{PFM_DARK}; font-weight:800;"
+            if v >= 95:
+                return "background-color:#FFFFFF; color:#111827; font-weight:700;"
+            if v >= 85:
+                return f"background-color:{PFM_RED}12; color:{PFM_DARK}; font-weight:800;"
+            return f"background-color:{PFM_RED}22; color:{PFM_DARK}; font-weight:900;"
+        except Exception:
+            return ""
+    
+    def _as_pct(x):
+        return "-" if pd.isna(x) else f"{float(x):.0f}%"
+    
+    # Build index rows (numeric) once, reuse for both tables
+    row_vs_region = {
+        "SPV idx": idx_vs(store_spv, reg_spv),
+        "CR idx": idx_vs(store_cr, reg_cr),
+        "Sales/m² idx": idx_vs(store_spm2, reg_spm2),
+        "ATV idx": idx_vs(store_atv, reg_atv),
+        "Capture idx": idx_vs(store_cap, reg_cap),
+    }
+    row_vs_company = {
+        "SPV idx": idx_vs(store_spv, com_spv),
+        "CR idx": idx_vs(store_cr, com_cr),
+        "Sales/m² idx": idx_vs(store_spm2, com_spm2),
+        "ATV idx": idx_vs(store_atv, com_atv),
+        "Capture idx": idx_vs(store_cap, com_cap),
+    }
+    
+    df_vs_region = pd.DataFrame([row_vs_region])
+    df_vs_company = pd.DataFrame([row_vs_company])
+    
+    c1, c2 = st.columns(2, vertical_alignment="top")
+    
+    with c1:
+        st.markdown("**vs Region (same store type)**")
+        sty = (
+            df_vs_region.style
+            .applymap(_idx_style, subset=df_vs_region.columns.tolist())
+            .format({c: _as_pct for c in df_vs_region.columns})
+        )
+        st.dataframe(sty, use_container_width=True, hide_index=True)
+    
+    with c2:
         st.markdown("**vs Company (same store type)**")
-        st.write({
-            "SPV idx": "-" if pd.isna(idx_vs(store_spv, com_spv)) else f"{idx_vs(store_spv, com_spv):.0f}%",
-            "CR idx": "-" if pd.isna(idx_vs(store_cr, com_cr)) else f"{idx_vs(store_cr, com_cr):.0f}%",
-            "Sales/m² idx": "-" if pd.isna(idx_vs(store_spm2, com_spm2)) else f"{idx_vs(store_spm2, com_spm2):.0f}%",
-            "ATV idx": "-" if pd.isna(idx_vs(store_atv, com_atv)) else f"{idx_vs(store_atv, com_atv):.0f}%",
-            "Capture idx": "-" if pd.isna(idx_vs(store_cap, com_cap)) else f"{idx_vs(store_cap, com_cap):.0f}%",
-        })
+        sty = (
+            df_vs_company.style
+            .applymap(_idx_style, subset=df_vs_company.columns.tolist())
+            .format({c: _as_pct for c in df_vs_company.columns})
+        )
+        st.dataframe(sty, use_container_width=True, hide_index=True)
     
     st.markdown("</div>", unsafe_allow_html=True)
 
