@@ -99,7 +99,7 @@ def fmt_delta_pct(x):
     if pd.isna(x):
         return "vs region type: -"
     sign = "+" if x >= 0 else ""
-    return f"vs region type: {sign}{x:.0f}%"
+    return f"vs region type: {sign}{x:.0f}%".replace(".", ",")
 
 def pct_change(a, b):
     # (a/b - 1) * 100
@@ -921,32 +921,88 @@ def main():
 
     # ----------------------
     # Benchmarks: same store_type (region + company)
+    # + KPI benchmark dict for deltas in cards
     # ----------------------
     same_type_company = agg[agg["store_type"] == store_type].copy()
     same_type_region = agg[(agg["store_type"] == store_type) & (agg["region"] == store_region)].copy()
 
+    # Fallbacks: voorkom lege benchmarks (komt vaak voor bij kleine retailers / nieuwe types)
+    if same_type_region.empty:
+        same_type_region = agg[agg["region"] == store_region].copy()
+    if same_type_company.empty:
+        same_type_company = agg.copy()
+
     def bench_from_df(df_in: pd.DataFrame) -> dict:
         if df_in is None or df_in.empty:
-            return {"sales_per_visitor": np.nan, "sales_per_sqm": np.nan, "capture_rate": np.nan, "conversion_rate": np.nan, "sales_per_transaction": np.nan}
+            return {
+                "sales_per_visitor": np.nan,
+                "sales_per_sqm": np.nan,
+                "capture_rate": np.nan,
+                "conversion_rate": np.nan,
+                "sales_per_transaction": np.nan
+            }
+
         ff = float(pd.to_numeric(df_in["footfall"], errors="coerce").dropna().sum())
         to = float(pd.to_numeric(df_in["turnover"], errors="coerce").dropna().sum())
         tr = float(pd.to_numeric(df_in["transactions"], errors="coerce").dropna().sum())
-        sqm = pd.to_numeric(df_in["sqm_effective"], errors="coerce")
-        sqm_sum = float(sqm.dropna().drop_duplicates().sum()) if sqm.notna().any() else np.nan
 
-        vals = compute_driver_values_from_period(
+        sqm = pd.to_numeric(df_in["sqm_effective"], errors="coerce")
+        # sqm per store is "first" in agg, dus duplicates per store vermijden via drop_duplicates op id_int
+        # (agg is al per store, dus dit is safe; maar blijft netjes)
+        sqm_sum = float(sqm.dropna().sum()) if sqm.notna().any() else np.nan
+
+        return compute_driver_values_from_period(
             footfall=ff,
             turnover=to,
             transactions=tr,
             sqm_sum=sqm_sum,
-            capture_pct=np.nan,  # capture not wired here
+            capture_pct=np.nan,
         )
-        return vals
 
+    # driver benchmarks (voor SVI explainable)
     reg_bench_vals = bench_from_df(same_type_region)
     com_bench_vals = bench_from_df(same_type_company)
 
-    # Store vals
+    # KPI benchmark dict (voor KPI-card delta’s)
+    def kpi_bench_from_df(df_in: pd.DataFrame) -> dict:
+        if df_in is None or df_in.empty:
+            return {
+                "footfall": np.nan,
+                "turnover": np.nan,
+                "transactions": np.nan,
+                "conversion_rate": np.nan,
+                "sales_per_visitor": np.nan,
+                "sales_per_transaction": np.nan,
+                "sales_per_sqm": np.nan,
+            }
+
+        ff = float(pd.to_numeric(df_in["footfall"], errors="coerce").dropna().sum())
+        to = float(pd.to_numeric(df_in["turnover"], errors="coerce").dropna().sum())
+        tr = float(pd.to_numeric(df_in["transactions"], errors="coerce").dropna().sum())
+
+        # sales/m² benchmark: total turnover / total sqm (agg is per store → sqm_effective optellen is ok)
+        sqm = pd.to_numeric(df_in["sqm_effective"], errors="coerce")
+        sqm_sum = float(sqm.dropna().sum()) if sqm.notna().any() else np.nan
+
+        cr = (tr / ff * 100.0) if ff > 0 else np.nan
+        spv = (to / ff) if ff > 0 else np.nan
+        atv = (to / tr) if tr > 0 else np.nan
+        spm2 = (to / sqm_sum) if (pd.notna(sqm_sum) and sqm_sum > 0) else np.nan
+
+        return {
+            "footfall": ff,
+            "turnover": to,
+            "transactions": tr,
+            "conversion_rate": cr,
+            "sales_per_visitor": spv,
+            "sales_per_transaction": atv,
+            "sales_per_sqm": spm2,
+        }
+
+    reg_bench = kpi_bench_from_df(same_type_region)   # <-- dit miste je
+    com_bench = kpi_bench_from_df(same_type_company)  # (optioneel later)
+
+    # Store vals (voor SVI)
     store_vals = compute_driver_values_from_period(
         footfall=foot_s,
         turnover=turn_s,
@@ -957,7 +1013,7 @@ def main():
 
     store_weights = get_svi_weights_for_store_type(store_type)
 
-    # SVI vs region same-type (default) + also compute company comparison
+    # SVI vs region same-type (default) + company comparison
     store_svi_reg, store_avg_ratio_reg, store_bd_reg = compute_svi_explainable(
         vals_a=store_vals,
         vals_b=reg_bench_vals,
@@ -978,19 +1034,18 @@ def main():
     # ----------------------
     # KPI header row
     # ----------------------
-
-    # store KPI values
+    # store KPI values (nogmaals: ok om hier opnieuw te zetten, maar mag ook weg)
     conv_s = safe_div(trans_s, foot_s) * 100.0 if foot_s > 0 else np.nan
     spv_s  = safe_div(turn_s, foot_s) if foot_s > 0 else np.nan
     atv_s  = safe_div(turn_s, trans_s) if trans_s > 0 else np.nan
-    
-    # region same-type benchmark KPI values
+
+    # region same-type benchmark KPI values (nu bestaat reg_bench echt)
     ff_b   = reg_bench.get("footfall", np.nan)
     rev_b  = reg_bench.get("turnover", np.nan)
     cr_b   = reg_bench.get("conversion_rate", np.nan)
     spv_b  = reg_bench.get("sales_per_visitor", np.nan)
     atv_b  = reg_bench.get("sales_per_transaction", np.nan)
-    
+
     # deltas (%)
     d_ff  = pct_change(foot_s, ff_b)
     d_rev = pct_change(turn_s, rev_b)
