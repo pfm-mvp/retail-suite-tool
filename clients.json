@@ -2,16 +2,16 @@
   {
     "company_id": 3363,
     "name": "Retailer A",
-    "brand": "Furniture shop"
+    "brand": "Furniture"
   },
   {
     "company_id": 4456,
     "name": "Retailer B",
-    "brand": "MADAQ"
+    "brand": "Food"
   },
   {
     "company_id": 4410,
     "name": "Retailer C",
-    "brand": "REJOES"
+    "brand": "Vintage fashion"
   }
 ]
