@@ -95,6 +95,18 @@ def safe_div(a, b):
 def norm_key(x: str) -> str:
     return str(x).strip().lower() if x is not None else ""
 
+def fmt_delta_pct(x):
+    if pd.isna(x):
+        return "vs region type: -"
+    sign = "+" if x >= 0 else ""
+    return f"vs region type: {sign}{x:.0f}%"
+
+def pct_change(a, b):
+    # (a/b - 1) * 100
+    if pd.isna(a) or pd.isna(b) or float(b) == 0:
+        return np.nan
+    return (float(a) / float(b) - 1.0) * 100.0
+
 # ----------------------
 # UI helpers (same KPI card pattern)
 # ----------------------
@@ -966,18 +978,38 @@ def main():
     # ----------------------
     # KPI header row
     # ----------------------
+
+    # store KPI values
+    conv_s = safe_div(trans_s, foot_s) * 100.0 if foot_s > 0 else np.nan
+    spv_s  = safe_div(turn_s, foot_s) if foot_s > 0 else np.nan
+    atv_s  = safe_div(turn_s, trans_s) if trans_s > 0 else np.nan
+    
+    # region same-type benchmark KPI values
+    ff_b   = reg_bench.get("footfall", np.nan)
+    rev_b  = reg_bench.get("turnover", np.nan)
+    cr_b   = reg_bench.get("conversion_rate", np.nan)
+    spv_b  = reg_bench.get("sales_per_visitor", np.nan)
+    atv_b  = reg_bench.get("sales_per_transaction", np.nan)
+    
+    # deltas (%)
+    d_ff  = pct_change(foot_s, ff_b)
+    d_rev = pct_change(turn_s, rev_b)
+    d_cr  = pct_change(conv_s, cr_b)
+    d_spv = pct_change(spv_s, spv_b)
+    d_atv = pct_change(atv_s, atv_b)
+    
     k1, k2, k3, k4, k5, k6 = st.columns([1, 1, 1, 1, 1, 1])
 
     with k1:
-        kpi_card("Footfall", fmt_int(foot_s), f"Week {wk_num} · 2024")
+        kpi_card("Footfall", fmt_int(foot_s), f"Week {wk_num} · 2024 · {fmt_delta_pct(d_ff)}")
     with k2:
-        kpi_card("Revenue", fmt_eur(turn_s), f"Week {wk_num} · 2024")
+        kpi_card("Revenue", fmt_eur(turn_s), f"Week {wk_num} · 2024 · {fmt_delta_pct(d_rev)}")
     with k3:
-        kpi_card("Conversion", fmt_pct(conv_s), "Transactions / Visitors")
+        kpi_card("Conversion", fmt_pct(conv_s), f"Transactions / Visitors · {fmt_delta_pct(d_cr)}")
     with k4:
-        kpi_card("SPV", fmt_eur_2(spv_s), "Revenue / Visitor")
+        kpi_card("SPV", fmt_eur(spv_s), f"Revenue / Visitor · {fmt_delta_pct(d_spv)}")
     with k5:
-        kpi_card("ATV", fmt_eur_2(atv_s), "Revenue / Transaction")
+        kpi_card("ATV", fmt_eur(atv_s), f"Revenue / Transaction · {fmt_delta_pct(d_atv)}")
     with k6:
         kpi_card("Store SVI", "-" if pd.isna(store_svi_reg) else f"{store_svi_reg:.0f} / 100", "vs region same-type")
 
@@ -995,34 +1027,69 @@ def main():
 
     with col_a:
         st.markdown('<div class="panel"><div class="panel-title">SVI drivers — index vs region (same store type)</div>', unsafe_allow_html=True)
-
-        bd = store_bd_reg.copy()
+    
+        bd = store_bd.copy()
         bd["ratio_pct"] = pd.to_numeric(bd["ratio_pct"], errors="coerce")
+        bd["weight"] = pd.to_numeric(bd["weight"], errors="coerce")
         bd = bd.dropna(subset=["ratio_pct"]).copy()
+    
+        # Labels
+        label_map = {
+            "sales_per_visitor": "SPV",
+            "sales_per_sqm": "Sales / m²",
+            "capture_rate": "Capture",
+            "conversion_rate": "Conversion",
+            "sales_per_transaction": "ATV",
+        }
+    
+        # Zorg dat driver_key bestaat (afhankelijk van jouw compute_svi_explainable)
+        if "driver_key" not in bd.columns and "driver" in bd.columns:
+            # fallback: probeer driver te mappen terug; niet perfect maar beter dan niks
+            bd["driver_key"] = bd["driver"].map({v: k for k, v in label_map.items()}).fillna(bd["driver"])
+    
+        bd["driver_label"] = bd["driver_key"].map(label_map).fillna(bd.get("driver", bd["driver_key"]))
+    
+        # Clip voor nette chart
         bd["ratio_clip"] = bd["ratio_pct"].clip(lower=60, upper=140)
-
+    
         if bd.empty:
-            st.info("No driver breakdown available (missing data).")
+            st.info("No driver breakdown available.")
         else:
-            bar = (
+            order = ["SPV", "Sales / m²", "Capture", "Conversion", "ATV"]
+    
+            bars = (
                 alt.Chart(bd)
                 .mark_bar(cornerRadiusEnd=4)
                 .encode(
-                    y=alt.Y("driver:N", sort=[x[1] for x in SVI_DRIVERS], title=None),
+                    y=alt.Y("driver_label:N", sort=order, title=None, axis=alt.Axis(labelLimit=220)),
                     x=alt.X("ratio_clip:Q", title="Index (100 = benchmark)", scale=alt.Scale(domain=[60, 140])),
-                    color=alt.condition(alt.datum.ratio_pct >= 100, alt.value(PFM_PURPLE), alt.value(PFM_RED)),
+                    color=alt.condition(
+                        alt.datum.ratio_pct >= 100,
+                        alt.value(PFM_PURPLE),
+                        alt.value(PFM_RED)
+                    ),
                     tooltip=[
-                        alt.Tooltip("driver:N", title="Driver"),
+                        alt.Tooltip("driver_label:N", title="Driver"),
                         alt.Tooltip("ratio_pct:Q", title="Index", format=".0f"),
                         alt.Tooltip("weight:Q", title="Weight", format=".2f"),
-                        alt.Tooltip("value:Q", title="Store value", format=",.2f"),
-                        alt.Tooltip("benchmark:Q", title="Benchmark", format=",.2f"),
                     ],
                 )
-                .properties(height=240)
+                .properties(height=210)
             )
-            st.altair_chart(bar, use_container_width=True)
-
+    
+            # Tekstlabels op de bar (optioneel maar heel duidelijk)
+            text = (
+                alt.Chart(bd)
+                .mark_text(align="left", dx=6, fontWeight=800)
+                .encode(
+                    y=alt.Y("driver_label:N", sort=order),
+                    x=alt.X("ratio_clip:Q"),
+                    text=alt.Text("ratio_pct:Q", format=".0f"),
+                )
+            )
+    
+            st.altair_chart((bars + text).configure_view(strokeWidth=0), use_container_width=True)
+    
         st.markdown("</div>", unsafe_allow_html=True)
 
     with col_b:
