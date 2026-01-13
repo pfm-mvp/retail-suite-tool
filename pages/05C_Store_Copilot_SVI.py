@@ -1082,12 +1082,14 @@ def main():
 
     with col_a:
         st.markdown('<div class="panel"><div class="panel-title">SVI drivers — index vs region (same store type)</div>', unsafe_allow_html=True)
-    
-        bd = store_bd.copy()
-        bd["ratio_pct"] = pd.to_numeric(bd["ratio_pct"], errors="coerce")
-        bd["weight"] = pd.to_numeric(bd["weight"], errors="coerce")
-        bd = bd.dropna(subset=["ratio_pct"]).copy()
-    
+
+        bd = store_bd_reg.copy() if (store_bd_reg is not None and not store_bd_reg.empty) else pd.DataFrame()
+
+        if not bd.empty:
+            bd["ratio_pct"] = pd.to_numeric(bd.get("ratio_pct", np.nan), errors="coerce")
+            bd["weight"] = pd.to_numeric(bd.get("weight", np.nan), errors="coerce")
+            bd = bd.dropna(subset=["ratio_pct"]).copy()
+
         # Labels
         label_map = {
             "sales_per_visitor": "SPV",
@@ -1096,22 +1098,21 @@ def main():
             "conversion_rate": "Conversion",
             "sales_per_transaction": "ATV",
         }
-    
-        # Zorg dat driver_key bestaat (afhankelijk van jouw compute_svi_explainable)
-        if "driver_key" not in bd.columns and "driver" in bd.columns:
-            # fallback: probeer driver te mappen terug; niet perfect maar beter dan niks
-            bd["driver_key"] = bd["driver"].map({v: k for k, v in label_map.items()}).fillna(bd["driver"])
-    
-        bd["driver_label"] = bd["driver_key"].map(label_map).fillna(bd.get("driver", bd["driver_key"]))
-    
-        # Clip voor nette chart
-        bd["ratio_clip"] = bd["ratio_pct"].clip(lower=60, upper=140)
-    
+
+        # Driver key exists in compute_svi_explainable, but keep fallback safe
+        if (not bd.empty) and ("driver_key" not in bd.columns) and ("driver" in bd.columns):
+            rev_map = {v: k for k, v in label_map.items()}
+            bd["driver_key"] = bd["driver"].map(rev_map).fillna(bd["driver"])
+
+        if not bd.empty:
+            bd["driver_label"] = bd["driver_key"].map(label_map).fillna(bd.get("driver", bd["driver_key"]))
+            bd["ratio_clip"] = bd["ratio_pct"].clip(lower=60, upper=140)
+
         if bd.empty:
             st.info("No driver breakdown available.")
         else:
             order = ["SPV", "Sales / m²", "Capture", "Conversion", "ATV"]
-    
+
             bars = (
                 alt.Chart(bd)
                 .mark_bar(cornerRadiusEnd=4)
@@ -1131,8 +1132,7 @@ def main():
                 )
                 .properties(height=210)
             )
-    
-            # Tekstlabels op de bar (optioneel maar heel duidelijk)
+
             text = (
                 alt.Chart(bd)
                 .mark_text(align="left", dx=6, fontWeight=800)
@@ -1142,9 +1142,9 @@ def main():
                     text=alt.Text("ratio_pct:Q", format=".0f"),
                 )
             )
-    
+
             st.altair_chart((bars + text).configure_view(strokeWidth=0), use_container_width=True)
-    
+
         st.markdown("</div>", unsafe_allow_html=True)
 
     with col_b:
