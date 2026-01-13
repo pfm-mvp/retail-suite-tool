@@ -6,18 +6,24 @@
 # - Adds: Month-to-date progress donut vs manual target (demo)
 # ------------------------------------------------------------
 
-import os
 import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
 import altair as alt
 from datetime import date, timedelta
 
 from helpers_clients import load_clients
 from helpers_normalize import normalize_vemcount_response
-from helpers_vemcount_api import VemcountApiConfig, fetch_report, build_report_params
+from helpers_vemcount_api import VemcountApiConfig, fetch_report
 
 from stylesheet import inject_css
+
+
+# ----------------------
+# Streamlit config (MUST be first Streamlit call)
+# ----------------------
+st.set_page_config(page_title="PFM Store Manager Copilot", layout="wide")
 
 
 # ----------------------
@@ -41,7 +47,31 @@ inject_css(
     PFM_LINE=PFM_LINE,
 )
 
-st.set_page_config(page_title="PFM Store Manager Copilot", layout="wide")
+# ----------------------
+# API URL / secrets setup (SAME AS REGION COPILOT)
+# ----------------------
+raw_api_url = st.secrets["API_URL"].rstrip("/")
+
+if raw_api_url.endswith("/get-report"):
+    REPORT_URL = raw_api_url
+    FASTAPI_BASE_URL = raw_api_url.rsplit("/get-report", 1)[0]
+else:
+    FASTAPI_BASE_URL = raw_api_url
+    REPORT_URL = raw_api_url + "/get-report"
+
+# ----------------------
+# Metrics (SAME AS REGION COPILOT)
+# ----------------------
+metric_map = {
+    "count_in": "footfall",
+    "turnover": "turnover",
+    "transactions": "transactions",
+    "conversion_rate": "conversion_rate",
+    "sales_per_visitor": "sales_per_visitor",
+    "avg_basket_size": "avg_basket_size",
+    "sales_per_sqm": "sales_per_sqm",
+    "sales_per_transaction": "sales_per_transaction",
+}
 
 
 # ======================
@@ -257,10 +287,10 @@ def donut_progress(progress_pct: float):
     p = 0.0 if pd.isna(progress_pct) else float(progress_pct)
     p = max(0.0, min(120.0, p))
 
-    df = pd.DataFrame({"label": ["Progress", "Remaining"], "value": [p, max(0.0, 100.0 - p)]})
+    dfp = pd.DataFrame({"label": ["Progress", "Remaining"], "value": [p, max(0.0, 100.0 - p)]})
 
     c = (
-        alt.Chart(df)
+        alt.Chart(dfp)
         .mark_arc(innerRadius=55, outerRadius=75)
         .encode(
             theta="value:Q",
@@ -282,14 +312,92 @@ def donut_progress(progress_pct: float):
 
 
 # ======================
-# API Config
+# FastAPI helper: locations (best effort)
 # ======================
-API_URL = st.secrets.get("API_URL", os.getenv("API_URL", "")).strip()
-if not API_URL:
-    st.error("Missing API_URL (set in Streamlit secrets or env).")
-    st.stop()
+@st.cache_data(show_spinner=False, ttl=3600)
+def fetch_locations(company_id: int):
+    """
+    Best effort: tries FastAPI /company/{company}/location (same as Region Copilot usage).
+    Returns dataframe with at least: id, store_display, store_type (if available).
+    """
+    url = f"{FASTAPI_BASE_URL}/company/{company_id}/location"
+    try:
+        r = requests.get(url, timeout=20)
+        r.raise_for_status()
+        js = r.json()
+        df = pd.DataFrame(js)
 
-cfg = VemcountApiConfig(api_url=API_URL)
+        # normalize likely fields
+        if "id" not in df.columns:
+            for cand in ["shop_id", "location_id", "store_id"]:
+                if cand in df.columns:
+                    df = df.rename(columns={cand: "id"})
+                    break
+
+        if "store_display" not in df.columns:
+            for cand in ["name", "store_name", "location_name", "display_name"]:
+                if cand in df.columns:
+                    df["store_display"] = df[cand].astype(str)
+                    break
+        if "store_display" not in df.columns:
+            df["store_display"] = df["id"].astype(str)
+
+        if "store_type" not in df.columns:
+            df["store_type"] = "Unknown"
+
+        df["id"] = pd.to_numeric(df["id"], errors="coerce")
+        df = df.dropna(subset=["id"]).copy()
+        df["id"] = df["id"].astype(int)
+
+        return df[["id", "store_display", "store_type"]].drop_duplicates()
+    except Exception:
+        return pd.DataFrame(columns=["id", "store_display", "store_type"])
+
+
+# ======================
+# Data fetch (cached) — SAME PATTERN AS REGION COPILOT
+# ======================
+@st.cache_data(show_spinner=False, ttl=1800)
+def fetch_company_week(report_url: str, company_id: int, date_from: str, date_to: str):
+    cfg = VemcountApiConfig(report_url=report_url)
+    resp = fetch_report(
+        cfg=cfg,
+        shop_ids=None,  # company-wide
+        data_outputs=list(metric_map.keys()),
+        period="date",
+        step="day",
+        source="shops",
+        date_from=date_from,
+        date_to=date_to,
+        company=company_id,
+        timeout=120,
+    )
+    df_norm = normalize_vemcount_response(resp, kpi_keys=metric_map.keys())
+    if df_norm is None or df_norm.empty:
+        return pd.DataFrame()
+
+    return df_norm.rename(columns=metric_map)
+
+
+@st.cache_data(show_spinner=False, ttl=1800)
+def fetch_store_mtd(report_url: str, store_id: int, date_from: str, date_to: str):
+    cfg = VemcountApiConfig(report_url=report_url)
+    resp = fetch_report(
+        cfg=cfg,
+        shop_ids=[int(store_id)],
+        data_outputs=["turnover"],
+        period="date",
+        step="day",
+        source="shops",
+        date_from=date_from,
+        date_to=date_to,
+        timeout=120,
+    )
+    df_norm = normalize_vemcount_response(resp, kpi_keys=["turnover"])
+    if df_norm is None or df_norm.empty:
+        return pd.DataFrame()
+
+    return df_norm
 
 
 # ======================
@@ -300,7 +408,12 @@ if clients_df is None or clients_df.empty:
     st.error("No clients available (helpers_clients.load_clients).")
     st.stop()
 
-client_labels = (clients_df["client_name"].astype(str) + " — " + "company_id " + clients_df["company_id"].astype(str)).tolist()
+client_labels = (
+    clients_df["client_name"].astype(str)
+    + " — "
+    + "company_id "
+    + clients_df["company_id"].astype(str)
+).tolist()
 
 col_left, col_right = st.columns([3.8, 2.2], vertical_alignment="center")
 
@@ -342,7 +455,9 @@ with sel_b:
     week_label = st.selectbox(
         "Week",
         [w[0] for w in weeks],
-        index=[w[0] for w in weeks].index(st.session_state.sm_week_label) if st.session_state.sm_week_label in [w[0] for w in weeks] else 0,
+        index=[w[0] for w in weeks].index(st.session_state.sm_week_label)
+        if st.session_state.sm_week_label in [w[0] for w in weeks]
+        else 0,
         key="sm_week_select",
         label_visibility="collapsed",
     )
@@ -365,54 +480,16 @@ with sel_c:
 
 with sel_a:
     st.markdown('<div class="panel"><div class="panel-title">Store</div>', unsafe_allow_html=True)
-    st.markdown("<div class='hint'>Click <b>Run analysis</b> first to load stores for the selected week.</div>", unsafe_allow_html=True)
+    st.markdown("<div class='hint'>Click <b>Run analysis</b> to load stores.</div>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
 
 # ======================
-# Data fetch (cached)
+# Run
 # ======================
-@st.cache_data(show_spinner=False, ttl=1800)
-def fetch_company_week(company_id: int, date_from: str, date_to: str):
-    params = build_report_params(
-        data_output=["count_in", "turnover", "transactions"],
-        source="shops",
-        period="date",
-        period_step="day",
-        date_from=date_from,
-        date_to=date_to,
-        company=company_id,
-    )
-    js = fetch_report(cfg, params=params)
-    return normalize_vemcount_response(js)
-
-
-@st.cache_data(show_spinner=False, ttl=1800)
-def fetch_store_mtd(store_id: int, date_from: str, date_to: str):
-    params = build_report_params(
-        data=[int(store_id)],
-        data_output=["turnover"],
-        source="shops",
-        period="date",
-        period_step="day",
-        date_from=date_from,
-        date_to=date_to,
-    )
-    js = fetch_report(cfg, params=params)
-    return normalize_vemcount_response(js)
-
-
-if "sm_should_fetch" not in st.session_state:
-    st.session_state.sm_should_fetch = False
-
 if run:
-    st.session_state.sm_should_fetch = True
-
-if st.session_state.sm_should_fetch:
-    st.session_state.sm_should_fetch = False
-
     with st.spinner("Fetching week data..."):
-        df_company_week = fetch_company_week(company_id, wk_start.isoformat(), wk_end.isoformat())
+        df_company_week = fetch_company_week(REPORT_URL, company_id, wk_start.isoformat(), wk_end.isoformat())
 
     if df_company_week is None or df_company_week.empty:
         st.error("No data returned for this week/company.")
@@ -420,46 +497,51 @@ if st.session_state.sm_should_fetch:
 
     df = df_company_week.copy()
 
-    # Normalize expected columns
-    rename_map = {
-        "count_in": "footfall",
-        "turnover": "turnover",
-        "transactions": "transactions",
-        "shop_id": "id",
-        "store_id": "id",
-    }
-    for k, v in rename_map.items():
-        if k in df.columns and v not in df.columns:
-            df = df.rename(columns={k: v})
+    # Resolve store id column
+    store_key_col = None
+    for cand in ["shop_id", "id", "location_id", "store_id"]:
+        if cand in df.columns:
+            store_key_col = cand
+            break
+    if store_key_col is None:
+        st.error("No store id column found in response.")
+        st.stop()
 
-    if "id" not in df.columns:
-        id_candidates = [c for c in df.columns if c.lower() in ["id", "shop", "shop_id", "store_id"]]
-        if id_candidates:
-            df = df.rename(columns={id_candidates[0]: "id"})
+    df[store_key_col] = pd.to_numeric(df[store_key_col], errors="coerce")
+    df = df.dropna(subset=[store_key_col]).copy()
+    df[store_key_col] = df[store_key_col].astype(int)
+    if store_key_col != "id":
+        df = df.rename(columns={store_key_col: "id"})
+        store_key_col = "id"
 
-    df["id"] = pd.to_numeric(df["id"], errors="coerce")
-    df = df.dropna(subset=["id"]).copy()
-    df["id"] = df["id"].astype(int)
+    # Attach store meta (best effort from FastAPI)
+    loc = fetch_locations(company_id)
+    if loc is not None and not loc.empty:
+        df = df.merge(loc, on="id", how="left")
+    else:
+        df["store_display"] = df["id"].astype(str)
+        df["store_type"] = "Unknown"
 
-    # Best-effort meta
-    df["store_display"] = df.get("store_display", df["id"].astype(str))
-    df["store_type"] = df.get("store_type", "Unknown")
+    df["store_display"] = df["store_display"].fillna(df["id"].astype(str))
+    df["store_type"] = df["store_type"].fillna("Unknown")
 
-    # Store list (from data)
-    stores = df[["id", "store_display", "store_type"]].drop_duplicates().sort_values("id").copy()
+    stores = df[["id", "store_display", "store_type"]].drop_duplicates().sort_values("store_display").copy()
     stores["label"] = stores["store_display"].astype(str) + " · " + stores["id"].astype(str)
 
     if st.session_state.sm_store_id is None or st.session_state.sm_store_id not in stores["id"].tolist():
         st.session_state.sm_store_id = int(stores["id"].iloc[0])
 
-    # Re-render selection row with store dropdown filled
+    # Selection row (filled)
     sel_a, sel_b, sel_c = st.columns([2.2, 2.2, 1.6], vertical_alignment="top")
+
     with sel_a:
         st.markdown('<div class="panel"><div class="panel-title">Store</div>', unsafe_allow_html=True)
         chosen_label = st.selectbox(
             "Store",
             stores["label"].tolist(),
-            index=int(np.where(stores["id"].values == st.session_state.sm_store_id)[0][0]) if st.session_state.sm_store_id in stores["id"].values else 0,
+            index=int(np.where(stores["id"].values == st.session_state.sm_store_id)[0][0])
+            if st.session_state.sm_store_id in stores["id"].values
+            else 0,
             key="sm_store_select",
             label_visibility="collapsed",
         )
@@ -478,37 +560,53 @@ if st.session_state.sm_should_fetch:
     store_name = str(store_row["store_display"])
     store_type = str(store_row["store_type"] or "Unknown")
 
-    # Weekly aggregation
+    # Weekly aggregation (company-wide)
     agg = df.groupby(["id", "store_display", "store_type"], as_index=False).agg(
         footfall=("footfall", "sum"),
         turnover=("turnover", "sum"),
         transactions=("transactions", "sum"),
+        conversion_rate=("conversion_rate", "mean"),
+        sales_per_visitor=("sales_per_visitor", "mean"),
+        avg_basket_size=("avg_basket_size", "mean"),
+        sales_per_sqm=("sales_per_sqm", "mean"),
+        sales_per_transaction=("sales_per_transaction", "mean"),
     )
-    agg["conversion_rate"] = np.where(agg["footfall"] > 0, agg["transactions"] / agg["footfall"] * 100.0, np.nan)
-    agg["sales_per_visitor"] = np.where(agg["footfall"] > 0, agg["turnover"] / agg["footfall"], np.nan)
-    agg["sales_per_transaction"] = np.where(agg["transactions"] > 0, agg["turnover"] / agg["transactions"], np.nan)
 
+    # Robust fallbacks (if API doesn't deliver some)
+    agg["footfall"] = pd.to_numeric(agg["footfall"], errors="coerce")
+    agg["turnover"] = pd.to_numeric(agg["turnover"], errors="coerce")
+    agg["transactions"] = pd.to_numeric(agg["transactions"], errors="coerce")
+
+    # recompute CR/SPV/ATV if needed
+    if "conversion_rate" not in agg.columns or agg["conversion_rate"].isna().all():
+        agg["conversion_rate"] = np.where(agg["footfall"] > 0, agg["transactions"] / agg["footfall"] * 100.0, np.nan)
+    if "sales_per_visitor" not in agg.columns or agg["sales_per_visitor"].isna().all():
+        agg["sales_per_visitor"] = np.where(agg["footfall"] > 0, agg["turnover"] / agg["footfall"], np.nan)
+    if "sales_per_transaction" not in agg.columns or agg["sales_per_transaction"].isna().all():
+        agg["sales_per_transaction"] = np.where(agg["transactions"] > 0, agg["turnover"] / agg["transactions"], np.nan)
+
+    # Store totals (weekly)
     s_df = agg[agg["id"] == chosen_id].copy()
     foot_s = float(pd.to_numeric(s_df["footfall"], errors="coerce").fillna(0).sum())
     turn_s = float(pd.to_numeric(s_df["turnover"], errors="coerce").fillna(0).sum())
     trans_s = float(pd.to_numeric(s_df["transactions"], errors="coerce").fillna(0).sum())
 
-    # Company same-type benchmark (week)
     same_type = store_type if store_type else "Unknown"
     com_type = agg[agg["store_type"] == same_type].copy()
 
+    # Company same-type benchmark (week) — weighted via sums where possible
     com_bench = {
-        "sales_per_visitor": com_type["turnover"].sum() / com_type["footfall"].sum() if com_type["footfall"].sum() > 0 else np.nan,
-        "conversion_rate": (com_type["transactions"].sum() / com_type["footfall"].sum() * 100.0) if com_type["footfall"].sum() > 0 else np.nan,
-        "sales_per_transaction": (com_type["turnover"].sum() / com_type["transactions"].sum()) if com_type["transactions"].sum() > 0 else np.nan,
+        "sales_per_visitor": safe_div(com_type["turnover"].sum(), com_type["footfall"].sum()),
+        "conversion_rate": safe_div(com_type["transactions"].sum(), com_type["footfall"].sum()) * 100.0,
+        "sales_per_transaction": safe_div(com_type["turnover"].sum(), com_type["transactions"].sum()),
         "sales_per_sqm": np.nan,
         "capture_rate": np.nan,
     }
 
-    # Region benchmark placeholder (until you wire region mapping)
-    reg_bench = com_bench.copy()
+    # For MVP: benchmark = company same-type
+    bench = com_bench.copy()
 
-    # Store values and SVI
+    # Store values + SVI
     store_vals = compute_driver_values_from_period(foot_s, turn_s, trans_s, sqm_sum=np.nan, capture_pct=np.nan)
     weights = get_svi_weights_for_store_type(same_type)
 
@@ -517,7 +615,7 @@ if st.session_state.sm_should_fetch:
 
     store_svi, store_avg_ratio, store_bd = compute_svi_explainable(
         vals_a=store_vals,
-        vals_b=reg_bench,
+        vals_b=bench,
         floor=lever_floor,
         cap=lever_cap,
         weights=weights,
@@ -545,7 +643,7 @@ if st.session_state.sm_should_fetch:
         spv_s = safe_div(turn_s, foot_s) if foot_s > 0 else np.nan
         kpi_card("SPV", fmt_eur(spv_s), "Revenue / Visitor")
     with k5:
-        kpi_card("Store SVI", "-" if pd.isna(store_svi) else f"{store_svi:.0f} / 100", "vs same-type benchmark")
+        kpi_card("Store SVI", "-" if pd.isna(store_svi) else f"{store_svi:.0f} / 100", "vs company same-type")
 
     st.markdown(
         f"<div class='muted'>Status: <span style='font-weight:900;color:{status_color}'>{status_txt}</span> · "
@@ -589,7 +687,7 @@ if st.session_state.sm_should_fetch:
 
     with col_b:
         st.markdown('<div class="panel"><div class="panel-title">Focus actions (this week)</div>', unsafe_allow_html=True)
-        actions = make_actions(store_vals, reg_bench, weights)
+        actions = make_actions(store_vals, bench, weights)
         if not actions:
             st.info("Not enough data to generate actions.")
         else:
@@ -613,10 +711,11 @@ if st.session_state.sm_should_fetch:
         st.markdown('<div class="panel"><div class="panel-title">Month-to-date progress (demo)</div>', unsafe_allow_html=True)
 
         month_start = date(wk_start.year, wk_start.month, 1)
-        mtd_df = fetch_store_mtd(chosen_id, month_start.isoformat(), wk_end.isoformat())
+        mtd_df = fetch_store_mtd(REPORT_URL, chosen_id, month_start.isoformat(), wk_end.isoformat())
 
         mtd = 0.0
         if mtd_df is not None and not mtd_df.empty:
+            # turnover could be nested; normalize already tries to flatten
             if "turnover" in mtd_df.columns:
                 mtd = float(pd.to_numeric(mtd_df["turnover"], errors="coerce").fillna(0).sum())
             elif "data" in mtd_df.columns:
@@ -633,12 +732,9 @@ if st.session_state.sm_should_fetch:
         st.markdown("</div>", unsafe_allow_html=True)
 
     # ======================
-    # Weekly leaderboard
+    # Weekly leaderboard (company-wide)
     # ======================
     st.markdown("## Weekly leaderboard (company-wide)")
-
-    bench = com_bench.copy()
-    w = weights
 
     def _svi_for_row(r):
         vals = compute_driver_values_from_period(
@@ -648,12 +744,11 @@ if st.session_state.sm_should_fetch:
             sqm_sum=np.nan,
             capture_pct=np.nan,
         )
-        svi, avg_ratio, _ = compute_svi_explainable(vals, bench, floor=lever_floor, cap=lever_cap, weights=w)
+        svi, avg_ratio, _ = compute_svi_explainable(vals, bench, floor=lever_floor, cap=lever_cap, weights=weights)
         return svi, avg_ratio
 
     tmp = agg.copy()
     tmp[["svi", "avg_ratio"]] = tmp.apply(lambda r: pd.Series(_svi_for_row(r)), axis=1)
-
     tmp = tmp.sort_values("svi", ascending=False).copy()
     tmp["Rank"] = np.arange(1, len(tmp) + 1)
 
