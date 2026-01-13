@@ -1021,6 +1021,9 @@ def main():
         cap=float(lever_cap),
         weights=store_weights,
     )
+    # Backwards compat: some older UI blocks still refer to store_bd
+    store_bd = store_bd_reg
+
     store_svi_com, store_avg_ratio_com, _ = compute_svi_explainable(
         vals_a=store_vals,
         vals_b=com_bench_vals,
@@ -1120,7 +1123,7 @@ def main():
                     y=alt.Y("driver_label:N", sort=order, title=None, axis=alt.Axis(labelLimit=220)),
                     x=alt.X("ratio_clip:Q", title="Index (100 = benchmark)", scale=alt.Scale(domain=[60, 140])),
                     color=alt.condition(
-                        alt.datum.ratio_pct >= 100,
+                        alt.datum["ratio_pct"] >= 100,
                         alt.value(PFM_PURPLE),
                         alt.value(PFM_RED)
                     ),
