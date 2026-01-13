@@ -95,11 +95,12 @@ def safe_div(a, b):
 def norm_key(x: str) -> str:
     return str(x).strip().lower() if x is not None else ""
 
-def fmt_delta_pct(x):
+def fmt_delta_html(x):
     if pd.isna(x):
-        return "vs region type: -"
+        return f"<span style='color:{PFM_GRAY};font-weight:800;'>vs region type: -</span>"
+    color = PFM_PURPLE if x >= 0 else PFM_RED
     sign = "+" if x >= 0 else ""
-    return f"vs region type: {sign}{x:.0f}%".replace(".", ",")
+    return f"<span style='color:{color};font-weight:900;'>vs region type: {sign}{x:.0f}%</span>"
 
 def pct_change(a, b):
     # (a/b - 1) * 100
@@ -963,8 +964,13 @@ def main():
     reg_bench_vals = bench_from_df(same_type_region)
     com_bench_vals = bench_from_df(same_type_company)
 
-    # KPI benchmark dict (voor KPI-card delta’s)
     def kpi_bench_from_df(df_in: pd.DataFrame) -> dict:
+        """
+        KPI benchmark used for KPI-card deltas.
+        IMPORTANT: This must represent the 'typical store' in the cohort,
+        so we use PER-STORE averages (not totals).
+        df_in here is already at store-grain (agg), one row per store.
+        """
         if df_in is None or df_in.empty:
             return {
                 "footfall": np.nan,
@@ -975,28 +981,41 @@ def main():
                 "sales_per_transaction": np.nan,
                 "sales_per_sqm": np.nan,
             }
-
-        ff = float(pd.to_numeric(df_in["footfall"], errors="coerce").dropna().sum())
-        to = float(pd.to_numeric(df_in["turnover"], errors="coerce").dropna().sum())
-        tr = float(pd.to_numeric(df_in["transactions"], errors="coerce").dropna().sum())
-
-        # sales/m² benchmark: total turnover / total sqm (agg is per store → sqm_effective optellen is ok)
-        sqm = pd.to_numeric(df_in["sqm_effective"], errors="coerce")
-        sqm_sum = float(sqm.dropna().sum()) if sqm.notna().any() else np.nan
-
-        cr = (tr / ff * 100.0) if ff > 0 else np.nan
-        spv = (to / ff) if ff > 0 else np.nan
-        atv = (to / tr) if tr > 0 else np.nan
-        spm2 = (to / sqm_sum) if (pd.notna(sqm_sum) and sqm_sum > 0) else np.nan
-
+    
+        tmp = df_in.copy()
+    
+        # ensure numeric
+        for c in ["footfall", "turnover", "transactions", "conversion_rate",
+                  "sales_per_visitor", "sales_per_transaction", "sales_per_sqm", "sqm_effective"]:
+            if c in tmp.columns:
+                tmp[c] = pd.to_numeric(tmp[c], errors="coerce")
+    
+        # if derived metrics are missing (shouldn't be), recompute per-store
+        if "conversion_rate" not in tmp.columns:
+            tmp["conversion_rate"] = np.where(tmp["footfall"] > 0, tmp["transactions"] / tmp["footfall"] * 100.0, np.nan)
+    
+        if "sales_per_visitor" not in tmp.columns:
+            tmp["sales_per_visitor"] = np.where(tmp["footfall"] > 0, tmp["turnover"] / tmp["footfall"], np.nan)
+    
+        if "sales_per_transaction" not in tmp.columns:
+            tmp["sales_per_transaction"] = np.where(tmp["transactions"] > 0, tmp["turnover"] / tmp["transactions"], np.nan)
+    
+        if "sales_per_sqm" not in tmp.columns:
+            tmp["sales_per_sqm"] = np.where(
+                (tmp["sqm_effective"] > 0) & tmp["sqm_effective"].notna(),
+                tmp["turnover"] / tmp["sqm_effective"],
+                np.nan
+            )
+    
+        # PER-STORE averages = "benchmark store"
         return {
-            "footfall": ff,
-            "turnover": to,
-            "transactions": tr,
-            "conversion_rate": cr,
-            "sales_per_visitor": spv,
-            "sales_per_transaction": atv,
-            "sales_per_sqm": spm2,
+            "footfall": float(tmp["footfall"].mean(skipna=True)) if "footfall" in tmp.columns else np.nan,
+            "turnover": float(tmp["turnover"].mean(skipna=True)) if "turnover" in tmp.columns else np.nan,
+            "transactions": float(tmp["transactions"].mean(skipna=True)) if "transactions" in tmp.columns else np.nan,
+            "conversion_rate": float(tmp["conversion_rate"].mean(skipna=True)) if "conversion_rate" in tmp.columns else np.nan,
+            "sales_per_visitor": float(tmp["sales_per_visitor"].mean(skipna=True)) if "sales_per_visitor" in tmp.columns else np.nan,
+            "sales_per_transaction": float(tmp["sales_per_transaction"].mean(skipna=True)) if "sales_per_transaction" in tmp.columns else np.nan,
+            "sales_per_sqm": float(tmp["sales_per_sqm"].mean(skipna=True)) if "sales_per_sqm" in tmp.columns else np.nan,
         }
 
     reg_bench = kpi_bench_from_df(same_type_region)   # <-- dit miste je
@@ -1059,15 +1078,15 @@ def main():
     k1, k2, k3, k4, k5, k6 = st.columns([1, 1, 1, 1, 1, 1])
 
     with k1:
-        kpi_card("Footfall", fmt_int(foot_s), f"Week {wk_num} · 2024 · {fmt_delta_pct(d_ff)}")
+        kpi_card("Footfall", fmt_int(foot_s), f"Week {wk_num} · 2024 · {fmt_delta_html(d_ff)}")
     with k2:
-        kpi_card("Revenue", fmt_eur(turn_s), f"Week {wk_num} · 2024 · {fmt_delta_pct(d_rev)}")
+        kpi_card("Revenue", fmt_eur(turn_s), f"Week {wk_num} · 2024 · {fmt_delta_html(d_rev)}")
     with k3:
-        kpi_card("Conversion", fmt_pct(conv_s), f"Transactions / Visitors · {fmt_delta_pct(d_cr)}")
+        kpi_card("Conversion", fmt_pct(conv_s), f"Transactions / Visitors · {fmt_delta_html(d_cr)}")
     with k4:
-        kpi_card("SPV", fmt_eur(spv_s), f"Revenue / Visitor · {fmt_delta_pct(d_spv)}")
+        kpi_card("SPV", fmt_eur(spv_s), f"Revenue / Visitor · {fmt_delta_html(d_spv)}")
     with k5:
-        kpi_card("ATV", fmt_eur(atv_s), f"Revenue / Transaction · {fmt_delta_pct(d_atv)}")
+        kpi_card("ATV", fmt_eur(atv_s), f"Revenue / Transaction · {fmt_delta_html(d_atv)}")
     with k6:
         kpi_card("Store SVI", "-" if pd.isna(store_svi_reg) else f"{store_svi_reg:.0f} / 100", "vs region same-type")
 
@@ -1116,37 +1135,67 @@ def main():
         else:
             order = ["SPV", "Sales / m²", "Capture", "Conversion", "ATV"]
 
-            bars = (
-                alt.Chart(bd)
-                .mark_bar(cornerRadiusEnd=4)
-                .encode(
-                    y=alt.Y("driver_label:N", sort=order, title=None, axis=alt.Axis(labelLimit=220)),
-                    x=alt.X("ratio_clip:Q", title="Index (100 = benchmark)", scale=alt.Scale(domain=[60, 140])),
-                    color=alt.condition(
-                        alt.datum["ratio_pct"] >= 100,
-                        alt.value(PFM_PURPLE),
-                        alt.value(PFM_RED)
-                    ),
-                    tooltip=[
-                        alt.Tooltip("driver_label:N", title="Driver"),
-                        alt.Tooltip("ratio_pct:Q", title="Index", format=".0f"),
-                        alt.Tooltip("weight:Q", title="Weight", format=".2f"),
-                    ],
-                )
-                .properties(height=210)
+        order = ["SPV", "Sales / m²", "Capture", "Conversion", "ATV"]
+        
+        bars = (
+            alt.Chart(bd)
+            .mark_bar(cornerRadiusEnd=4)
+            .encode(
+                y=alt.Y(
+                    "driver_label:N",
+                    sort=order,
+                    title=None,
+                    axis=alt.Axis(labelLimit=260, labelPadding=10)
+                ),
+                x=alt.X(
+                    "ratio_clip:Q",
+                    title="Index (100 = benchmark)",
+                    scale=alt.Scale(domain=[60, 140]),
+                    axis=alt.Axis(tickCount=5, grid=True)
+                ),
+                color=alt.condition(
+                    alt.datum["ratio_pct"] >= 100,
+                    alt.value(PFM_PURPLE),
+                    alt.value(PFM_RED)
+                ),
+                tooltip=[
+                    alt.Tooltip("driver_label:N", title="Driver"),
+                    alt.Tooltip("ratio_pct:Q", title="Index", format=".0f"),
+                    alt.Tooltip("weight:Q", title="Weight", format=".2f"),
+                ],
             )
-
-            text = (
-                alt.Chart(bd)
-                .mark_text(align="left", dx=6, fontWeight=800)
-                .encode(
-                    y=alt.Y("driver_label:N", sort=order),
-                    x=alt.X("ratio_clip:Q"),
-                    text=alt.Text("ratio_pct:Q", format=".0f"),
-                )
+            .properties(height=220)
+        )
+        
+        # Benchmark line at 100
+        bench_line = (
+            alt.Chart(pd.DataFrame({"x": [100]}))
+            .mark_rule(strokeDash=[4, 4], strokeWidth=2, color=PFM_GRAY)
+            .encode(x="x:Q")
+        )
+        
+        bench_text = (
+            alt.Chart(pd.DataFrame({"x": [100], "y": [order[0]], "t": ["Benchmark"]}))
+            .mark_text(align="left", dx=6, dy=-8, fontWeight=700, color=PFM_GRAY)
+            .encode(x="x:Q", y=alt.value(0), text="t:N")
+        )
+        
+        text = (
+            alt.Chart(bd)
+            .mark_text(align="left", dx=6, fontWeight=800, color=PFM_DARK)
+            .encode(
+                y=alt.Y("driver_label:N", sort=order),
+                x=alt.X("ratio_clip:Q"),
+                text=alt.Text("ratio_pct:Q", format=".0f"),
             )
-
-            st.altair_chart((bars + text).configure_view(strokeWidth=0), use_container_width=True)
+        )
+        
+        st.altair_chart(
+            (bars + bench_line + text)
+            .configure_view(strokeWidth=0)
+            .configure_axis(labelFontSize=12, titleFontSize=12),
+            use_container_width=True
+        )
 
         st.markdown("</div>", unsafe_allow_html=True)
 
