@@ -2207,14 +2207,14 @@ def main():
         "CR idx": idx_vs(store_cr, reg_cr),
         "Sales/m² idx": idx_vs(store_spm2, reg_spm2),
         "ATV idx": idx_vs(store_atv, reg_atv),
-        "Capture idx": idx_vs(store_cap, reg_cap),
+        "Capture idx": np.nan if pd.isna(store_cap) or pd.isna(reg_cap) else idx_vs(store_cap, reg_cap),
     }
     row_vs_company = {
         "SPV idx": idx_vs(store_spv, com_spv),
         "CR idx": idx_vs(store_cr, com_cr),
         "Sales/m² idx": idx_vs(store_spm2, com_spm2),
         "ATV idx": idx_vs(store_atv, com_atv),
-        "Capture idx": idx_vs(store_cap, com_cap),
+        "Capture idx": np.nan if pd.isna(store_cap) or pd.isna(reg_cap) else idx_vs(store_cap, reg_cap),
     }
     
     df_vs_region = pd.DataFrame([row_vs_region])
