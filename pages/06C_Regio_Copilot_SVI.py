@@ -33,7 +33,7 @@ from stylesheet import inject_css
 # Page config
 # ----------------------
 st.set_page_config(
-    page_title="PFM Region Copilot v2",
+    page_title="PFM Region Manager Tool v2",
     layout="wide"
 )
 
