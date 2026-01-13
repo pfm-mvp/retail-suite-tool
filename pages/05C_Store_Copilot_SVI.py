@@ -1137,56 +1137,51 @@ def main():
 
         order = ["SPV", "Sales / m²", "Capture", "Conversion", "ATV"]
         
+        y_axis = alt.Axis(
+            title=None,
+            labelLimit=500,        # prevent truncation
+            labelPadding=12,       # breathing room
+            labelFontSize=12,
+            labelColor=PFM_GRAY,
+            ticks=False,
+            domain=False
+        )
+        
+        x_axis = alt.Axis(
+            title=""Index (100 = benchmark)"",
+            labelColor=PFM_GRAY,
+            titleColor=PFM_GRAY,
+            tickColor=PFM_LINE,
+            gridColor=PFM_LINE
+        )
+        
         bars = (
             alt.Chart(bd)
             .mark_bar(cornerRadiusEnd=4)
             .encode(
-                y=alt.Y(
-                    "driver_label:N",
-                    sort=order,
-                    title=None,
-                    axis=alt.Axis(labelLimit=260, labelPadding=10)
-                ),
-                x=alt.X(
-                    "ratio_clip:Q",
-                    title="Index (100 = benchmark)",
-                    scale=alt.Scale(domain=[60, 140]),
-                    axis=alt.Axis(tickCount=5, grid=True)
-                ),
+                y=alt.Y(""driver_label:N"", sort=order, axis=y_axis),
+                x=alt.X(""ratio_clip:Q"", axis=x_axis, scale=alt.Scale(domain=[60, 140])),
                 color=alt.condition(
-                    alt.datum["ratio_pct"] >= 100,
+                    alt.datum[""ratio_pct""] >= 100,
                     alt.value(PFM_PURPLE),
                     alt.value(PFM_RED)
                 ),
                 tooltip=[
-                    alt.Tooltip("driver_label:N", title="Driver"),
-                    alt.Tooltip("ratio_pct:Q", title="Index", format=".0f"),
-                    alt.Tooltip("weight:Q", title="Weight", format=".2f"),
+                    alt.Tooltip(""driver_label:N"", title=""Driver""),
+                    alt.Tooltip(""ratio_pct:Q"", title=""Index"", format="".0f""),
+                    alt.Tooltip(""weight:Q"", title=""Weight"", format="".2f""),
                 ],
             )
-            .properties(height=220)
-        )
-        
-        # Benchmark line at 100
-        bench_line = (
-            alt.Chart(pd.DataFrame({"x": [100]}))
-            .mark_rule(strokeDash=[4, 4], strokeWidth=2, color=PFM_GRAY)
-            .encode(x="x:Q")
-        )
-        
-        bench_text = (
-            alt.Chart(pd.DataFrame({"x": [100], "y": [order[0]], "t": ["Benchmark"]}))
-            .mark_text(align="left", dx=6, dy=-8, fontWeight=700, color=PFM_GRAY)
-            .encode(x="x:Q", y=alt.value(0), text="t:N")
+            .properties(height=210, padding={""left"": 90, ""right"": 12, ""top"": 6, ""bottom"": 6})
         )
         
         text = (
             alt.Chart(bd)
-            .mark_text(align="left", dx=6, fontWeight=800, color=PFM_DARK)
+            .mark_text(align=""left"", dx=6, fontWeight=800, color=PFM_DARK)
             .encode(
-                y=alt.Y("driver_label:N", sort=order),
-                x=alt.X("ratio_clip:Q"),
-                text=alt.Text("ratio_pct:Q", format=".0f"),
+                y=alt.Y(""driver_label:N"", sort=order),
+                x=alt.X(""ratio_clip:Q""),
+                text=alt.Text(""ratio_pct:Q"", format="".0f""),
             )
         )
         
