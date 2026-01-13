@@ -1135,17 +1135,17 @@ def main():
             st.info("No driver breakdown available.")
         else:
             order = ["SPV", "Sales / m²", "Capture", "Conversion", "ATV"]
-    
+            
             y_axis = alt.Axis(
                 title=None,
-                labelLimit=500,
-                labelPadding=12,
+                labelLimit=1000,      # geen truncation
+                labelPadding=14,      # ruimte tussen labels en bars
                 labelFontSize=12,
                 labelColor=PFM_GRAY,
                 ticks=False,
                 domain=False,
             )
-    
+            
             x_axis = alt.Axis(
                 title="Index (100 = benchmark)",
                 labelColor=PFM_GRAY,
@@ -1153,21 +1153,17 @@ def main():
                 tickColor=PFM_LINE,
                 gridColor=PFM_LINE,
             )
-    
+            
             bars = (
                 alt.Chart(bd)
                 .mark_bar(cornerRadiusEnd=4)
                 .encode(
                     y=alt.Y("driver_label:N", sort=order, axis=y_axis),
-                    x=alt.X(
-                        "ratio_clip:Q",
-                        axis=x_axis,
-                        scale=alt.Scale(domain=[60, 140])
-                    ),
+                    x=alt.X("ratio_clip:Q", axis=x_axis, scale=alt.Scale(domain=[60, 140])),
                     color=alt.condition(
                         alt.datum.ratio_pct >= 100,
                         alt.value(PFM_PURPLE),
-                        alt.value(PFM_LINE),
+                        alt.value(PFM_LINE),   # grijs voor <100, zoals je voorbeeld
                     ),
                     tooltip=[
                         alt.Tooltip("driver_label:N", title="Driver"),
@@ -1177,28 +1173,23 @@ def main():
                 )
                 .properties(height=210)
             )
-    
+            
             text = (
                 alt.Chart(bd)
-                .mark_text(
-                    align="left",
-                    dx=6,
-                    fontWeight=800,
-                    color=PFM_DARK
-                )
+                .mark_text(align="left", dx=6, fontWeight=800, color=PFM_DARK)
                 .encode(
                     y=alt.Y("driver_label:N", sort=order),
                     x=alt.X("ratio_clip:Q"),
                     text=alt.Text("ratio_pct:Q", format=".0f"),
                 )
             )
-    
+            
             chart = (
-                bars + text
-            ).configure_view(strokeWidth=0).properties(
-                padding={"left": 90, "right": 12, "top": 6, "bottom": 6}
+                (bars + text)
+                .configure_view(strokeWidth=0)
+                .configure_axis(grid=True, gridColor=PFM_LINE, tickColor=PFM_LINE, domain=False)
             )
-    
+            
             st.altair_chart(chart, use_container_width=True)
     
         st.markdown("</div>", unsafe_allow_html=True)
