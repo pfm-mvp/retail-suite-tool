@@ -14,7 +14,7 @@ import requests
 import streamlit as st
 import altair as alt
 
-from svi_service import (
+from services.svi_service import (
     SVI_DRIVERS,
     BASE_SVI_WEIGHTS,
     SIZE_CAL_KEYS,
