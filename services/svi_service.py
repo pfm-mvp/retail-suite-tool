@@ -17,19 +17,6 @@ def _normalize(series: pd.Series) -> pd.Series:
         return pd.Series([50] * len(s), index=s.index)
     return ((s - min_v) / (max_v - min_v) * 100).clip(0, 100)
 
-def sqm_calibration_factor(store_sqm: float, benchmark_sqm_series: pd.Series) -> float:
-    """
-    Calibrate benchmark based on relative store size.
-    Returns factor ~1.0 for median-sized stores.
-    """
-    if pd.isna(store_sqm) or benchmark_sqm_series.dropna().empty:
-        return 1.0
-
-    median_sqm = benchmark_sqm_series.median()
-    if median_sqm <= 0:
-        return 1.0
-
-    return float(store_sqm / median_sqm)
 
 def build_store_vitality(
     df_period: pd.DataFrame,
@@ -271,3 +258,178 @@ def build_store_vitality(
     agg["profit_potential_period"] = potentials
 
     return agg
+
+
+# ============================================================
+# Centralized SVI utilities (single source of truth)
+# Used by Region Copilot + Store Copilot pages
+# ============================================================
+
+import numpy as np
+import pandas as pd
+
+SVI_DRIVERS = [
+    ("sales_per_visitor", "SPV (€/visitor)"),
+    ("sales_per_sqm", "Sales / m² (€)"),
+    ("capture_rate", "Capture (location-driven) (%)"),
+    ("conversion_rate", "Conversion (%)"),
+    ("sales_per_transaction", "ATV (€)"),
+]
+
+BASE_SVI_WEIGHTS = {
+    "sales_per_visitor": 1.0,
+    "sales_per_sqm": 1.0,
+    "conversion_rate": 1.0,
+    "sales_per_transaction": 0.8,
+    "capture_rate": 0.4,
+}
+
+# Metrics that can be systematically impacted by store size (sqm).
+# We calibrate the benchmark value for these metrics when sqm_calibrate=True.
+SIZE_CAL_KEYS = {"sales_per_visitor", "conversion_rate", "sales_per_transaction", "capture_rate"}
+
+def safe_div(a, b):
+    try:
+        if pd.isna(a) or pd.isna(b) or float(b) == 0.0:
+            return np.nan
+        return float(a) / float(b)
+    except Exception:
+        return np.nan
+
+def norm_key(x: str) -> str:
+    return str(x).strip().lower() if x is not None else ""
+
+def sqm_calibration_factor(store_sqm: float, benchmark_sqm_series: pd.Series) -> float:
+    """Calibrate benchmark based on relative store size (sqm).
+    Returns ~1.0 for median-sized stores in the benchmark group.
+    """
+    try:
+        if pd.isna(store_sqm) or benchmark_sqm_series is None or benchmark_sqm_series.dropna().empty:
+            return 1.0
+        median_sqm = float(pd.to_numeric(benchmark_sqm_series, errors="coerce").dropna().median())
+        if median_sqm <= 0:
+            return 1.0
+        return float(store_sqm) / median_sqm
+    except Exception:
+        return 1.0
+
+def ratio_to_score_0_100(ratio_pct: float, floor: float, cap: float) -> float:
+    """Map a ratio (in %) to a 0–100 score, clipped to [floor, cap]."""
+    if pd.isna(ratio_pct):
+        return np.nan
+    r = float(np.clip(float(ratio_pct), float(floor), float(cap)))
+    return (r - float(floor)) / (float(cap) - float(floor)) * 100.0
+
+def get_svi_weights_for_store_type(store_type: str) -> dict:
+    """Return driver weights; capture weight changes by store_type."""
+    w = dict(BASE_SVI_WEIGHTS)
+    s = norm_key(store_type)
+
+    if ("high" in s and "street" in s) or ("city" in s) or ("downtown" in s) or ("centre" in s) or ("center" in s and "city" in s):
+        w["capture_rate"] = 0.7
+    elif ("retail" in s and "park" in s) or ("park" in s):
+        w["capture_rate"] = 0.2
+    elif ("shopping" in s and "center" in s) or ("shopping" in s and "centre" in s) or ("mall" in s) or ("center" in s) or ("centre" in s):
+        w["capture_rate"] = 0.4
+    else:
+        w["capture_rate"] = BASE_SVI_WEIGHTS["capture_rate"]
+
+    return w
+
+def get_svi_weights_for_region_mix(store_types_series: pd.Series) -> dict:
+    """Region-level weights as a weighted mix of store-type weights (store-count share)."""
+    if store_types_series is None or store_types_series.dropna().empty:
+        return dict(BASE_SVI_WEIGHTS)
+
+    s = store_types_series.dropna().astype(str).str.strip()
+    s = s[s.str.lower() != "nan"]
+    if s.empty:
+        return dict(BASE_SVI_WEIGHTS)
+
+    shares = s.value_counts(normalize=True).to_dict()
+
+    mix = {k: 0.0 for k in BASE_SVI_WEIGHTS.keys()}
+    for stype, w_share in shares.items():
+        w = get_svi_weights_for_store_type(stype)
+        for k in mix.keys():
+            mix[k] += float(w.get(k, 0.0)) * float(w_share)
+
+    return mix
+
+def compute_driver_values_from_period(footfall, turnover, transactions, sqm_sum, capture_pct):
+    """Compute the SVI driver values for a period (aggregated totals)."""
+    spv = safe_div(turnover, footfall)
+    spsqm = safe_div(turnover, sqm_sum)
+    cr = safe_div(transactions, footfall) * 100.0 if (pd.notna(transactions) and pd.notna(footfall) and float(footfall) != 0.0) else np.nan
+    atv = safe_div(turnover, transactions)
+    cap = capture_pct
+    return {
+        "sales_per_visitor": spv,
+        "sales_per_sqm": spsqm,
+        "capture_rate": cap,
+        "conversion_rate": cr,
+        "sales_per_transaction": atv,
+    }
+
+def compute_svi_explainable(
+    vals_a: dict,
+    vals_b: dict,
+    floor: float,
+    cap: float,
+    weights: dict | None = None,
+    *,
+    store_sqm: float | None = None,
+    benchmark_sqm_series: pd.Series | None = None,
+    sqm_calibrate: bool = False,
+):
+    """Explainable SVI:
+    - Computes per-driver ratios (A/B in %)
+    - Clips to [floor, cap] and maps to 0–100
+    - Produces weighted avg ratio and final 0–100 SVI score
+    - Optional: sqm-based benchmark calibration for size-sensitive drivers
+    """
+    if weights is None:
+        weights = {k: float(BASE_SVI_WEIGHTS.get(k, 1.0)) for k, _ in SVI_DRIVERS}
+
+    rows = []
+    for key, label in SVI_DRIVERS:
+        va = vals_a.get(key, np.nan)
+        vb = vals_b.get(key, np.nan)
+
+        # Optional sqm-calibration: adjust benchmark to store size
+        vb_adj = vb
+        if sqm_calibrate and (key in SIZE_CAL_KEYS) and (store_sqm is not None) and (benchmark_sqm_series is not None):
+            f = sqm_calibration_factor(store_sqm, benchmark_sqm_series)
+            if pd.notna(vb_adj):
+                vb_adj = float(vb_adj) * float(f)
+
+        ratio = np.nan
+        if pd.notna(va) and pd.notna(vb_adj) and float(vb_adj) != 0.0:
+            ratio = (float(va) / float(vb_adj)) * 100.0
+
+        score = ratio_to_score_0_100(ratio, floor=float(floor), cap=float(cap))
+        w = float(weights.get(key, 1.0))
+
+        include = pd.notna(ratio) and pd.notna(score)
+        rows.append({
+            "driver_key": key,
+            "driver": label,
+            "value": va,
+            "benchmark": vb_adj,      # store-size calibrated benchmark (if enabled)
+            "benchmark_raw": vb,      # original benchmark
+            "ratio_pct": ratio,
+            "score": score,
+            "weight": w,
+            "include": include,
+        })
+
+    bd = pd.DataFrame(rows)
+    usable = bd[bd["include"]].copy()
+    if usable.empty:
+        return np.nan, np.nan, bd.drop(columns=["include"])
+
+    usable["w"] = usable["weight"].astype(float)
+    wsum = float(usable["w"].sum()) if float(usable["w"].sum()) > 0 else float(len(usable))
+    avg_ratio = float((usable["ratio_pct"] * usable["w"]).sum() / wsum)
+    svi = ratio_to_score_0_100(avg_ratio, floor=float(floor), cap=float(cap))
+    return float(svi), float(avg_ratio), bd.drop(columns=["include"])
