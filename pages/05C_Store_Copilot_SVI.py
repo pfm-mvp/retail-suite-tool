@@ -1206,6 +1206,8 @@ def main():
                 )
                 # laat padding met rust; OF maak 'm expliciet maar NIET 0
                 .configure(padding={"left": 60, "right": 12, "top": 6, "bottom": 24})
+                .configure_axisY(labelFlush=True)
+                .mark_bar(cornerRadiusEnd=6)
             )
             
             st.altair_chart(chart, use_container_width=True)
