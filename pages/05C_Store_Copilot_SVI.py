@@ -20,7 +20,7 @@ from helpers_clients import load_clients
 from helpers_normalize import normalize_vemcount_response
 from helpers_vemcount_api import VemcountApiConfig, fetch_report, build_report_params
 
-from stylesheet import inject_css
+from stylesheet import inject_css, pfm_altair
 
 # ----------------------
 # Page config
@@ -1192,18 +1192,10 @@ def main():
                 )
             )
             
-            chart = (
-                alt.layer(bars, text)
-                .properties(height=210)
-                .configure_view(strokeWidth=0)
-                .configure_axis(
-                    grid=True,
-                    gridColor=PFM_LINE,
-                    tickColor=PFM_LINE,
-                    domain=False,
-                    labelColor=PFM_GRAY,
-                    titleColor=PFM_GRAY,
-                )
+
+            chart = pfm_altair((bars + text), height=210)
+            st.altair_chart(chart, use_container_width=True)
+            
                 # laat padding met rust; OF maak 'm expliciet maar NIET 0
                 .configure(padding={"left": 60, "right": 12, "top": 6, "bottom": 24})
                 .configure_axisY(labelFlush=True)
