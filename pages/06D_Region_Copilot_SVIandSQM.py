@@ -15,7 +15,7 @@ import streamlit as st
 import altair as alt
 import streamlit.components.v1 as components
 
-from svi_service import sqm_calibration_factor
+from services.svi_service import sqm_calibration_factor
 from datetime import datetime
 
 from helpers_clients import load_clients
