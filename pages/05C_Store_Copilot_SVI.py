@@ -1205,7 +1205,7 @@ def main():
                     titleColor=PFM_GRAY,
                 )
                 # laat padding met rust; OF maak 'm expliciet maar NIET 0
-                .configure(padding={"left": 70, "right": 12, "top": 6, "bottom": 28})
+                .configure(padding={"left": 60, "right": 12, "top": 6, "bottom": 24})
             )
             
             st.altair_chart(chart, use_container_width=True)
