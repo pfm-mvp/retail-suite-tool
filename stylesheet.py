@@ -161,10 +161,42 @@ div[data-testid="stSelectbox"] div[role="combobox"] {{
 }}
 """
 
-
 def inject_css(**colors) -> None:
     """
     Injects CSS into the Streamlit app. Call once near the top of each page.
     """
     css = get_css(**colors)
     st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
+
+import altair as alt
+
+def pfm_altair(chart: alt.Chart, *, height: int | None = None) -> alt.Chart:
+    """
+    Standard PFM Altair styling.
+    Apply this on the FINAL chart object (after layering / concatenation).
+    """
+    if height is not None:
+        chart = chart.properties(height=height)
+
+    return (
+        chart
+        .configure_view(strokeWidth=0)
+        # Axis defaults (both)
+        .configure_axis(
+            domain=False,
+            ticks=False,
+            grid=True,
+        )
+        # Y-axis: fix left whitespace & label alignment
+        .configure_axisY(
+            labelFlush=True,
+            labelPadding=8,
+        )
+        # X-axis: keep it readable
+        .configure_axisX(
+            labelPadding=6,
+            titlePadding=10,
+        )
+        # Optional: reduce chart padding inside Vega canvas
+        .configure(padding=0)
+    )
