@@ -1290,7 +1290,7 @@ def main():
     cL, cR = st.columns(2, vertical_alignment="top")
 
     with cL:
-        st.markdown(f"### Region leaderboard — **{store_region}** (SVI vs region same-type)")
+        st.markdown(f"### Region leaderboard — **{store_region}** (SVI vs same-type)")
         st.dataframe(
             show_reg.style
                 .apply(lambda r: _highlight_selected(r, store_name), axis=1)
@@ -1307,7 +1307,7 @@ def main():
         )
 
     with cR:
-        st.markdown(f"### Company leaderboard — **{store_type}** (SVI vs company same-type)")
+        st.markdown(f"### Company leaderboard — **{store_type}** (SVI vs same-type)")
         st.dataframe(
             show_com.style
                 .apply(lambda r: _highlight_selected(r, store_name), axis=1)
