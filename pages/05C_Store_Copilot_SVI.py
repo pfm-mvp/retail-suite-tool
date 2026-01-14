@@ -1183,16 +1183,29 @@ def main():
                 .mark_text(align="left", dx=6, fontWeight=800, color=PFM_DARK)
                 .encode(
                     y=alt.Y("driver_label:N", sort=order),
-                    x=alt.X("ratio_clip:Q"),
+                    x=alt.X(
+                        "ratio_clip:Q",
+                        axis=x_axis,
+                        scale=alt.Scale(domain=[60, 140], clamp=True)
+                    ),
                     text=alt.Text("ratio_pct:Q", format=".0f"),
                 )
             )
             
             chart = (
-                (bars + text)
+                alt.layer(bars, text)
+                .properties(height=210)
                 .configure_view(strokeWidth=0)
-                .configure_axis(grid=True, gridColor=PFM_LINE, tickColor=PFM_LINE, domain=False)
-                .configure(padding=0)  # <-- HARD RESET: kill any leftover padding
+                .configure_axis(
+                    grid=True,
+                    gridColor=PFM_LINE,
+                    tickColor=PFM_LINE,
+                    domain=False,
+                    labelColor=PFM_GRAY,
+                    titleColor=PFM_GRAY,
+                )
+                # laat padding met rust; OF maak 'm expliciet maar NIET 0
+                .configure(padding={"left": 70, "right": 12, "top": 6, "bottom": 28})
             )
             
             st.altair_chart(chart, use_container_width=True)
