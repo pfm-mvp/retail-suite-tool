@@ -1195,13 +1195,6 @@ def main():
 
             chart = pfm_altair((bars + text), height=210)
             st.altair_chart(chart, use_container_width=True)
-            
-                # laat padding met rust; OF maak 'm expliciet maar NIET 0
-                .configure(padding={"left": 60, "right": 12, "top": 6, "bottom": 24})
-                .configure_axisY(labelFlush=True)
-            )
-            
-            st.altair_chart(chart, use_container_width=True)
 
     with col_b:
         st.markdown('<div class="panel"><div class="panel-title">Focus actions (this week)</div>', unsafe_allow_html=True)
