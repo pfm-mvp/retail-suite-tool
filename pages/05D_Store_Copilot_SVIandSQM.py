@@ -1,4 +1,4 @@
-# pages/05D_Store_Copilot_SVIandSQM.py
+# pages/07_Store_Manager_Copilot.py
 # ------------------------------------------------------------
 # PFM Store Manager Copilot (v1) — built ON TOP of Region Copilot patterns
 # - Minimal choices: Client + Store + Week (2024 only)
@@ -14,7 +14,19 @@ import requests
 import streamlit as st
 import altair as alt
 
-from services.svi_service import sqm_calibration_factor
+from svi_service import (
+    SVI_DRIVERS,
+    BASE_SVI_WEIGHTS,
+    SIZE_CAL_KEYS,
+    sqm_calibration_factor,
+    get_svi_weights_for_store_type,
+    get_svi_weights_for_region_mix,
+    compute_driver_values_from_period,
+    compute_svi_explainable,
+    ratio_to_score_0_100,
+)
+
+
 from datetime import date, timedelta
 
 from helpers_clients import load_clients
@@ -279,111 +291,6 @@ def mark_closed_days_as_nan(df: pd.DataFrame) -> pd.DataFrame:
 # ----------------------
 # SVI logic (aligned with Region Copilot)
 # ----------------------
-SVI_DRIVERS = [
-    ("sales_per_visitor", "SPV (€/visitor)"),
-    ("sales_per_sqm", "Sales / m² (€)"),
-    ("capture_rate", "Capture (location-driven) (%)"),
-    ("conversion_rate", "Conversion (%)"),
-    ("sales_per_transaction", "ATV (€)"),
-]
-
-BASE_SVI_WEIGHTS = {
-    "sales_per_visitor": 1.0,
-    "sales_per_sqm": 1.0,
-    "conversion_rate": 1.0,
-    "sales_per_transaction": 0.8,
-    "capture_rate": 0.4,
-}
-
-def get_svi_weights_for_store_type(store_type: str) -> dict:
-    w = dict(BASE_SVI_WEIGHTS)
-    s = norm_key(store_type)
-
-    if ("high" in s and "street" in s) or ("city" in s) or ("downtown" in s) or ("centre" in s) or ("center" in s and "city" in s):
-        w["capture_rate"] = 0.7
-    elif ("retail" in s and "park" in s) or ("park" in s):
-        w["capture_rate"] = 0.2
-    elif ("shopping" in s and "center" in s) or ("shopping" in s and "centre" in s) or ("mall" in s) or ("center" in s) or ("centre" in s):
-        w["capture_rate"] = 0.4
-    else:
-        w["capture_rate"] = BASE_SVI_WEIGHTS["capture_rate"]
-
-    return w
-
-def ratio_to_score_0_100(ratio_pct: float, floor: float, cap: float) -> float:
-    if pd.isna(ratio_pct):
-        return np.nan
-    r = float(np.clip(ratio_pct, floor, cap))
-    return (r - floor) / (cap - floor) * 100.0
-
-def compute_driver_values_from_period(footfall, turnover, transactions, sqm_sum, capture_pct):
-    spv = safe_div(turnover, footfall)
-    spsqm = safe_div(turnover, sqm_sum)
-    cr = safe_div(transactions, footfall) * 100.0 if (pd.notna(transactions) and pd.notna(footfall) and float(footfall) != 0.0) else np.nan
-    atv = safe_div(turnover, transactions)
-    cap = capture_pct
-    return {
-        "sales_per_visitor": spv,
-        "sales_per_sqm": spsqm,
-        "capture_rate": cap,
-        "conversion_rate": cr,
-        "sales_per_transaction": atv,
-    }
-
-
-# Drivers where a light size-calibration makes sense when benchmarking within the same store type
-# (exclude sales_per_sqm because it is already normalized by sqm)
-SIZE_CAL_KEYS = {"sales_per_visitor", "conversion_rate", "sales_per_transaction", "capture_rate"}
-
-def compute_svi_explainable(vals_a: dict, vals_b: dict, floor: float, cap: float, weights=None, store_sqm=None, benchmark_sqm_series=None, sqm_calibrate: bool = True):
-    if weights is None:
-        weights = {k: float(BASE_SVI_WEIGHTS.get(k, 1.0)) for k, _ in SVI_DRIVERS}
-
-    rows = []
-    for key, label in SVI_DRIVERS:
-        va = vals_a.get(key, np.nan)
-        vb = vals_b.get(key, np.nan)
-
-        # Optional SQM calibration: adjust the benchmark for size-sensitive drivers
-        vb_adj = vb
-        if sqm_calibrate and (key in SIZE_CAL_KEYS) and (store_sqm is not None) and (benchmark_sqm_series is not None):
-            sqm_factor = sqm_calibration_factor(store_sqm, benchmark_sqm_series)
-            try:
-                vb_adj = float(vb) * float(sqm_factor) if (vb is not None and sqm_factor is not None) else vb
-            except Exception:
-                vb_adj = vb
-
-        ratio = np.nan
-        if pd.notna(va) and pd.notna(vb_adj) and float(vb_adj) != 0.0:
-            ratio = (float(va) / float(vb_adj)) * 100.0
-
-        score = ratio_to_score_0_100(ratio, floor=float(floor), cap=float(cap))
-        w = float(weights.get(key, 1.0))
-
-        include = pd.notna(ratio) and pd.notna(score)
-        rows.append({
-            "driver_key": key,
-            "driver": label,
-            "value": va,
-            "benchmark": vb,
-            "benchmark_adj": vb_adj,
-            "ratio_pct": ratio,
-            "score": score,
-            "weight": w,
-            "include": include,
-        })
-
-    bd = pd.DataFrame(rows)
-    usable = bd[bd["include"]].copy()
-    if usable.empty:
-        return np.nan, np.nan, bd.drop(columns=["include"])
-
-    usable["w"] = usable["weight"].astype(float)
-    wsum = float(usable["w"].sum()) if float(usable["w"].sum()) > 0 else float(len(usable))
-    avg_ratio = float((usable["ratio_pct"] * usable["w"]).sum() / wsum)
-    svi = ratio_to_score_0_100(avg_ratio, floor=float(floor), cap=float(cap))
-    return float(svi), float(avg_ratio), bd.drop(columns=["include"])
-
 def idx_vs(a, b):
     return (a / b * 100.0) if (pd.notna(a) and pd.notna(b) and float(b) != 0.0) else np.nan
 
