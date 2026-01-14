@@ -17,6 +17,19 @@ def _normalize(series: pd.Series) -> pd.Series:
         return pd.Series([50] * len(s), index=s.index)
     return ((s - min_v) / (max_v - min_v) * 100).clip(0, 100)
 
+def sqm_calibration_factor(store_sqm: float, benchmark_sqm_series: pd.Series) -> float:
+    """
+    Calibrate benchmark based on relative store size.
+    Returns factor ~1.0 for median-sized stores.
+    """
+    if pd.isna(store_sqm) or benchmark_sqm_series.dropna().empty:
+        return 1.0
+
+    median_sqm = benchmark_sqm_series.median()
+    if median_sqm <= 0:
+        return 1.0
+
+    return float(store_sqm / median_sqm)
 
 def build_store_vitality(
     df_period: pd.DataFrame,
