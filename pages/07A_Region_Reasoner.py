@@ -467,7 +467,7 @@ def try_llm_reasoning(prompt: str) -> str:
         client = OpenAI(api_key=api_key)
 
         resp = client.responses.create(
-            model=st.secrets.get("OPENAI_MODEL", "gpt-4o-mini"),
+            model=st.secrets.get("OPENAI_MODEL", "gpt-4.1"),
             input=prompt,
             temperature=0.3,
             max_output_tokens=500,
