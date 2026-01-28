@@ -627,6 +627,7 @@ def main():
             label_visibility="collapsed",
             key="rr_region",
         )
+        region_choice = str(region_choice).strip().lower()
         st.markdown("</div>", unsafe_allow_html=True)
 
     with c_opt:
