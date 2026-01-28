@@ -458,31 +458,28 @@ def estimate_upside(store_row: pd.Series, bench_vals: dict) -> tuple[float, str]
 # OpenAI (optional) — safe wrapper
 # ----------------------
 def try_llm_reasoning(prompt: str) -> str:
-    """
-    Uses OpenAI if available + configured; otherwise returns empty string.
-    Designed to never break the page.
-    """
     try:
         api_key = st.secrets.get("OPENAI_API_KEY", None)
         if not api_key:
             return ""
-        # OpenAI python SDK v1 style
-        from openai import OpenAI  # type: ignore
-        client = OpenAI(api_key=api_key)
-        model = st.secrets.get("OPENAI_MODEL", "gpt-4o-mini")
 
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": "You are a retail performance analyst. Be concise, specific, and data-driven. Never invent missing data (e.g. staffing)."},
-                {"role": "user", "content": prompt},
-            ],
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key)
+
+        resp = client.responses.create(
+            model=st.secrets.get("OPENAI_MODEL", "gpt-4o-mini"),
+            input=prompt,
             temperature=0.3,
-            max_tokens=450,
+            max_output_tokens=500,
         )
-        txt = resp.choices[0].message.content or ""
-        return txt.strip()
-    except Exception:
+
+        if not resp.output or not resp.output[0].content:
+            return ""
+
+        return resp.output[0].content[0].text.strip()
+
+    except Exception as e:
+        st.warning(f"AI narrative failed: {e}")
         return ""
 
 # ----------------------
