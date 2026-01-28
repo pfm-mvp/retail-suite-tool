@@ -1052,11 +1052,15 @@ def main():
         join_cols = ["id", "store_display", "region", "sqm_effective", "store_type"]
         df_daily_store = df_daily_store.merge(merged2[join_cols].drop_duplicates(), left_on=store_key_col, right_on="id", how="left")
         
+        # FIX: Check if column exists before trying to fill/overwrite it
+        if "sales_per_sqm" not in df_daily_store.columns:
+            df_daily_store["sales_per_sqm"] = np.nan
+
         sqm_eff = pd.to_numeric(df_daily_store.get("sqm_effective", np.nan), errors="coerce")
         turn = pd.to_numeric(df_daily_store.get("turnover", np.nan), errors="coerce")
         calc_spm2 = np.where((pd.notna(sqm_eff) & (sqm_eff > 0)), (turn / sqm_eff), np.nan)
+        
         df_daily_store["sales_per_sqm"] = pd.to_numeric(df_daily_store["sales_per_sqm"], errors="coerce").fillna(pd.Series(calc_spm2, index=df_daily_store.index))
-        df_daily_store = mark_closed_days_as_nan(df_daily_store)
         
         st.session_state.rcp_last_key = run_key
         st.session_state.rcp_payload = {
