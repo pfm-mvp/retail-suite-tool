@@ -1042,7 +1042,7 @@ def main():
         if not store_key_col: st.error("No ID column."); return
         
         merged2 = enrich_merged_with_sqm_from_df_norm(merged, df_norm, store_key_col=store_key_col)
-        base_sqm = pd.to_numeric(merged2.get("sqm", np.nan), errors="coerce)
+        base_sqm = pd.to_numeric(merged2.get("sqm", np.nan), errors="coerce")
         sqm_api = pd.to_numeric(merged2.get("sqm_api", np.nan), errors="coerce")
         merged2["sqm_effective"] = np.where(merged2["sqm_override"].notna(), pd.to_numeric(merged2["sqm_override"], errors="coerce"), np.where(pd.notna(base_sqm), base_sqm, sqm_api))
         
