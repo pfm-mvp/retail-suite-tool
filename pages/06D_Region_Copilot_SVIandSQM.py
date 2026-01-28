@@ -1106,11 +1106,17 @@ def main():
     total_ff = float(pd.to_numeric(capture_store_week["footfall"], errors="coerce").sum()) if capture_store_week is not None and not capture_store_week.empty else np.nan
     avg_capture = (total_ff / total_visits * 100.0) if (pd.notna(total_visits) and total_visits > 0) else np.nan
     
-    reg_vals = compute_driver_values_from_period(**reg_tot, capture_pct=avg_capture)
-    comp_vals = compute_driver_values_from_period(**comp_tot, capture_pct=np.nan)
+    reg_vals = compute_driver_values_from_period(footfall=reg_tot["footfall"], turnover=reg_tot["turnover"], transactions=reg_tot["transactions"], sqm_sum=reg_tot["sqm_sum"], capture_pct=avg_capture)
+    comp_vals = compute_driver_values_from_period(footfall=comp_tot["footfall"], turnover=comp_tot["turnover"], transactions=comp_tot["transactions"], sqm_sum=comp_tot["sqm_sum"], capture_pct=np.nan)
     if pd.isna(comp_vals.get("capture_rate")): comp_vals["capture_rate"] = reg_vals.get("capture_rate")
     
-    region_weights = get_svi_weights_for_region_mix(region_types=merged.loc[merged["region"] == region_choice, "store_type"])
+    # FIX: Eerst de data klaarzetten, daarna aanroepen (zonder 'region_types=' naam)
+    region_types = (
+        merged.loc[merged["region"] == region_choice, "store_type"]
+        if ("store_type" in merged.columns and "region" in merged.columns)
+        else pd.Series([], dtype=str)
+    )
+    region_weights = get_svi_weights_for_region_mix(region_types)
     region_svi, region_avg_ratio, _ = compute_svi_explainable(reg_vals, comp_vals, float(lever_floor), float(lever_cap), weights=region_weights)
     
     df_region_rank = compute_svi_by_region_companywide(df_daily_store, lever_floor, lever_cap)
