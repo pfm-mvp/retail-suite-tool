@@ -938,10 +938,25 @@ def main():
         agg["conversion_rate"] = np.where(agg["footfall"] > 0, agg["transactions"] / agg["footfall"] * 100.0, np.nan)
         agg["sales_per_visitor"] = np.where(agg["footfall"] > 0, agg["turnover"] / agg["footfall"], np.nan)
         agg["sales_per_transaction"] = np.where(agg["transactions"] > 0, agg["turnover"] / agg["transactions"], np.nan)
-        agg["sales_per_sqm"] = np.where(
-            pd.to_numeric(agg["sqm_effective"], errors="coerce") > 0,
-            agg["turnover"] / pd.to_numeric(agg["sqm_effective"], errors="coerce"),
-            np.nan,
+        # 1. force numeric
+        agg["sales_per_sqm"] = pd.to_numeric(
+            agg.get("sales_per_sqm", np.nan),
+            errors="coerce"
+        )
+
+        # 2. fallback calculation only if missing
+        sqm = pd.to_numeric(agg.get("sqm_effective", np.nan), errors="coerce")
+        turn = pd.to_numeric(agg.get("turnover", np.nan), errors="coerce")
+
+        calc_spm2 = np.where(
+            (pd.notna(sqm) & (sqm > 0)),
+            turn / sqm,
+            np.nan
+        )
+
+        agg["sales_per_sqm"] = agg["sales_per_sqm"].combine_first(
+            pd.Series(calc_spm2, index=agg.index)
+        )
         )
 
         # attach capture if available
