@@ -482,7 +482,7 @@ def render_kpi_header(selected_client, region_choice, start_period, end_period, 
     pathzz_all = load_pathzz_weekly_store(pz_path, pz_mtime)
     pathzz_period = filter_pathzz_for_period(pathzz_all, start_period, end_period)
     
-    pathzz_region = pathzz_period[pathzz_period["region"].astype(str).str.strip().str.lower() == str(region_choice).strip().str.lower()].copy()
+    pathzz_region = pathzz_period[pathzz_period["region"].astype(str).str.strip().str.lower() == str(region_choice).strip().lower()].copy()
     
     # Region weekly aggregation
     dd_region = df_region_daily.copy()
