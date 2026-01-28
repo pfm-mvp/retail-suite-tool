@@ -965,7 +965,6 @@ def main():
         agg["sales_per_sqm"] = agg["sales_per_sqm"].combine_first(
             pd.Series(calc_spm2, index=agg.index)
         )
-        )
 
         # attach capture if available
         if include_capture:
