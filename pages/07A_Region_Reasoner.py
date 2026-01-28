@@ -1,78 +1,48 @@
-# pages/06D_Region_Agentic_Workload.py
+# pages/06D_Region_Agentic_Workload_v2.py
 from __future__ import annotations
 
 import os
 import json
-from typing import Any, Dict, List, Tuple, Optional
+from datetime import date, timedelta
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 import streamlit as st
+from openai import OpenAI
 
-# ---------- Defensive imports (match your repo) ----------
-# Period helpers (you already have these)
-try:
-    from helpers_periods import PRESETS, default_date_range
-except Exception:
-    PRESETS = [
-        ("last_week", "Last week"),
-        ("this_month", "This month"),
-        ("last_month", "Last month"),
-        ("this_quarter", "This quarter"),
-        ("last_quarter", "Last quarter"),
-        ("this_year", "This year"),
-        ("last_year", "Last year"),
-        ("date", "Custom date range"),
-    ]
 
-    from datetime import date, timedelta
-
-    def default_date_range(days: int = 28):
-        end = date.today()
-        start = end - timedelta(days=days)
-        return start, end
-
-# Vemcount / FastAPI helpers (you already have these)
-# Expect: build_report_params(...) and fetch_report(...)
+# =========================
+# Imports from your repo
+# =========================
 build_report_params = None
 fetch_report = None
-normalize_vemcount_response = None
 
 try:
-    from helpers_vemcount_api import build_report_params, fetch_report
-    # sometimes normalize is in same helper
-    try:
-        from helpers_vemcount_api import normalize_vemcount_response
-    except Exception:
-        normalize_vemcount_response = None
+    # Expected in your repo
+    from helpers_vemcount_api import build_report_params, fetch_report  # type: ignore
 except Exception:
     build_report_params = None
     fetch_report = None
 
-# Optional: shop mapping helper (if you already have it somewhere)
-get_locations_by_company = None
+# Optional: your existing normalizer (if present anywhere)
+normalize_vemcount_response = None
 try:
-    # common pattern in your stack
-    from vemcount import get_locations_by_company  # type: ignore
+    from helpers_vemcount_api import normalize_vemcount_response  # type: ignore
 except Exception:
-    try:
-        from shop_mapping import get_locations_by_company  # type: ignore
-    except Exception:
-        get_locations_by_company = None
-
-# OpenAI (you said integration is ready; we use secrets)
-from openai import OpenAI
+    normalize_vemcount_response = None
 
 
-# ---------- UI / formatting ----------
+# =========================
+# Formatting (EU)
+# =========================
 def fmt_eur(x: Any) -> str:
     try:
         x = float(x)
     except Exception:
         return "-"
     s = f"{x:,.0f}"
-    # EU format: 1.234.567
-    s = s.replace(",", "X").replace(".", ",").replace("X", ".")
+    s = s.replace(",", "X").replace(".", ",").replace("X", ".")  # EU
     return f"€{s}"
 
 
@@ -81,55 +51,202 @@ def fmt_pct(x: Any) -> str:
         x = float(x)
     except Exception:
         return "-"
-    s = f"{x*100:.1f}".replace(".", ",")
-    return f"{s}%"
+    return f"{x*100:.1f}%".replace(".", ",")
 
 
-def name_for(shop_id: int, mapping: Dict[int, str]) -> str:
-    return mapping.get(int(shop_id), f"Shop {shop_id}")
+def fmt_int(x: Any) -> str:
+    try:
+        x = int(float(x))
+    except Exception:
+        return "-"
+    return f"{x:,}".replace(",", ".")
 
 
-# ---------- Agent: normalize -> score -> brief ----------
-def _safe_num(s: pd.Series) -> pd.Series:
-    return pd.to_numeric(s, errors="coerce")
+# =========================
+# Regions.csv loader (same idea as your existing tool)
+# =========================
+def _find_regions_csv() -> Optional[str]:
+    candidates = [
+        "regions.csv",
+        "data/regions.csv",
+        "assets/regions.csv",
+        "config/regions.csv",
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    return None
 
 
-def compute_rollup(df: pd.DataFrame) -> Dict[str, Any]:
-    for col in ["count_in", "turnover", "conversion_rate", "sales_per_visitor"]:
-        if col not in df.columns:
-            df[col] = np.nan
-        df[col] = _safe_num(df[col])
-
-    footfall = float(df["count_in"].sum(skipna=True)) if "count_in" in df.columns else float("nan")
-    turnover = float(df["turnover"].sum(skipna=True)) if "turnover" in df.columns else float("nan")
-    conv = float(df["conversion_rate"].mean(skipna=True)) if "conversion_rate" in df.columns else float("nan")
-
-    spv = float(df["sales_per_visitor"].mean(skipna=True)) if df["sales_per_visitor"].dropna().shape[0] else float("nan")
-    if np.isnan(spv) and footfall and footfall > 0 and not np.isnan(turnover):
-        spv = turnover / footfall
-
-    return {
-        "footfall": footfall,
-        "turnover": turnover,
-        "conversion_rate": conv,
-        "sales_per_visitor": spv,
-        "n_stores": int(df["shop_id"].nunique()) if "shop_id" in df.columns else 0,
-    }
-
-
-def compute_opportunity_table(df: pd.DataFrame) -> pd.DataFrame:
+def load_regions_mapping() -> Tuple[pd.DataFrame, Dict[str, List[int]]]:
     """
-    Doel: een simpele, robuuste ranking zonder charts.
-    Opportunity = (veel traffic + betekenisvolle omzet) + (laag conv/spv = upside).
+    Expected structure (flexible):
+      - one row per shop, with a region column and a shop_id column
+    Tries common column names:
+      region: region, region_name, regio
+      shop_id: shop_id, location_id, store_id, shop, location
     """
+    path = _find_regions_csv()
+    if not path:
+        raise FileNotFoundError(
+            "regions.csv not found. Expected at repo root or data/assets/config folders."
+        )
+
+    df = pd.read_csv(path)
+
+    # region column
+    region_col = None
+    for c in ["region", "region_name", "regio", "Region", "Regio"]:
+        if c in df.columns:
+            region_col = c
+            break
+    if not region_col:
+        raise ValueError("regions.csv: could not find a region column (region/region_name/regio).")
+
+    # shop column
+    shop_col = None
+    for c in ["shop_id", "location_id", "store_id", "shop", "location", "ShopID", "LocationID"]:
+        if c in df.columns:
+            shop_col = c
+            break
+    if not shop_col:
+        raise ValueError("regions.csv: could not find a shop column (shop_id/location_id/store_id).")
+
+    # coerce shop ids to ints
+    df = df.copy()
+    df[shop_col] = pd.to_numeric(df[shop_col], errors="coerce").astype("Int64")
+
+    region_to_shops: Dict[str, List[int]] = {}
+    for region, g in df.groupby(region_col):
+        shops = [int(x) for x in g[shop_col].dropna().unique().tolist()]
+        region_to_shops[str(region)] = sorted(shops)
+
+    return df, region_to_shops
+
+
+# =========================
+# Period selector (same outputs as your other tool: presets -> real dates)
+# =========================
+PERIOD_PRESETS = [
+    ("last_week", "Last week"),
+    ("this_month", "This month"),
+    ("last_month", "Last month"),
+    ("this_quarter", "This quarter"),
+    ("last_quarter", "Last quarter"),
+    ("this_year", "This year"),
+    ("last_year", "Last year"),
+    ("date", "Custom range"),
+]
+
+
+def start_of_month(d: date) -> date:
+    return date(d.year, d.month, 1)
+
+
+def end_of_month(d: date) -> date:
+    # next month - 1 day
+    if d.month == 12:
+        nm = date(d.year + 1, 1, 1)
+    else:
+        nm = date(d.year, d.month + 1, 1)
+    return nm - timedelta(days=1)
+
+
+def quarter_start(d: date) -> date:
+    q = (d.month - 1) // 3 + 1
+    m = (q - 1) * 3 + 1
+    return date(d.year, m, 1)
+
+
+def quarter_end(d: date) -> date:
+    qs = quarter_start(d)
+    # add 3 months then -1 day
+    if qs.month == 10:
+        nm = date(qs.year + 1, 1, 1)
+    else:
+        nm = date(qs.year, qs.month + 3, 1)
+    return nm - timedelta(days=1)
+
+
+def resolve_preset_to_dates(preset: str, today: Optional[date] = None) -> Tuple[date, date]:
+    today = today or date.today()
+
+    if preset == "last_week":
+        # last full 7 days ending yesterday
+        end = today - timedelta(days=1)
+        start = end - timedelta(days=6)
+        return start, end
+
+    if preset == "this_month":
+        return start_of_month(today), today
+
+    if preset == "last_month":
+        last_month_end = start_of_month(today) - timedelta(days=1)
+        return start_of_month(last_month_end), end_of_month(last_month_end)
+
+    if preset == "this_quarter":
+        return quarter_start(today), today
+
+    if preset == "last_quarter":
+        this_q_start = quarter_start(today)
+        last_q_end = this_q_start - timedelta(days=1)
+        return quarter_start(last_q_end), quarter_end(last_q_end)
+
+    if preset == "this_year":
+        return date(today.year, 1, 1), today
+
+    if preset == "last_year":
+        return date(today.year - 1, 1, 1), date(today.year - 1, 12, 31)
+
+    # fallback
+    return today - timedelta(days=27), today
+
+
+# =========================
+# Normalization (fallback if your helper isn't importable here)
+# =========================
+def normalize_payload(payload: Dict[str, Any]) -> pd.DataFrame:
+    if callable(normalize_vemcount_response):
+        rows = normalize_vemcount_response(payload)  # type: ignore
+        return pd.DataFrame(rows)
+
+    rows: List[Dict[str, Any]] = []
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return pd.DataFrame()
+
+    for date_key, by_shop in data.items():
+        if not isinstance(by_shop, dict):
+            continue
+        for shop_id, metrics in by_shop.items():
+            if not isinstance(metrics, dict):
+                continue
+            # hour-like nested
+            if "dates" in metrics and isinstance(metrics["dates"], dict):
+                for ts, ts_payload in metrics["dates"].items():
+                    if isinstance(ts_payload, dict) and isinstance(ts_payload.get("data"), dict):
+                        r = {"date": date_key, "timestamp": ts, "shop_id": int(shop_id)}
+                        r.update(ts_payload["data"])
+                        rows.append(r)
+            else:
+                r = {"date": date_key, "shop_id": int(shop_id)}
+                r.update(metrics)
+                rows.append(r)
+
+    return pd.DataFrame(rows)
+
+
+# =========================
+# Agentic reasoning (no category assumptions, no staffing unless fields exist)
+# =========================
+def compute_store_aggregate(df: pd.DataFrame) -> pd.DataFrame:
     work = df.copy()
-
     for col in ["count_in", "turnover", "conversion_rate", "sales_per_visitor"]:
         if col not in work.columns:
             work[col] = np.nan
-        work[col] = _safe_num(work[col])
+        work[col] = pd.to_numeric(work[col], errors="coerce")
 
-    # SPV fallback per row indien leeg
+    # SPV fallback if missing
     if work["sales_per_visitor"].dropna().empty:
         with np.errstate(divide="ignore", invalid="ignore"):
             work["sales_per_visitor"] = work["turnover"] / work["count_in"]
@@ -142,52 +259,120 @@ def compute_opportunity_table(df: pd.DataFrame) -> pd.DataFrame:
         days=("date", "nunique") if "date" in work.columns else ("shop_id", "size"),
     )
 
-    # z-scores
+    # opportunity score (traffic + turnover) - (conv + spv)
     for c in ["footfall", "turnover", "conv", "spv"]:
         x = agg[c].astype(float)
         agg[c + "_z"] = (x - x.mean()) / (x.std(ddof=0) + 1e-9)
 
     agg["opportunity_score"] = (
-        0.45 * agg["footfall_z"] +
-        0.20 * agg["turnover_z"] -
-        0.20 * agg["conv_z"] -
-        0.15 * agg["spv_z"]
+        0.45 * agg["footfall_z"]
+        + 0.20 * agg["turnover_z"]
+        - 0.20 * agg["conv_z"]
+        - 0.15 * agg["spv_z"]
     )
 
     return agg.sort_values("opportunity_score", ascending=False)
 
 
-def llm_brief(
-    api_key: str,
-    model: str,
-    region_kpis: Dict[str, Any],
-    opportunities: List[Dict[str, Any]],
-    meta: Dict[str, Any],
-) -> str:
-    system = """Je bent een scherpe Retail Performance Analyst voor een regiomanager.
-Schrijf in het Nederlands. Wees concreet, actiegericht en kort. Geen managementfluff.
+def classify_lever(row: pd.Series, med: Dict[str, float]) -> Dict[str, Any]:
+    footfall = float(row.get("footfall", np.nan))
+    conv = float(row.get("conv", np.nan))
+    spv = float(row.get("spv", np.nan))
 
-Output EXACT in deze structuur:
-1) Samenvatting (max 5 bullets)
-2) Belangrijkste drivers (max 5 bullets)
-3) Acties (3–7 bullets, elk met: wat / waarom / hoe je succes meet)
-4) Vragen om de analyse te verscherpen (max 3 bullets)
+    hi_traffic = (not np.isnan(footfall) and footfall >= med["footfall"])
+    lo_traffic = (not np.isnan(footfall) and footfall < med["footfall"])
+    lo_conv = (not np.isnan(conv) and conv < med["conv"])
+    hi_conv = (not np.isnan(conv) and conv >= med["conv"])
+    lo_spv = (not np.isnan(spv) and spv < med["spv"])
 
-Regels:
-- Gebruik cijfers uit de input waar mogelijk.
-- Verzin geen KPI’s die niet in de input zitten.
-- Als data ontbreekt: benoem dat expliciet en stel 1–2 gerichte vragen.
-"""
+    if hi_traffic and lo_conv:
+        return {
+            "lever": "conversion",
+            "why": "Veel bezoekers, conversie onder mediane store performance → grootste upside is 'traffic → kopers'.",
+            "test": [
+                "Kies 2 piekmomenten en test 1 micro-interventie per moment (1 wijziging tegelijk).",
+                "Universele opties (geen categorie-aanname): snellere begroeting, frictie wegnemen bij kassa/queue, duidelijke hulpvraag-punten.",
+                "Meet: conversie per dag/uur + SPV. Stop wat niet werkt na 1 week."
+            ],
+            "needs": [
+                "Transactiecount/ATV (dan kunnen we exact sturen op driver).",
+                "Store-type/format (mall/high-street/retail park) voor scherpere acties."
+            ],
+        }
 
-    client = OpenAI(api_key=api_key)
+    if hi_traffic and hi_conv and lo_spv:
+        return {
+            "lever": "spv",
+            "why": "Conversie oké, SPV onder median → er wordt gekocht, maar waarde per bezoeker blijft achter.",
+            "test": [
+                "Test 1 ‘value-driver’ zonder categorie-aanname: 1 vaste adviesprompt + 1 duidelijke 'best value' zone.",
+                "Meet: SPV + (ATV/items als beschikbaar) + conversie."
+            ],
+            "needs": [
+                "ATV/items per transactie (mix vs bundling effect).",
+                "Promo/event tags (verklaart SPV-schommelingen)."
+            ],
+        }
 
-    payload = {
-        "region_kpis": region_kpis,
-        "top_opportunities": opportunities,
-        "meta": meta,
-        "tone": "regiomanager-brief, prioriteit, next actions",
+    if lo_traffic and hi_conv:
+        return {
+            "lever": "capture/traffic",
+            "why": "Conversie sterk, traffic relatief laag → groei zit waarschijnlijk in meer instroom/capture.",
+            "test": [
+                "Check openingstijden vs drukte, entree-frictie en 1 duidelijke 'reason to enter'.",
+                "Als je passanten/capture hebt: test 1 entree-aanpassing en meet capture rate."
+            ],
+            "needs": [
+                "Passanten/capture rate (hard bewijs i.p.v. aannames).",
+                "Locatiecontext (straat/winkelcentrum/retail park)."
+            ],
+        }
+
+    if lo_traffic and lo_conv:
+        return {
+            "lever": "diagnose",
+            "why": "Traffic én conversie onder median → eerst grootste frictiebron vinden, dan pas optimaliseren.",
+            "test": [
+                "1 week frictie-log (top 5 redenen afhaken) + daily KPI’s.",
+                "Kopieer patronen van dagen die wél goed scoren."
+            ],
+            "needs": [
+                "Event tags / kwalitatieve store-notes.",
+                "Transactiecount/ATV voor driver-scherpte."
+            ],
+        }
+
+    return {
+        "lever": "unknown",
+        "why": "KPI’s wijzen niet eenduidig één hefboom aan (of er missen velden).",
+        "test": [
+            "Start met 1 week baseline + 1 simpele notitie per dag (promo/weer/crew/incident).",
+            "Daarna: 1 wijziging per week testen."
+        ],
+        "needs": [
+            "Transactiecount, ATV, en (optioneel) passanten/capture.",
+            "Store-type/format + primair doel."
+        ],
     }
 
+
+def llm_region_brief(api_key: str, model: str, region_kpis: Dict[str, Any], top_opps: List[Dict[str, Any]], meta: Dict[str, Any]) -> str:
+    system = """Je bent een scherpe Retail Performance Analyst voor een regiomanager.
+Schrijf Nederlands, actiegericht, kort. Geen fluff.
+
+GUARDRAILS:
+- Geen productcategorie/branche aannames (geen parfum-upsell etc.).
+- Noem geen staffing/roostering tenzij meta.staffing_fields niet leeg is.
+- Verzin geen KPI’s die niet in input zitten.
+
+Output EXACT:
+1) Samenvatting (max 5 bullets)
+2) Drivers (max 5 bullets)
+3) Acties (3–7 bullets: wat / waarom / hoe meten)
+4) 3 Vragen om dit scherper te maken
+"""
+    client = OpenAI(api_key=api_key)
+    payload = {"region_kpis": region_kpis, "top_opportunities": top_opps, "meta": meta}
     resp = client.chat.completions.create(
         model=model,
         messages=[
@@ -199,63 +384,19 @@ Regels:
     return resp.choices[0].message.content.strip()
 
 
-# ---------- Data fetch wrappers ----------
-def fetch_company_mapping(api_url: str, company_id: int) -> Dict[int, str]:
-    if get_locations_by_company is None:
-        return {}
-    try:
-        m = get_locations_by_company(api_url, company_id)  # expected {shop_id: name}
-        if isinstance(m, dict):
-            # ensure int keys
-            out = {}
-            for k, v in m.items():
-                try:
-                    out[int(k)] = str(v)
-                except Exception:
-                    continue
-            return out
-        return {}
-    except Exception:
-        return {}
-
-
-def normalize_payload(payload: Dict[str, Any]) -> pd.DataFrame:
-    # Prefer your existing normalizer if present
-    if callable(normalize_vemcount_response):
-        rows = normalize_vemcount_response(payload)
-        return pd.DataFrame(rows)
-
-    # Fallback (defensive) for common nested shapes
-    rows: List[Dict[str, Any]] = []
-    data = payload.get("data")
-    if isinstance(data, dict):
-        for date_key, by_shop in data.items():
-            if not isinstance(by_shop, dict):
-                continue
-            for shop_id, metrics in by_shop.items():
-                if not isinstance(metrics, dict):
-                    continue
-                # hour-shape
-                if "dates" in metrics and isinstance(metrics["dates"], dict):
-                    for ts, ts_payload in metrics["dates"].items():
-                        d = ts_payload.get("data") if isinstance(ts_payload, dict) else None
-                        if isinstance(d, dict):
-                            row = {"date": date_key, "timestamp": ts, "shop_id": int(shop_id)}
-                            row.update(d)
-                            rows.append(row)
-                else:
-                    row = {"date": date_key, "shop_id": int(shop_id)}
-                    row.update(metrics)
-                    rows.append(row)
-    return pd.DataFrame(rows)
-
-
+# =========================
+# Page
+# =========================
 def main():
-    st.set_page_config(page_title="Region Agentic Workload", page_icon="🧠", layout="wide")
+    st.set_page_config(page_title="Region Agentic Workload v2", page_icon="🧠", layout="wide")
+    st.title("🧠 Region Agentic Workload v2 (same selectors, no charts)")
+    st.caption("Zelfde input/selector-flow als de bestaande tool, maar output is 100% agentic (brief + next actions).")
 
-    st.title("🧠 Region Agentic Workload (no charts)")
-    st.caption("Nieuwe test-tool naast je huidige dashboard: **fetch → reason → brief → next questions**. Geen visualisatie, alleen beslisoutput.")
+    if build_report_params is None or fetch_report is None:
+        st.error("helpers_vemcount_api.build_report_params/fetch_report niet gevonden. Check exports/filenames.")
+        st.stop()
 
+    # API_URL: in jouw debug is dit al inclusief /get-report → dus we nemen het zoals het is
     api_url = st.secrets.get("API_URL", os.getenv("API_URL", "")).strip()
     if not api_url:
         st.error("API_URL ontbreekt in Streamlit secrets.")
@@ -264,206 +405,259 @@ def main():
     openai_key = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", "")).strip()
     openai_model = st.secrets.get("OPENAI_MODEL", os.getenv("OPENAI_MODEL", "gpt-4.1-mini")).strip()
 
-    if build_report_params is None or fetch_report is None:
-        st.error("Ik kan helpers_vemcount_api.build_report_params / fetch_report niet importeren. Bestandsnaam of exports wijken af.")
+    # Load regions.csv mapping
+    try:
+        regions_df, region_to_shops = load_regions_mapping()
+    except Exception as e:
+        st.error(f"Kon regions.csv mapping niet laden: {e}")
         st.stop()
 
-    col1, col2, col3 = st.columns([1.0, 1.2, 0.8], vertical_alignment="center")
-    with col1:
-        company_id = st.number_input("Company ID", min_value=1, value=4556, step=1)
-
-    with col2:
-        # support both tuple presets or dataclass presets
-        if PRESETS and isinstance(PRESETS[0], tuple):
-            preset_key = st.selectbox("Period", [p[0] for p in PRESETS], index=2)
-            preset_label = dict(PRESETS).get(preset_key, preset_key)
-        else:
-            # dataclass-like: has .key and .label
-            preset_key = st.selectbox("Period", [p.key for p in PRESETS], index=2)  # type: ignore
-            preset_label = next((p.label for p in PRESETS if p.key == preset_key), preset_key)  # type: ignore
-
-        period = preset_key
-
-    with col3:
+    # Header selectors (mirror the standard flow: Region -> Period -> Run)
+    h1, h2, h3 = st.columns([1.6, 1.2, 0.7], vertical_alignment="center")
+    with h1:
+        region = st.selectbox("Region", sorted(region_to_shops.keys()))
+    with h2:
+        preset = st.selectbox("Period", [p[0] for p in PERIOD_PRESETS], index=2)
+    with h3:
         run = st.button("Run agent")
 
-    # date inputs only when needed
-    date_from, date_to = default_date_range(28)
-    if period == "date":
+    # Resolve dates (ALWAYS) so debug shows real window and LLM has context
+    if preset == "date":
         cA, cB = st.columns(2)
+        default_start, default_end = resolve_preset_to_dates("last_month")
         with cA:
-            d1 = st.date_input("Date from", value=date_from)
+            d_from = st.date_input("Date from", value=default_start)
         with cB:
-            d2 = st.date_input("Date to", value=date_to)
-        date_from_s, date_to_s = d1.isoformat(), d2.isoformat()
+            d_to = st.date_input("Date to", value=default_end)
+        date_from_s, date_to_s = d_from.isoformat(), d_to.isoformat()
     else:
-        date_from_s, date_to_s = None, None
+        d_from, d_to = resolve_preset_to_dates(preset)
+        date_from_s, date_to_s = d_from.isoformat(), d_to.isoformat()
 
-    st.divider()
+    # Shops from region
+    shop_ids = region_to_shops.get(region, [])
+    if not shop_ids:
+        st.warning("Deze regio heeft geen shop_ids in regions.csv.")
+        st.stop()
 
-    # Keep a stable cache key
-    selection_key = f"{company_id}|{period}|{date_from_s}|{date_to_s}"
+    # Selection key (same idea: region+period+dates)
+    selection_key = f"{region}|{preset}|{date_from_s}|{date_to_s}|nshops={len(shop_ids)}"
 
-    if "agentic_last_key" not in st.session_state:
-        st.session_state["agentic_last_key"] = None
-    if "agentic_df" not in st.session_state:
-        st.session_state["agentic_df"] = None
-    if "agentic_mapping" not in st.session_state:
-        st.session_state["agentic_mapping"] = {}
+    # Cache
+    if "agentic_v2_last_key" not in st.session_state:
+        st.session_state["agentic_v2_last_key"] = None
+    if "agentic_v2_df" not in st.session_state:
+        st.session_state["agentic_v2_df"] = None
 
-    selection_changed = st.session_state["agentic_last_key"] != selection_key
-    should_run = run or st.session_state["agentic_df"] is None or selection_changed
+    selection_changed = st.session_state["agentic_v2_last_key"] != selection_key
+    should_fetch = run or st.session_state["agentic_v2_df"] is None or selection_changed
 
-    with st.expander("Debug (imports / selection)", expanded=False):
+    with st.expander("Debug (selection)", expanded=False):
         st.write({
             "api_url": api_url,
-            "company_id": company_id,
-            "period": period,
+            "region": region,
+            "preset": preset,
             "date_from": date_from_s,
             "date_to": date_to_s,
+            "shop_ids_count": len(shop_ids),
             "selection_key": selection_key,
             "selection_changed": selection_changed,
             "helpers_imported": {
                 "build_report_params": bool(build_report_params),
                 "fetch_report": bool(fetch_report),
                 "normalize_vemcount_response": bool(normalize_vemcount_response),
-                "get_locations_by_company": bool(get_locations_by_company),
             },
         })
 
-    if not should_run:
-        df = st.session_state["agentic_df"]
-    else:
-        # Step 0: mapping
-        mapping = fetch_company_mapping(api_url, int(company_id))
-        st.session_state["agentic_mapping"] = mapping
-
-        # Determine shop_ids
-        shop_ids = list(mapping.keys())
-        if not shop_ids:
-            st.warning("Geen shop mapping beschikbaar via company endpoint. Vul shop IDs handmatig in (tijdelijk).")
-            manual = st.text_input("Shop IDs (comma separated)", value="26304,26305")
-            shop_ids = [int(x.strip()) for x in manual.split(",") if x.strip().isdigit()]
-
-        # Step 1: fetch
+    # Fetch (IMPORTANT: use period='date' always, to guarantee date window)
+    if should_fetch:
         data_output = ["count_in", "turnover", "conversion_rate", "sales_per_visitor"]
         params = build_report_params(
             data=shop_ids,
             data_output=data_output,
-            period=period,
-            period_step="day",     # your standard for this agentic page
             source="shops",
+            period="date",
+            period_step="day",
             date_from=date_from_s,
             date_to=date_to_s,
         )
 
-        with st.status("Agent is running…", expanded=True) as status:
-            st.write("**Step 1 — Fetch**: KPI’s ophalen via FastAPI → Vemcount")
+        with st.status("Agent running…", expanded=True) as status:
+            st.write("**Step 1 — Fetch** (FastAPI → Vemcount)")
             payload = fetch_report(api_url, params=params)
 
-            st.write("**Step 2 — Normalize**: response omzetten naar platte tabel")
+            st.write("**Step 2 — Normalize**")
             df = normalize_payload(payload)
 
             if df.empty:
-                status.update(label="Agent failed (no data)", state="error")
-                st.error("Lege dataset. Check shop_ids, periode, of API response.")
+                status.update(label="No data returned", state="error")
+                st.error("Lege dataset. Check regions.csv shop_ids, API response, of date window.")
                 st.stop()
 
-            # Coerce types
+            # Coerce numerics
             for col in ["count_in", "turnover", "conversion_rate", "sales_per_visitor"]:
                 if col in df.columns:
                     df[col] = pd.to_numeric(df[col], errors="coerce")
 
-            st.write("**Step 3 — Reason**: opportunities ranken (impact + upside)")
-            scores = compute_opportunity_table(df)
+            status.update(label="Complete ✅", state="complete")
 
-            st.write("**Step 4 — Brief**: LLM maakt regiomanager-brief + acties")
-            region_kpis = compute_rollup(df)
-            region_kpis.update({
-                "period": period,
-                "date_from": date_from_s,
-                "date_to": date_to_s,
+        st.session_state["agentic_v2_df"] = df
+        st.session_state["agentic_v2_last_key"] = selection_key
+
+    df = st.session_state["agentic_v2_df"]
+    if df is None or df.empty:
+        st.info("Klik Run agent om te starten.")
+        st.stop()
+
+    # Region rollup
+    rollup = {
+        "footfall": float(df.get("count_in", pd.Series(dtype=float)).sum(skipna=True)),
+        "turnover": float(df.get("turnover", pd.Series(dtype=float)).sum(skipna=True)),
+        "conversion_rate": float(df.get("conversion_rate", pd.Series(dtype=float)).mean(skipna=True)),
+        "sales_per_visitor": float(df.get("sales_per_visitor", pd.Series(dtype=float)).mean(skipna=True)),
+        "n_stores": int(df["shop_id"].nunique()) if "shop_id" in df.columns else 0,
+        "region": region,
+        "date_from": date_from_s,
+        "date_to": date_to_s,
+    }
+
+    st.subheader("📌 Region rollup")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Footfall", fmt_int(rollup["footfall"]))
+    c2.metric("Turnover", fmt_eur(rollup["turnover"]))
+    c3.metric("Conversion", fmt_pct(rollup["conversion_rate"]))
+    c4.metric("SPV", fmt_eur(rollup["sales_per_visitor"]))
+
+    # Store aggregation + ranking
+    stores = compute_store_aggregate(df)
+
+    med = {
+        "footfall": float(stores["footfall"].median(skipna=True)),
+        "conv": float(stores["conv"].median(skipna=True)),
+        "spv": float(stores["spv"].median(skipna=True)),
+    }
+
+    # Build a readable store label: if regions.csv has store_name, use it
+    # Try to find a name column in regions_df
+    name_col = None
+    for c in ["store_name", "shop_name", "location_name", "name", "StoreName", "ShopName"]:
+        if c in regions_df.columns:
+            name_col = c
+            break
+
+    shop_name_map: Dict[int, str] = {}
+    if name_col:
+        # also detect shop_id column used in file
+        shop_col = None
+        for c in ["shop_id", "location_id", "store_id", "shop", "location", "ShopID", "LocationID"]:
+            if c in regions_df.columns:
+                shop_col = c
+                break
+        if shop_col:
+            tmp = regions_df[[shop_col, name_col]].copy()
+            tmp[shop_col] = pd.to_numeric(tmp[shop_col], errors="coerce")
+            for _, r in tmp.dropna().iterrows():
+                try:
+                    shop_name_map[int(r[shop_col])] = str(r[name_col])
+                except Exception:
+                    pass
+
+    def shop_label(sid: int) -> str:
+        return shop_name_map.get(sid, f"Shop {sid}")
+
+    st.subheader("🎯 Top opportunities (no charts)")
+    top = stores.head(7).copy()
+    top["Locatie"] = top["shop_id"].astype(int).map(shop_label)
+
+    top_tbl = top[["Locatie", "shop_id", "footfall", "turnover", "conv", "spv", "opportunity_score"]].copy()
+    top_tbl.rename(columns={
+        "shop_id": "ShopID",
+        "footfall": "Bezoekers",
+        "turnover": "Omzet",
+        "conv": "Conversie",
+        "spv": "SPV",
+        "opportunity_score": "OppScore",
+    }, inplace=True)
+
+    disp = top_tbl.copy()
+    disp["Bezoekers"] = disp["Bezoekers"].map(fmt_int)
+    disp["Omzet"] = disp["Omzet"].map(fmt_eur)
+    disp["Conversie"] = disp["Conversie"].map(fmt_pct)
+    disp["SPV"] = disp["SPV"].map(fmt_eur)
+    disp["OppScore"] = disp["OppScore"].map(lambda x: f"{float(x):.2f}" if pd.notna(x) else "-")
+
+    st.dataframe(disp, use_container_width=True, hide_index=True)
+
+    # AI Region brief
+    st.subheader("🧠 AI brief (region)")
+    if not openai_key:
+        st.warning("OPENAI_API_KEY ontbreekt in secrets → geen AI-brief.")
+    else:
+        top_payload: List[Dict[str, Any]] = []
+        for _, r in top.iterrows():
+            sid = int(r["shop_id"])
+            top_payload.append({
+                "location": shop_label(sid),
+                "shop_id": sid,
+                "footfall": float(r.get("footfall", np.nan)),
+                "turnover": float(r.get("turnover", np.nan)),
+                "conversion_rate": float(r.get("conv", np.nan)),
+                "sales_per_visitor": float(r.get("spv", np.nan)),
+                "opportunity_score": float(r.get("opportunity_score", np.nan)),
             })
 
-            # Build top opportunities payload
-            mapping = st.session_state["agentic_mapping"]
-            top = scores.head(7).copy()
-            opp_list: List[Dict[str, Any]] = []
-            for _, r in top.iterrows():
-                sid = int(r["shop_id"])
-                opp_list.append({
-                    "location": name_for(sid, mapping),
-                    "shop_id": sid,
-                    "footfall": float(r.get("footfall", np.nan)),
-                    "turnover": float(r.get("turnover", np.nan)),
-                    "conversion_rate": float(r.get("conv", np.nan)),
-                    "sales_per_visitor": float(r.get("spv", np.nan)),
-                    "opportunity_score": float(r.get("opportunity_score", np.nan)),
-                })
+        meta = {
+            "tool": "Region Agentic Workload v2",
+            "guardrails": [
+                "no category assumptions",
+                "no staffing unless fields exist",
+                "no invented KPIs",
+            ],
+            "staffing_fields": [],  # we keep empty unless you later add staffing data columns
+        }
 
-            # Save to session (so you can rerun only LLM if needed)
-            st.session_state["agentic_df"] = df
-            st.session_state["agentic_last_key"] = selection_key
+        with st.spinner("Generating brief…"):
+            brief = llm_region_brief(
+                api_key=openai_key,
+                model=openai_model,
+                region_kpis=rollup,
+                top_opps=top_payload,
+                meta=meta,
+            )
+        st.markdown(brief)
 
-            # LLM call
-            if not openai_key:
-                status.update(label="Agent ready (no OpenAI key)", state="complete")
-                st.warning("OPENAI_API_KEY ontbreekt in secrets. Ik kan wel de opportunities tonen, maar geen brief genereren.")
-                brief = None
-            else:
-                brief = llm_brief(
-                    api_key=openai_key,
-                    model=openai_model,
-                    region_kpis=region_kpis,
-                    opportunities=opp_list,
-                    meta={"tool": "Region Agentic Workload", "preset_label": preset_label},
-                )
-                status.update(label="Agent complete ✅", state="complete")
+    # Next best actions per store (rule-based, guarded)
+    st.divider()
+    st.subheader("✅ Next Best Action per store (guarded, no category assumptions)")
 
-        # Output (no charts)
-        st.subheader("📌 Region rollup")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Footfall", f"{int(region_kpis['footfall']):,}".replace(",", ".") if not np.isnan(region_kpis["footfall"]) else "-")
-        c2.metric("Turnover", fmt_eur(region_kpis["turnover"]))
-        c3.metric("Conversion", fmt_pct(region_kpis["conversion_rate"]))
-        c4.metric("SPV", fmt_eur(region_kpis["sales_per_visitor"]))
+    for _, r in top.iterrows():
+        sid = int(r["shop_id"])
+        loc = shop_label(sid)
+        plan = classify_lever(r, med)
 
-        st.subheader("🎯 Top opportunities (agent output)")
-        show = top.copy()
-        show["location"] = show["shop_id"].apply(lambda x: name_for(int(x), st.session_state["agentic_mapping"]))
-        show = show[["location", "shop_id", "footfall", "turnover", "conv", "spv", "opportunity_score"]]
-        show.rename(columns={
-            "location": "Locatie",
-            "shop_id": "ShopID",
-            "footfall": "Bezoekers",
-            "turnover": "Omzet",
-            "conv": "Conversie",
-            "spv": "SPV",
-            "opportunity_score": "OppScore",
-        }, inplace=True)
+        with st.expander(f"{loc} (Shop {sid}) — lever: {plan['lever']}", expanded=False):
+            st.markdown("**Observed (data):**")
+            st.write({
+                "Footfall": fmt_int(r.get("footfall")),
+                "Turnover": fmt_eur(r.get("turnover")),
+                "Conversion": fmt_pct(r.get("conv")),
+                "SPV": fmt_eur(r.get("spv")),
+                "OppScore": f"{float(r.get('opportunity_score')):.2f}" if pd.notna(r.get("opportunity_score")) else "-",
+            })
 
-        # format
-        show_fmt = show.copy()
-        show_fmt["Bezoekers"] = show_fmt["Bezoekers"].map(lambda x: f"{int(x):,}".replace(",", ".") if pd.notna(x) else "-")
-        show_fmt["Omzet"] = show_fmt["Omzet"].map(fmt_eur)
-        show_fmt["Conversie"] = show_fmt["Conversie"].map(fmt_pct)
-        show_fmt["SPV"] = show_fmt["SPV"].map(fmt_eur)
-        show_fmt["OppScore"] = show_fmt["OppScore"].map(lambda x: f"{x:.2f}" if pd.notna(x) else "-")
+            st.markdown("**Why:**")
+            st.write(plan["why"])
 
-        st.dataframe(show_fmt, use_container_width=True, hide_index=True)
+            st.markdown("**Test (1 week):**")
+            for t in plan["test"]:
+                st.write(f"- {t}")
 
-        st.subheader("🧠 AI brief (agentic)")
-        if brief:
-            st.markdown(brief)
-        else:
-            st.info("Geen brief (OPENAI_API_KEY ontbreekt of call overgeslagen).")
+            st.markdown("**To sharpen:**")
+            for n in plan["needs"]:
+                st.write(f"- {n}")
 
-        with st.expander("Raw df preview (first 200 rows)", expanded=False):
-            st.dataframe(df.head(200), use_container_width=True)
-
-    # If already cached and you didn’t run: show minimal hint
-    if st.session_state["agentic_df"] is not None and not should_run:
-        st.info("Deze page gebruikt cached data. Klik **Run agent** om opnieuw te draaien met de huidige selectie.")
+    with st.expander("Raw df preview (first 200 rows)", expanded=False):
+        st.dataframe(df.head(200), use_container_width=True)
 
 
 if __name__ == "__main__":
