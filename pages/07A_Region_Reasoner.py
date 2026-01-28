@@ -584,7 +584,14 @@ def main():
     if merged.empty:
         st.warning("No stores matched your regions.csv mapping for this retailer.")
         return
-
+    # ---- NORMALISE REGION STRINGS (CRITICAL) ----
+    merged["region"] = (
+        merged["region"]
+        .astype(str)
+        .str.strip()
+        .str.lower()
+    )
+    
     # Store display name
     if "store_label" in merged.columns and merged["store_label"].notna().any():
         merged["store_display"] = merged["store_label"]
