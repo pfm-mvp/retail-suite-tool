@@ -1,426 +1,590 @@
-from __future__ import annotations
+# pages/07A_Region_Reasoner.py
+# ------------------------------------------------------------
+# Region Reasoner — Agentic Workload (NO CHARTS)
+# - Uses SAME selectors as 06C_Regio_Copilot_SVI.py
+# - Uses SAME helpers_vemcount_api interface (cfg=..., shop_ids=..., data_outputs=...)
+# - Uses regions.csv for region mapping
+# - Minimal output: region KPI + per-store "workload" (text + table)
+# - Staffing: only if data exists
+# ------------------------------------------------------------
 
 import os
-import inspect
-from datetime import date, timedelta
-from typing import Any, Dict, List, Optional, Tuple
-
+import json
 import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
 
+from datetime import datetime
 
-# =========================
-# Imports from your repo
-# =========================
-build_report_params = None
-fetch_report = None
+from helpers_clients import load_clients
+from helpers_periods import period_catalog
+from helpers_normalize import normalize_vemcount_response
+from helpers_vemcount_api import VemcountApiConfig, fetch_report, build_report_params
 
+# Optional OpenAI (if you want the wording)
+# - Only used if OPENAI_API_KEY exists
 try:
-    from helpers_vemcount_api import build_report_params, fetch_report  # type: ignore
+    from openai import OpenAI
 except Exception:
-    build_report_params = None
-    fetch_report = None
-
-normalize_vemcount_response = None
-try:
-    from helpers_vemcount_api import normalize_vemcount_response  # type: ignore
-except Exception:
-    normalize_vemcount_response = None
+    OpenAI = None
 
 
-# =========================
-# EU formatting
-# =========================
-def fmt_eur(x: Any) -> str:
+# ----------------------
+# Page config
+# ----------------------
+st.set_page_config(page_title="Region Reasoner (Agentic)", layout="wide")
+
+
+# ----------------------
+# Small format helpers (EU-ish)
+# ----------------------
+def fmt_eur(x):
     try:
-        x = float(x)
+        if pd.isna(x):
+            return "-"
+        return f"€ {float(x):,.0f}".replace(",", ".")
     except Exception:
         return "-"
-    s = f"{x:,.0f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    return f"€{s}"
 
-
-def fmt_pct(x: Any) -> str:
+def fmt_int(x):
     try:
-        x = float(x)
+        if pd.isna(x):
+            return "-"
+        return f"{float(x):,.0f}".replace(",", ".")
     except Exception:
         return "-"
-    return f"{x * 100:.1f}%".replace(".", ",")
 
-
-def fmt_int(x: Any) -> str:
+def fmt_pct(x):
     try:
-        x = int(float(x))
+        if pd.isna(x):
+            return "-"
+        return f"{float(x):.1f}%".replace(".", ",")
     except Exception:
         return "-"
-    return f"{x:,}".replace(",", ".")
+
+def safe_div(a, b):
+    try:
+        a = float(a)
+        b = float(b)
+        if b == 0:
+            return np.nan
+        return a / b
+    except Exception:
+        return np.nan
 
 
-# =========================
-# Regions.csv (your actual format: sep=";")
-# =========================
-def _find_regions_csv() -> Optional[str]:
-    for p in ["data/regions.csv", "regions.csv", "assets/regions.csv", "config/regions.csv"]:
-        if os.path.exists(p):
-            return p
-    return None
+# ----------------------
+# API URL / endpoints (same logic as your working script)
+# ----------------------
+raw_api_url = st.secrets["API_URL"].rstrip("/")
+
+if raw_api_url.endswith("/get-report"):
+    REPORT_URL = raw_api_url
+    FASTAPI_BASE_URL = raw_api_url.rsplit("/get-report", 1)[0]
+else:
+    FASTAPI_BASE_URL = raw_api_url
+    REPORT_URL = raw_api_url + "/get-report"
 
 
-def load_regions_mapping() -> Tuple[pd.DataFrame, Dict[str, List[int]]]:
-    path = _find_regions_csv()
-    if not path:
-        raise FileNotFoundError("regions.csv not found (expected at data/regions.csv).")
-
+# ----------------------
+# Region mapping (same sep=";")
+# ----------------------
+@st.cache_data(ttl=600)
+def load_region_mapping(path: str = "data/regions.csv") -> pd.DataFrame:
     df = pd.read_csv(path, sep=";")
-    if df.shape[1] == 1:
-        df = pd.read_csv(path, sep=",")
-
-    # Your file has: shop_id;region;sqm_override;store_type
-    if "region" not in df.columns:
-        raise ValueError(f"regions.csv missing 'region'. Found: {list(df.columns)}")
-    if "shop_id" not in df.columns:
-        raise ValueError(f"regions.csv missing 'shop_id'. Found: {list(df.columns)}")
-
-    df = df.copy()
-    df["shop_id"] = pd.to_numeric(df["shop_id"], errors="coerce").astype("Int64")
-
-    region_to_shops: Dict[str, List[int]] = {}
-    for r, g in df.groupby("region"):
-        region_to_shops[str(r)] = sorted([int(x) for x in g["shop_id"].dropna().unique().tolist()])
-
-    return df, region_to_shops
-
-
-# =========================
-# Period -> real date window
-# =========================
-PERIOD_PRESETS = [
-    ("last_week", "Last week"),
-    ("this_month", "This month"),
-    ("last_month", "Last month"),
-    ("this_quarter", "This quarter"),
-    ("last_quarter", "Last quarter"),
-    ("this_year", "This year"),
-    ("last_year", "Last year"),
-    ("date", "Custom range"),
-]
-
-
-def start_of_month(d: date) -> date:
-    return date(d.year, d.month, 1)
-
-
-def end_of_month(d: date) -> date:
-    if d.month == 12:
-        nm = date(d.year + 1, 1, 1)
-    else:
-        nm = date(d.year, d.month + 1, 1)
-    return nm - timedelta(days=1)
-
-
-def quarter_start(d: date) -> date:
-    q = (d.month - 1) // 3 + 1
-    return date(d.year, (q - 1) * 3 + 1, 1)
-
-
-def quarter_end(d: date) -> date:
-    qs = quarter_start(d)
-    if qs.month == 10:
-        nm = date(qs.year + 1, 1, 1)
-    else:
-        nm = date(qs.year, qs.month + 3, 1)
-    return nm - timedelta(days=1)
-
-
-def resolve_preset_to_dates(preset: str, today: Optional[date] = None) -> Tuple[date, date]:
-    today = today or date.today()
-    if preset == "last_week":
-        end = today - timedelta(days=1)
-        start = end - timedelta(days=6)
-        return start, end
-    if preset == "this_month":
-        return start_of_month(today), today
-    if preset == "last_month":
-        last_end = start_of_month(today) - timedelta(days=1)
-        return start_of_month(last_end), end_of_month(last_end)
-    if preset == "this_quarter":
-        return quarter_start(today), today
-    if preset == "last_quarter":
-        this_q = quarter_start(today)
-        last_end = this_q - timedelta(days=1)
-        return quarter_start(last_end), quarter_end(last_end)
-    if preset == "this_year":
-        return date(today.year, 1, 1), today
-    if preset == "last_year":
-        return date(today.year - 1, 1, 1), date(today.year - 1, 12, 31)
-    return today - timedelta(days=27), today
-
-
-# =========================
-# Adapters: build_report_params + fetch_report
-# =========================
-def call_build_report_params(
-    shop_ids: List[int],
-    data_output: List[str],
-    source: str,
-    period: str,
-    period_step: str,
-    date_from: str,
-    date_to: str,
-) -> Dict[str, Any]:
-    if build_report_params is None:
-        raise RuntimeError("build_report_params not imported")
-
-    sig = inspect.signature(build_report_params)
-    p = sig.parameters
-
-    kwargs: Dict[str, Any] = {}
-
-    # shops
-    if "data" in p:
-        kwargs["data"] = shop_ids
-    elif "shop_ids" in p:
-        kwargs["shop_ids"] = shop_ids
-    elif "ids" in p:
-        kwargs["ids"] = shop_ids
-    elif "shops" in p:
-        kwargs["shops"] = shop_ids
-
-    # outputs
-    if "data_output" in p:
-        kwargs["data_output"] = data_output
-    elif "outputs" in p:
-        kwargs["outputs"] = data_output
-    elif "kpis" in p:
-        kwargs["kpis"] = data_output
-
-    # other
-    if "source" in p:
-        kwargs["source"] = source
-    if "period" in p:
-        kwargs["period"] = period
-    if "period_step" in p:
-        kwargs["period_step"] = period_step
-
-    if "date_from" in p:
-        kwargs["date_from"] = date_from
-    elif "from_date" in p:
-        kwargs["from_date"] = date_from
-
-    if "date_to" in p:
-        kwargs["date_to"] = date_to
-    elif "to_date" in p:
-        kwargs["to_date"] = date_to
-
-    try:
-        return build_report_params(**kwargs)  # type: ignore
-    except TypeError:
-        # positional fallback
-        args: List[Any] = []
-        for name in p.keys():
-            if name in ("data", "shop_ids", "ids", "shops"):
-                args.append(shop_ids)
-            elif name in ("data_output", "outputs", "kpis"):
-                args.append(data_output)
-            elif name == "source":
-                args.append(source)
-            elif name == "period":
-                args.append(period)
-            elif name == "period_step":
-                args.append(period_step)
-            elif name in ("date_from", "from_date"):
-                args.append(date_from)
-            elif name in ("date_to", "to_date"):
-                args.append(date_to)
-        return build_report_params(*args)  # type: ignore
-
-
-def call_fetch_report(api_url: str, params_dict: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Your fetch_report differs: some accept (api_url, params),
-    some accept (api_url, query), some accept only (params).
-    We inspect signature and call correctly.
-    """
-    if fetch_report is None:
-        raise RuntimeError("fetch_report not imported")
-
-    sig = inspect.signature(fetch_report)
-    p = list(sig.parameters.keys())
-
-    # If it accepts **kwargs, pass as kwargs
-    try:
-        if any(sig.parameters[k].kind == inspect.Parameter.VAR_KEYWORD for k in sig.parameters):
-            # Could be fetch_report(api_url=..., **params)
-            # Prefer passing api_url if it exists in signature.
-            if "api_url" in sig.parameters or "base_url" in sig.parameters or "url" in sig.parameters:
-                return fetch_report(api_url=api_url, **params_dict)  # type: ignore
-            return fetch_report(**params_dict)  # type: ignore
-    except TypeError:
-        pass
-
-    # Common patterns:
-    # 1) fetch_report(api_url, params_dict) positional
-    # 2) fetch_report(api_url, **params?) already handled above
-    # 3) fetch_report(params_dict) positional only
-
-    if len(p) >= 2:
-        # Try (api_url, params_dict)
-        try:
-            return fetch_report(api_url, params_dict)  # type: ignore
-        except TypeError:
-            pass
-        # Try (api_url, query=params_dict) if second arg named query
-        if "query" in sig.parameters:
-            try:
-                return fetch_report(api_url, query=params_dict)  # type: ignore
-            except TypeError:
-                pass
-
-    if len(p) == 1:
-        # Try (params_dict)
-        return fetch_report(params_dict)  # type: ignore
-
-    # Last resort
-    return fetch_report(api_url, params_dict)  # type: ignore
-
-
-# =========================
-# Normalization fallback
-# =========================
-def normalize_payload(payload: Dict[str, Any]) -> pd.DataFrame:
-    if callable(normalize_vemcount_response):
-        rows = normalize_vemcount_response(payload)  # type: ignore
-        return pd.DataFrame(rows)
-
-    # basic fallback
-    data = payload.get("data")
-    if not isinstance(data, dict):
+    if "shop_id" not in df.columns or "region" not in df.columns:
         return pd.DataFrame()
-
-    rows: List[Dict[str, Any]] = []
-    for date_key, by_shop in data.items():
-        if not isinstance(by_shop, dict):
-            continue
-        for shop_id, metrics in by_shop.items():
-            if isinstance(metrics, dict):
-                r = {"date": date_key, "shop_id": int(shop_id)}
-                r.update(metrics)
-                rows.append(r)
-    return pd.DataFrame(rows)
-
-
-# =========================
-# Main
-# =========================
-def main():
-    st.set_page_config(page_title="Region Reasoner", page_icon="🧠", layout="wide")
-    st.title("🧠 Region Reasoner (agentic workload, selectors aligned)")
-
-    if build_report_params is None or fetch_report is None:
-        st.error("helpers_vemcount_api.build_report_params/fetch_report niet gevonden.")
-        st.stop()
-
-    api_url = st.secrets.get("API_URL", os.getenv("API_URL", "")).strip()
-    if not api_url:
-        st.error("API_URL ontbreekt.")
-        st.stop()
-
-    regions_df, region_to_shops = load_regions_mapping()
-
-    c1, c2, c3 = st.columns([1.6, 1.2, 0.7], vertical_alignment="center")
-    with c1:
-        region = st.selectbox("Region", sorted(region_to_shops.keys()))
-    with c2:
-        preset = st.selectbox("Period", [p[0] for p in PERIOD_PRESETS], index=2)
-    with c3:
-        run = st.button("Run")
-
-    if preset == "date":
-        a, b = st.columns(2)
-        ds, de = resolve_preset_to_dates("last_month")
-        with a:
-            d_from = st.date_input("Date from", value=ds)
-        with b:
-            d_to = st.date_input("Date to", value=de)
+    df["shop_id"] = pd.to_numeric(df["shop_id"], errors="coerce").astype("Int64")
+    df["region"] = df["region"].astype(str)
+    # optional cols
+    if "store_type" in df.columns:
+        df["store_type"] = df["store_type"].astype(str)
+    if "store_label" in df.columns:
+        df["store_label"] = df["store_label"].astype(str)
+    if "sqm_override" in df.columns:
+        df["sqm_override"] = pd.to_numeric(df["sqm_override"], errors="coerce")
     else:
-        d_from, d_to = resolve_preset_to_dates(preset)
+        df["sqm_override"] = np.nan
+    df = df.dropna(subset=["shop_id"])
+    return df
 
-    date_from_s, date_to_s = d_from.isoformat(), d_to.isoformat()
-    shop_ids = region_to_shops.get(region, [])
 
-    selection_key = f"{region}|{preset}|{date_from_s}|{date_to_s}|n={len(shop_ids)}"
+@st.cache_data(ttl=600)
+def get_locations_by_company(company_id: int) -> pd.DataFrame:
+    url = f"{FASTAPI_BASE_URL.rstrip('/')}/company/{company_id}/location"
+    resp = requests.get(url, timeout=60)
+    resp.raise_for_status()
+    data = resp.json()
+    if isinstance(data, dict) and "locations" in data:
+        return pd.DataFrame(data["locations"])
+    return pd.DataFrame(data)
+
+
+# ----------------------
+# Agentic logic
+# ----------------------
+def compute_store_kpis(df_store: pd.DataFrame) -> dict:
+    foot = float(pd.to_numeric(df_store.get("footfall", np.nan), errors="coerce").dropna().sum())
+    turn = float(pd.to_numeric(df_store.get("turnover", np.nan), errors="coerce").dropna().sum())
+    trans = float(pd.to_numeric(df_store.get("transactions", np.nan), errors="coerce").dropna().sum())
+    conv = (trans / foot * 100.0) if foot > 0 else np.nan
+    spv = (turn / foot) if foot > 0 else np.nan
+    atv = (turn / trans) if trans > 0 else np.nan
+    return {
+        "footfall": foot,
+        "turnover": turn,
+        "transactions": trans,
+        "conversion_rate": conv,
+        "sales_per_visitor": spv,
+        "sales_per_transaction": atv,
+    }
+
+
+def pick_best_actions(store_k: dict, bench_k: dict, staffing_k: dict | None = None) -> list[dict]:
+    """
+    Data-driven actions only.
+    No industry cliches (no "upsell perfume", etc.)
+
+    We select 1–2 actions based on the largest relative gap vs benchmark,
+    and we attach a crisp measurement plan.
+    """
+    actions = []
+
+    # Build comparable metrics
+    metrics = [
+        ("conversion_rate", "Conversion", "%", "CR"),
+        ("sales_per_visitor", "Sales per Visitor", "€", "SPV"),
+        ("sales_per_transaction", "Avg Transaction Value", "€", "ATV"),
+    ]
+
+    gaps = []
+    for key, label, unit, short in metrics:
+        a = store_k.get(key, np.nan)
+        b = bench_k.get(key, np.nan)
+        if pd.notna(a) and pd.notna(b) and float(b) != 0.0:
+            idx = (float(a) / float(b)) * 100.0
+            gaps.append((key, label, unit, short, idx, a, b))
+
+    # Sort by worst index first
+    gaps = sorted(gaps, key=lambda x: x[4])
+
+    # Action logic
+    for key, label, unit, short, idx, a, b in gaps:
+        if idx >= 95:
+            continue  # close enough
+        if key == "conversion_rate":
+            actions.append({
+                "action": "Fix conversion leakage",
+                "why": f"{label} is {idx:.0f}% of benchmark ({fmt_pct(a)} vs {fmt_pct(b)}).",
+                "how_to_test": "Run 2-week A/B: service script / queue management / hero product placement. Measure CR uplift vs baseline.",
+                "kpi": "conversion_rate",
+            })
+        elif key == "sales_per_visitor":
+            actions.append({
+                "action": "Lift spend per visitor (without discounting by default)",
+                "why": f"{label} is {idx:.0f}% of benchmark ({fmt_eur(a)} vs {fmt_eur(b)}).",
+                "how_to_test": "Audit basket builders: bundles, attach-rate prompts, layout friction. Measure SPV uplift week-over-week.",
+                "kpi": "sales_per_visitor",
+            })
+        elif key == "sales_per_transaction":
+            actions.append({
+                "action": "Increase ATV through guided selling (not blanket promo)",
+                "why": f"{label} is {idx:.0f}% of benchmark ({fmt_eur(a)} vs {fmt_eur(b)}).",
+                "how_to_test": "Coach top-3 add-on prompts + assortment availability check. Measure ATV uplift and margin impact.",
+                "kpi": "sales_per_transaction",
+            })
+        if len(actions) >= 2:
+            break
+
+    # Staffing (only if present)
+    if staffing_k and staffing_k.get("available", False):
+        staff_idx = staffing_k.get("coverage_idx", np.nan)
+        if pd.notna(staff_idx) and staff_idx < 90:
+            actions.append({
+                "action": "Rebalance staffing to demand peaks",
+                "why": f"Staffing coverage index {staff_idx:.0f}% vs target. (Data available)",
+                "how_to_test": "Shift 1–2 FTE blocks to top-footfall hours; track CR/SPV change during peak windows.",
+                "kpi": "staffing_coverage",
+            })
+
+    if not actions:
+        actions = [{
+            "action": "Maintain & replicate what's working",
+            "why": "This store is within ~5% of benchmark on key commercial KPIs.",
+            "how_to_test": "Document best practices and replicate to bottom-25% stores in region.",
+            "kpi": "playbook",
+        }]
+
+    return actions
+
+
+def llm_summarize(openai_client, context: dict) -> str:
+    """
+    If OpenAI is available, create a short executive summary.
+    Safe fallback if not.
+    """
+    if openai_client is None:
+        return ""
+
+    prompt = f"""
+You are a retail performance analyst. Write a crisp 6-10 line summary for a region manager.
+No generic advice, no industry clichés. Only refer to metrics in the context.
+
+Context JSON:
+{json.dumps(context, ensure_ascii=False, default=str)}
+"""
+    try:
+        r = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You write concise, data-driven retail actions."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.2,
+        )
+        return r.choices[0].message.content.strip()
+    except Exception:
+        return ""
+
+
+# ----------------------
+# MAIN
+# ----------------------
+def main():
+    # Session defaults
     st.session_state.setdefault("rr_last_key", None)
-    st.session_state.setdefault("rr_df", None)
+    st.session_state.setdefault("rr_payload", None)
+    st.session_state.setdefault("rr_ran", False)
 
-    selection_changed = st.session_state["rr_last_key"] != selection_key
-    should_fetch = run or st.session_state["rr_df"] is None or selection_changed
+    # Title row like Copilot (simple)
+    st.markdown("## 🧠 Region Reasoner (Agentic Workload)")
+    st.caption("Same selectors as Copilot v2 · No charts · Focus on what to do next per store")
 
+    # Clients + periods (same as your working script)
+    clients = load_clients("clients.json")
+    clients_df = pd.DataFrame(clients)
+
+    if clients_df.empty:
+        st.error("No clients found in clients.json")
+        return
+
+    required_cols = {"brand", "name", "company_id"}
+    if not required_cols.issubset(set(clients_df.columns)):
+        st.error(f"clients.json missing columns. Required: {sorted(required_cols)}")
+        return
+
+    clients_df["label"] = clients_df.apply(
+        lambda r: f"{r['brand']} – {r['name']} (company_id {r['company_id']})",
+        axis=1,
+    )
+
+    periods = period_catalog(today=datetime.now().date())
+    if not isinstance(periods, dict) or len(periods) == 0:
+        st.error("period_catalog() returned no periods.")
+        return
+    period_labels = list(periods.keys())
+
+    # Row selectors
+    c1, c2, c3, c4 = st.columns([2.2, 1.4, 1.4, 0.8], vertical_alignment="center")
+    with c1:
+        client_label = st.selectbox("Client", clients_df["label"].tolist(), key="rr_client")
+    with c2:
+        period_choice = st.selectbox("Period", period_labels, key="rr_period")
+    with c3:
+        # region selector depends on mapping; placeholder for now
+        st.write("")
+    with c4:
+        run_btn = st.button("Run", type="primary", key="rr_run")
+
+    selected_client = clients_df[clients_df["label"] == client_label].iloc[0].to_dict()
+    company_id = int(selected_client["company_id"])
+
+    start_period = periods[period_choice].start
+    end_period = periods[period_choice].end
+
+    # Load locations and region mapping
+    try:
+        locations_df = get_locations_by_company(company_id)
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error fetching stores from FastAPI: {e}")
+        return
+
+    region_map = load_region_mapping()
+    if region_map.empty:
+        st.error("No valid data/regions.csv found (min required: shop_id;region).")
+        return
+
+    locations_df["id"] = pd.to_numeric(locations_df["id"], errors="coerce").astype("Int64")
+    merged = locations_df.merge(region_map, left_on="id", right_on="shop_id", how="inner")
+
+    if merged.empty:
+        st.warning("No stores matched your region mapping for this retailer.")
+        return
+
+    # Store display name (same pattern)
+    if "store_label" in merged.columns and merged["store_label"].notna().any():
+        merged["store_display"] = merged["store_label"]
+    else:
+        merged["store_display"] = merged["name"] if "name" in merged.columns else merged["id"].astype(str)
+
+    available_regions = sorted(merged["region"].dropna().unique().tolist())
+
+    # Put region selector in column 3 now that we have options
+    with c3:
+        region_choice = st.selectbox("Region", available_regions, key="rr_region")
+
+    # Key
+    run_key = (company_id, region_choice, str(start_period), str(end_period), period_choice)
+    selection_changed = st.session_state.rr_last_key != run_key
+    should_fetch = bool(run_btn) or bool(selection_changed) or (not bool(st.session_state.rr_ran))
+
+    # Debug (always available)
     with st.expander("Debug", expanded=False):
         st.write({
-            "api_url": api_url,
-            "region": region,
-            "preset": preset,
-            "date_from": date_from_s,
-            "date_to": date_to_s,
-            "shop_ids_count": len(shop_ids),
+            "REPORT_URL": REPORT_URL,
+            "FASTAPI_BASE_URL": FASTAPI_BASE_URL,
+            "company_id": company_id,
+            "region": region_choice,
+            "period_choice": period_choice,
+            "start_period": str(start_period),
+            "end_period": str(end_period),
             "selection_changed": selection_changed,
-            "build_report_params_signature": str(inspect.signature(build_report_params)),
-            "fetch_report_signature": str(inspect.signature(fetch_report)),
         })
 
+    if not should_fetch and st.session_state.rr_payload is None:
+        st.info("Select client / region / period and click **Run**.")
+        return
+
+    # ----------------------
+    # FETCH
+    # ----------------------
     if should_fetch:
-        data_output = ["count_in", "turnover", "conversion_rate", "sales_per_visitor"]
-        params_dict = call_build_report_params(
-            shop_ids=shop_ids,
-            data_output=data_output,
-            source="shops",
+        metric_map = {
+            "count_in": "footfall",
+            "turnover": "turnover",
+            "transactions": "transactions",
+            "conversion_rate": "conversion_rate",
+            "sales_per_visitor": "sales_per_visitor",
+            "sales_per_transaction": "sales_per_transaction",
+        }
+
+        all_shop_ids = merged["id"].dropna().astype(int).unique().tolist()
+
+        cfg = VemcountApiConfig(report_url=REPORT_URL)
+
+        params_preview = build_report_params(
+            shop_ids=all_shop_ids,
+            data_outputs=list(metric_map.keys()),
             period="date",
-            period_step="day",
-            date_from=date_from_s,
-            date_to=date_to_s,
+            step="day",
+            source="shops",
+            date_from=start_period,
+            date_to=end_period,
         )
 
-        with st.status("Fetching…", expanded=True) as status:
-            status.write("Calling fetch_report…")
-            payload = call_fetch_report(api_url, params_dict)
+        with st.spinner("Fetching KPI data…"):
+            try:
+                resp = fetch_report(
+                    cfg=cfg,
+                    shop_ids=all_shop_ids,
+                    data_outputs=list(metric_map.keys()),
+                    period="date",
+                    step="day",
+                    source="shops",
+                    date_from=start_period,
+                    date_to=end_period,
+                    timeout=120,
+                )
+            except requests.exceptions.HTTPError as e:
+                st.error(f"❌ HTTPError from /get-report: {e}")
+                try:
+                    st.code(e.response.text)
+                except Exception:
+                    pass
+                with st.expander("🔧 Debug request (params)"):
+                    st.write("Params:", params_preview)
+                return
+            except requests.exceptions.RequestException as e:
+                st.error(f"❌ RequestException from /get-report: {e}")
+                with st.expander("🔧 Debug request (params)"):
+                    st.write("Params:", params_preview)
+                return
 
-            df = normalize_payload(payload)
-            if df.empty:
-                status.update(label="No data", state="error")
-                st.error("Lege dataset. Check API response / shop ids.")
-                st.stop()
+        df_norm = normalize_vemcount_response(resp, kpi_keys=metric_map.keys()).rename(columns=metric_map)
+        if df_norm is None or df_norm.empty:
+            st.warning("No data returned for the current selection.")
+            return
 
-            for col in ["count_in", "turnover", "conversion_rate", "sales_per_visitor"]:
-                if col in df.columns:
-                    df[col] = pd.to_numeric(df[col], errors="coerce")
+        # detect store key
+        store_key_col = None
+        for cand in ["shop_id", "id", "location_id"]:
+            if cand in df_norm.columns:
+                store_key_col = cand
+                break
+        if store_key_col is None:
+            st.error("No store-id column found in response (shop_id/id/location_id).")
+            return
 
-            status.update(label="Done ✅", state="complete")
+        df_norm[store_key_col] = pd.to_numeric(df_norm[store_key_col], errors="coerce").astype("Int64")
+        df_norm["date"] = pd.to_datetime(df_norm["date"], errors="coerce")
+        df_norm = df_norm.dropna(subset=["date", store_key_col])
 
-        st.session_state["rr_df"] = df
-        st.session_state["rr_last_key"] = selection_key
+        # merge region/store labels into df_norm
+        dim_cols = ["id", "region", "store_display"]
+        if "store_type" in merged.columns:
+            dim_cols.append("store_type")
 
-    df = st.session_state["rr_df"]
-    if df is None or df.empty:
-        st.info("Klik Run om te starten.")
-        st.stop()
+        dim = merged[dim_cols].drop_duplicates().copy()
+        dim["id"] = pd.to_numeric(dim["id"], errors="coerce").astype("Int64")
 
-    # Minimal output
-    st.subheader("Region rollup")
-    footfall = float(df.get("count_in", pd.Series(dtype=float)).sum(skipna=True))
-    turnover = float(df.get("turnover", pd.Series(dtype=float)).sum(skipna=True))
-    conv = float(df.get("conversion_rate", pd.Series(dtype=float)).mean(skipna=True))
-    spv = float(df.get("sales_per_visitor", pd.Series(dtype=float)).mean(skipna=True))
+        df = df_norm.merge(dim, left_on=store_key_col, right_on="id", how="left")
 
-    a, b, c, d = st.columns(4)
-    a.metric("Footfall", fmt_int(footfall))
-    b.metric("Turnover", fmt_eur(turnover))
-    c.metric("Conversion", fmt_pct(conv))
-    d.metric("SPV", fmt_eur(spv))
+        # filter to region
+        df_region = df[df["region"] == region_choice].copy()
+        if df_region.empty:
+            st.warning("No rows for this region in the selected period.")
+            return
 
-    with st.expander("Raw df preview", expanded=False):
-        st.dataframe(df.head(200), use_container_width=True)
+        st.session_state.rr_last_key = run_key
+        st.session_state.rr_payload = {
+            "df_region": df_region,
+            "df_all": df,
+            "store_key_col": store_key_col,
+            "selected_client": selected_client,
+            "region_choice": region_choice,
+            "start_period": start_period,
+            "end_period": end_period,
+        }
+        st.session_state.rr_ran = True
+
+    payload = st.session_state.rr_payload
+    if payload is None:
+        st.info("Select client / region / period and click **Run**.")
+        return
+
+    df_region = payload["df_region"]
+    df_all = payload["df_all"]
+    start_period = payload["start_period"]
+    end_period = payload["end_period"]
+    region_choice = payload["region_choice"]
+    selected_client = payload["selected_client"]
+
+    st.markdown(f"### {selected_client['brand']} — Region **{region_choice}** · {start_period} → {end_period}")
+
+    # Region KPI rollup
+    region_k = compute_store_kpis(df_region)
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Footfall", fmt_int(region_k["footfall"]))
+    k2.metric("Revenue", fmt_eur(region_k["turnover"]))
+    k3.metric("Conversion", fmt_pct(region_k["conversion_rate"]))
+    k4.metric("SPV", fmt_eur(region_k["sales_per_visitor"]))
+
+    st.markdown("---")
+
+    # Benchmarks: region vs company (same period)
+    company_k = compute_store_kpis(df_all)
+
+    # Build per-store table
+    stores = (
+        df_region.groupby(["store_display", "id"], as_index=False)
+        .apply(lambda g: pd.Series(compute_store_kpis(g)))
+        .reset_index(drop=True)
+    )
+
+    # Add indices vs region benchmark
+    def idx(a, b):
+        return (a / b * 100.0) if (pd.notna(a) and pd.notna(b) and float(b) != 0.0) else np.nan
+
+    stores["CR idx vs region"] = stores.apply(lambda r: idx(r["conversion_rate"], region_k["conversion_rate"]), axis=1)
+    stores["SPV idx vs region"] = stores.apply(lambda r: idx(r["sales_per_visitor"], region_k["sales_per_visitor"]), axis=1)
+    stores["ATV idx vs region"] = stores.apply(lambda r: idx(r["sales_per_transaction"], region_k["sales_per_transaction"]), axis=1)
+
+    # Rank "pain" (lower idx is worse)
+    stores["worst_idx"] = stores[["CR idx vs region", "SPV idx vs region", "ATV idx vs region"]].min(axis=1, skipna=True)
+    stores = stores.sort_values("worst_idx", ascending=True).reset_index(drop=True)
+
+    # Optional: OpenAI client
+    openai_client = None
+    if OpenAI is not None:
+        api_key = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", "")).strip()
+        if api_key:
+            try:
+                openai_client = OpenAI(api_key=api_key)
+            except Exception:
+                openai_client = None
+
+    # Staffing placeholder detection (only if present in df_region columns)
+    staffing_available = any(c.lower() in [x.lower() for x in df_region.columns] for c in ["staff", "staffing", "fte", "employees"])
+
+    # UI: select a store to see workload output
+    st.subheader("Agentic workload — per store")
+
+    store_labels = (stores["store_display"] + " · " + stores["id"].astype(str)).tolist()
+    pick = st.selectbox("Pick store", store_labels, index=0, key="rr_store_pick")
+    chosen_id = int(pick.split("·")[-1].strip())
+
+    df_store = df_region[df_region["id"].astype("Int64") == chosen_id].copy()
+    store_k = compute_store_kpis(df_store)
+
+    left, right = st.columns([1.2, 1.0], vertical_alignment="top")
+    with left:
+        st.markdown("#### Store KPI snapshot")
+        a, b, c, d = st.columns(4)
+        a.metric("Footfall", fmt_int(store_k["footfall"]))
+        b.metric("Revenue", fmt_eur(store_k["turnover"]))
+        c.metric("CR", fmt_pct(store_k["conversion_rate"]))
+        d.metric("SPV", fmt_eur(store_k["sales_per_visitor"]))
+
+        st.caption("Benchmark used for actions: **Region average (same period)**. (Company KPI is available for context.)")
+
+    # Build staffing context only if present
+    staffing_k = {"available": False}
+    if staffing_available:
+        staffing_k = {"available": True, "coverage_idx": np.nan}  # extend later with real logic
+
+    actions = pick_best_actions(store_k, region_k, staffing_k=staffing_k)
+
+    with right:
+        st.markdown("#### Recommended actions (data-driven)")
+        for i, ac in enumerate(actions[:3], start=1):
+            st.markdown(f"**{i}. {ac['action']}**")
+            st.write(f"- Why: {ac['why']}")
+            st.write(f"- Test: {ac['how_to_test']}")
+
+    # Executive summary (LLM optional)
+    ctx = {
+        "brand": selected_client["brand"],
+        "region": region_choice,
+        "period": {"start": str(start_period), "end": str(end_period)},
+        "store_id": chosen_id,
+        "store_kpis": {k: float(v) if pd.notna(v) else None for k, v in store_k.items()},
+        "region_kpis": {k: float(v) if pd.notna(v) else None for k, v in region_k.items()},
+        "company_kpis": {k: float(v) if pd.notna(v) else None for k, v in company_k.items()},
+        "actions": actions[:2],
+        "staffing_available": staffing_available,
+    }
+
+    summary = llm_summarize(openai_client, ctx)
+    if summary:
+        st.markdown("#### Executive summary (LLM)")
+        st.write(summary)
+
+    st.markdown("---")
+    st.subheader("Region store list (sorted by worst index vs region)")
+    show = stores.copy()
+    show["Revenue"] = show["turnover"].apply(fmt_eur)
+    show["Footfall"] = show["footfall"].apply(fmt_int)
+    show["CR"] = show["conversion_rate"].apply(fmt_pct)
+    show["SPV"] = show["sales_per_visitor"].apply(fmt_eur)
+    show["ATV"] = show["sales_per_transaction"].apply(fmt_eur)
+    for col in ["CR idx vs region", "SPV idx vs region", "ATV idx vs region", "worst_idx"]:
+        show[col] = pd.to_numeric(show[col], errors="coerce").apply(lambda x: "-" if pd.isna(x) else f"{float(x):.0f}%")
+
+    show = show.rename(columns={"store_display": "Store", "id": "Store ID"})
+    show = show[["Store", "Store ID", "Revenue", "Footfall", "CR", "SPV", "ATV", "CR idx vs region", "SPV idx vs region", "ATV idx vs region", "worst_idx"]]
+    st.dataframe(show, use_container_width=True, hide_index=True)
 
 
-if __name__ == "__main__":
-    main()
+main()
