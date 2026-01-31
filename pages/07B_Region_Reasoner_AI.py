@@ -403,8 +403,32 @@ def main():
             sqm_col = cand
             break
 
-    base_sqm = pd.to_numeric(merged[sqm_col], errors="coerce") if sqm_col else np.nan
-    merged["sqm_effective"] = merged["sqm_override"].combine_first(base_sqm)
+    # ---- Enrich sqm_effective (ALWAYS Series; avoid combine_first(float) crash) ----
+    sqm_col = None
+    for cand in ["sq_meter", "sqm", "sq_meters", "square_meters"]:
+        if cand in merged.columns:
+            sqm_col = cand
+            break
+
+# Always create a Series with the correct index
+    if sqm_col is not None:
+        base_sqm = pd.to_numeric(merged[sqm_col], errors="coerce")
+    else:
+        base_sqm = pd.Series(np.nan, index=merged.index, dtype="float64")
+
+    # sqm_override might be missing; ensure Series too
+    sqm_override = pd.to_numeric(merged.get("sqm_override", np.nan), errors="coerce")
+    if not isinstance(sqm_override, pd.Series):
+        sqm_override = pd.Series(sqm_override, index=merged.index, dtype="float64")
+
+    merged["sqm_effective"] = sqm_override.combine_first(base_sqm)
+
+    # Optional: safety clamp (sqm <= 0 -> NaN)
+    merged["sqm_effective"] = pd.to_numeric(merged["sqm_effective"], errors="coerce")
+    merged.loc[merged["sqm_effective"] <= 0, "sqm_effective"] = np.nan
+
+    # Debug line you already have in your script
+    # st.write("Location sqm column used:", sqm_col)
 
     # ---- Fetch report ----
     all_shop_ids = merged["id"].dropna().astype(int).unique().tolist()
@@ -575,6 +599,8 @@ def main():
         st.write("store_summary cols:", store_summary.columns.tolist())
         st.write("Example sqm fields:", merged[["id", "sqm_override"]].head())
         st.write("Location sqm column used:", sqm_col)
+        st.write("sqm_col:", sqm_col)
+        st.write("sqm_effective filled:", int(pd.to_numeric(merged["sqm_effective"], errors="coerce").notna().sum()), "/", len(merged))
 
 
 main()
