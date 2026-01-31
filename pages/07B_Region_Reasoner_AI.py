@@ -2,23 +2,38 @@
 # ------------------------------------------------------------
 # PFM Region Reasoner — Agentic Outcome Edition (IMPORT-SAFE)
 # Fixes:
+# - OutcomeExplainer import made robust (adds repo root to sys.path)
+# - locations_df column normalization (lowercase/strip) so sq_meter is detected
+# - sqm_effective creation always Series-safe + robust sqm column detection
 # - sales_per_sqm combine_first() now receives a Series (not ndarray)
 # - company type benchmarks use 'footfall' (not 'count_in') after renaming
-# - sqm_effective creation always Series-safe
 # - minor robustness cleanups (store_type fill, duplicate blocks removed)
+# Notes:
+# - Vemcount API may already return sales_per_sqm; we only backfill when missing/NaN.
+# - Vemcount locations typically return sq_meter; we detect it reliably after normalization.
 # ------------------------------------------------------------
 
 from __future__ import annotations
 
 import os
+import sys
 import time
 import json
 import numpy as np
 import pandas as pd
 import streamlit as st
 import requests
-
+from pathlib import Path
 from datetime import datetime
+
+# ------------------------------------------------------------
+# Ensure repo root is on sys.path (for outcome_explainer.py in root)
+# pages/.. -> repo root
+# ------------------------------------------------------------
+_THIS_FILE = Path(__file__).resolve()
+_REPO_ROOT = _THIS_FILE.parents[1]  # retail-suite-tool/
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 # --- helpers / services (existing in repo) ---
 from helpers_clients import load_clients
@@ -42,7 +57,7 @@ try:
 except Exception:
     make_actions = None
 
-# Optional: LLM explainer wrapper (you shared earlier)
+# Optional: LLM explainer wrapper (root/outcome_explainer.py)
 try:
     from outcome_explainer import OutcomeExplainer
 except Exception:
@@ -63,21 +78,10 @@ def fmt_eur(x):
         return "-"
     return f"€ {float(x):,.0f}".replace(",", ".")
 
-def fmt_eur_2(x):
-    if pd.isna(x):
-        return "-"
-    s = f"{float(x):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    return f"€ {s}"
-
 def fmt_pct(x, d=0):
     if pd.isna(x):
         return "-"
     return f"{float(x):.{d}f}%".replace(".", ",")
-
-def fmt_int(x):
-    if pd.isna(x):
-        return "-"
-    return f"{int(float(x)):,}".replace(",", ".")
 
 def safe_div(a, b):
     try:
@@ -108,6 +112,7 @@ def load_region_mapping(path="data/regions.csv") -> pd.DataFrame:
     if "shop_id" not in df.columns or "region" not in df.columns:
         return pd.DataFrame()
 
+    df = df.copy()
     df["shop_id"] = pd.to_numeric(df["shop_id"], errors="coerce").astype("Int64")
     df["region"] = df["region"].astype(str).str.strip().str.lower()
 
@@ -131,7 +136,7 @@ def load_region_mapping(path="data/regions.csv") -> pd.DataFrame:
 
 
 # ------------------------------------------------------------
-# Vemcount locations via FastAPI (optional)
+# Vemcount locations via FastAPI
 # ------------------------------------------------------------
 @st.cache_data(ttl=600)
 def get_locations_by_company(fastapi_base_url: str, company_id: int) -> pd.DataFrame:
@@ -177,9 +182,8 @@ def compute_company_type_bench(df_all: pd.DataFrame) -> dict:
         turn = pd.to_numeric(g.get("turnover"), errors="coerce").dropna().sum()
         trans = pd.to_numeric(g.get("transactions"), errors="coerce").dropna().sum()
 
-        # sqm_effective is store-level; but df has multiple rows per store/day.
-        # For benchmarking we want total sqm over unique stores (not duplicated per day).
-        # Best effort: sum unique sqm per store id if possible.
+        # sqm_effective is store-level; df has multiple rows per store/day.
+        # benchmark: sum unique sqm per store id (not per day)
         if "id" in g.columns:
             sqm = (
                 g[["id", "sqm_effective"]]
@@ -208,7 +212,7 @@ def compute_company_type_bench(df_all: pd.DataFrame) -> dict:
 # ------------------------------------------------------------
 def estimate_upside(store_row: pd.Series, bench_vals: dict) -> tuple[float, str]:
     """
-    Data-driven upside estimate vs same store_type benchmark.
+    Upside estimate vs same store_type benchmark.
     Drivers:
       - Low SPV (lift to benchmark, holding footfall)
       - Low Sales/m² (lift to benchmark, holding sqm)
@@ -333,9 +337,11 @@ def render_outcome_feed(outcomes: dict, typing: bool = True):
         box = st.empty()
         if typing:
             for chunk in explainer.stream_typing(card.get("body", ""), chunk_size=24, delay=0.01):
-                box.markdown(f"### {card.get('title','')}\n\n{chunk}")
+                box.markdown(f"### {card.get('title','')}
+\n{chunk}")
         else:
-            box.markdown(f"### {card.get('title','')}\n\n{card.get('body','')}")
+            box.markdown(f"### {card.get('title','')}
+\n{card.get('body','')}")
 
 
 def _render_simple(outcomes: dict):
@@ -348,6 +354,26 @@ def _render_simple(outcomes: dict):
         st.markdown(f"**Opportunity — {o.get('store_name','')}**")
         st.markdown(f"- Driver: {o.get('driver','')}")
         st.markdown(f"- Impact: {fmt_eur(o.get('impact_period_eur'))} (period) · {fmt_eur(o.get('impact_annual_eur'))} / year")
+
+
+# ------------------------------------------------------------
+# sqm helpers
+# ------------------------------------------------------------
+def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    return df
+
+def _find_sqm_col(cols: list[str]) -> str | None:
+    direct = ["sq_meter", "sqm", "sq_meters", "square_meters", "m2", "surface_m2", "surface", "area_m2", "area"]
+    for c in direct:
+        if c in cols:
+            return c
+    for c in cols:
+        lc = str(c).lower()
+        if ("sq" in lc and "meter" in lc) or ("sqm" in lc) or ("m2" in lc) or ("square" in lc and "meter" in lc):
+            return c
+    return None
 
 
 # ------------------------------------------------------------
@@ -406,6 +432,12 @@ def main():
         st.error("No locations returned from /company/{company}/location")
         st.stop()
 
+    locations_df = _normalize_columns(locations_df)
+
+    if "id" not in locations_df.columns:
+        st.error(f"Locations payload has no 'id' column. Columns: {locations_df.columns.tolist()}")
+        st.stop()
+
     locations_df["id"] = pd.to_numeric(locations_df["id"], errors="coerce").astype("Int64")
 
     # join region mapping onto locations
@@ -414,13 +446,16 @@ def main():
         st.warning("No stores matched regions.csv mapping.")
         st.stop()
 
+    merged = _normalize_columns(merged)
     merged["region"] = merged["region"].astype(str).str.strip().str.lower()
 
     # store_display
     if "store_label" in merged.columns and merged["store_label"].notna().any():
         merged["store_display"] = merged["store_label"]
+    elif "name" in merged.columns:
+        merged["store_display"] = merged["name"]
     else:
-        merged["store_display"] = merged["name"] if "name" in merged.columns else merged["id"].astype(str)
+        merged["store_display"] = merged["id"].astype(str)
 
     # store_type hygiene
     if "store_type" not in merged.columns:
@@ -432,13 +467,8 @@ def main():
         .replace({"": "Unknown", "nan": "Unknown", "None": "Unknown"})
     )
 
-    # sqm_effective (Series-safe)
-    sqm_col = None
-    for cand in ["sq_meter", "sqm", "sq_meters", "square_meters"]:
-        if cand in merged.columns:
-            sqm_col = cand
-            break
-
+    # sqm_effective
+    sqm_col = _find_sqm_col(list(merged.columns))
     if sqm_col is not None:
         base_sqm = pd.to_numeric(merged[sqm_col], errors="coerce")
     else:
@@ -448,7 +478,7 @@ def main():
     if not isinstance(sqm_override, pd.Series):
         sqm_override = pd.Series(sqm_override, index=merged.index, dtype="float64")
 
-    merged["sqm_effective"] = sqm_override.combine_first(base_sqm)
+    merged["sqm_effective"] = sqm_override.combine_first(pd.Series(base_sqm, index=merged.index))
     merged["sqm_effective"] = pd.to_numeric(merged["sqm_effective"], errors="coerce")
     merged.loc[merged["sqm_effective"] <= 0, "sqm_effective"] = np.nan
 
@@ -524,14 +554,13 @@ def main():
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    # sales_per_sqm robust fallback (Series-safe!)
+    # sales_per_sqm backfill (only where missing/NaN)
     if "sales_per_sqm" not in df.columns:
         df["sales_per_sqm"] = np.nan
     df["sales_per_sqm"] = pd.to_numeric(df["sales_per_sqm"], errors="coerce")
 
     sqm_eff = pd.to_numeric(df.get("sqm_effective", np.nan), errors="coerce")
     turn = pd.to_numeric(df.get("turnover", np.nan), errors="coerce")
-
     computed_spm2 = pd.Series(
         np.where((sqm_eff > 0) & turn.notna(), turn / sqm_eff, np.nan),
         index=df.index
@@ -544,7 +573,7 @@ def main():
         st.warning("No rows for selected region after join.")
         st.stop()
 
-    # Store summary (period totals)
+    # Store summary
     store_summary = (
         df_region
         .groupby(["id", "store_display", "store_type", "sqm_effective"], as_index=False)
@@ -576,7 +605,7 @@ def main():
         np.nan
     )
 
-    # Company type benchmarks (dict)
+    # Company type benchmarks
     df_all = df.copy()
     company_type_bench = compute_company_type_bench(df_all)
 
@@ -626,12 +655,11 @@ def main():
         cap=120,
     )
 
-    # Annual factor (simple)
+    # Annual factor
     days = max(1, (pd.to_datetime(end_date) - pd.to_datetime(start_date)).days + 1)
     annual_factor = 365.0 / float(days)
 
     payload = {
-        "df_region": df_region,
         "store_summary": store_summary,
         "company_type_bench": company_type_bench,
         "annual_factor": annual_factor,
@@ -649,7 +677,7 @@ def main():
     outcomes = build_region_outcomes(payload)
     render_outcome_feed(outcomes, typing=True)
 
-    # Debug expander
+    # Debug
     with st.expander("🔧 Debug"):
         st.write("REPORT_URL:", report_url)
         st.write("FASTAPI_BASE:", fastapi_base)
@@ -657,7 +685,8 @@ def main():
         st.write("Region:", region_choice)
         st.write("Period:", start_date, "→", end_date)
         st.write("Params preview:", params_preview)
-        st.write("store_summary cols:", store_summary.columns.tolist())
+        st.write("locations_df columns:", locations_df.columns.tolist())
+        st.write("merged columns:", merged.columns.tolist())
         st.write("Location sqm column used:", sqm_col)
         st.write(
             "sqm_effective filled:",
@@ -665,7 +694,9 @@ def main():
             "/",
             len(merged)
         )
-        st.write("Example sqm:", merged[["id", "sqm_override", sqm_col] if sqm_col else ["id", "sqm_override"]].head())
-
+        cols_show = ["id", "store_display", "sqm_override", "sqm_effective"]
+        if sqm_col is not None and sqm_col in merged.columns:
+            cols_show.append(sqm_col)
+        st.write("Example sqm:", merged[cols_show].head(10))
 
 main()
