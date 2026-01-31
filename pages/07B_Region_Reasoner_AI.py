@@ -2,7 +2,7 @@
 # ------------------------------------------------------------
 # PFM Region Reasoner — Agentic Outcome Edition (IMPORT-SAFE)
 # Fixes:
-# - OutcomeExplainer import made robust (adds repo root to sys.path)
+# - OutcomeExplainer import robust (adds repo root to sys.path)
 # - locations_df column normalization (lowercase/strip) so sq_meter is detected
 # - sqm_effective creation always Series-safe + robust sqm column detection
 # - sales_per_sqm combine_first() now receives a Series (not ndarray)
@@ -15,10 +15,7 @@
 
 from __future__ import annotations
 
-import os
 import sys
-import time
-import json
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -340,7 +337,7 @@ def render_outcome_feed(outcomes: dict, typing: bool = True):
 
         if typing:
             for chunk in explainer.stream_typing(body_full, chunk_size=24, delay=0.01):
-            box.markdown(f"### {title}\n\n{chunk}")
+                box.markdown(f"### {title}\n\n{chunk}")
         else:
             box.markdown(f"### {title}\n\n{body_full}")
 
