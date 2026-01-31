@@ -1,7 +1,11 @@
 # pages/07B_Region_Reasoner_AI.py
 # ------------------------------------------------------------
 # PFM Region Reasoner — Agentic Outcome Edition (IMPORT-SAFE)
-# Fix: remove dependency on services.value_upside
+# Fixes:
+# - sales_per_sqm combine_first() now receives a Series (not ndarray)
+# - company type benchmarks use 'footfall' (not 'count_in') after renaming
+# - sqm_effective creation always Series-safe
+# - minor robustness cleanups (store_type fill, duplicate blocks removed)
 # ------------------------------------------------------------
 
 from __future__ import annotations
@@ -34,7 +38,7 @@ from services.svi_service import (
 
 # Optional: advisor may not exist in all repos → safe import
 try:
-    from services.advisor import make_actions  # expected to exist in your Region Copilot repo
+    from services.advisor import make_actions  # expected to exist in your repo
 except Exception:
     make_actions = None
 
@@ -49,6 +53,7 @@ except Exception:
 # Page config
 # ------------------------------------------------------------
 st.set_page_config(page_title="PFM Region Reasoner — Agentic", layout="wide")
+
 
 # ------------------------------------------------------------
 # Formatting helpers (EU)
@@ -148,18 +153,42 @@ def idx_vs(a, b):
 
 def compute_company_type_bench(df_all: pd.DataFrame) -> dict:
     """
-    Returns dict: {store_type: {sales_per_visitor, conversion_rate, sales_per_transaction, sales_per_sqm}}
-    Weighted by totals (sums).
+    Returns dict: {store_type: {...}}
+    IMPORTANT: df_all uses renamed columns:
+      footfall, turnover, transactions, sqm_effective
     """
     out = {}
     if df_all is None or df_all.empty:
         return out
 
-    for stype, g in df_all.groupby("store_type"):
-        foot = pd.to_numeric(g.get("count_in"), errors="coerce").dropna().sum()
+    tmp = df_all.copy()
+
+    if "store_type" not in tmp.columns:
+        tmp["store_type"] = "Unknown"
+    tmp["store_type"] = (
+        tmp["store_type"]
+        .fillna("Unknown")
+        .astype(str).str.strip()
+        .replace({"": "Unknown", "nan": "Unknown", "None": "Unknown"})
+    )
+
+    for stype, g in tmp.groupby("store_type"):
+        foot = pd.to_numeric(g.get("footfall"), errors="coerce").dropna().sum()
         turn = pd.to_numeric(g.get("turnover"), errors="coerce").dropna().sum()
         trans = pd.to_numeric(g.get("transactions"), errors="coerce").dropna().sum()
-        sqm = pd.to_numeric(g.get("sqm_effective"), errors="coerce").dropna().sum()
+
+        # sqm_effective is store-level; but df has multiple rows per store/day.
+        # For benchmarking we want total sqm over unique stores (not duplicated per day).
+        # Best effort: sum unique sqm per store id if possible.
+        if "id" in g.columns:
+            sqm = (
+                g[["id", "sqm_effective"]]
+                .dropna(subset=["id"])
+                .drop_duplicates(subset=["id"])
+            )
+            sqm_sum = pd.to_numeric(sqm["sqm_effective"], errors="coerce").dropna().sum()
+        else:
+            sqm_sum = pd.to_numeric(g.get("sqm_effective"), errors="coerce").dropna().sum()
 
         out[stype] = {
             "footfall": float(foot),
@@ -168,8 +197,8 @@ def compute_company_type_bench(df_all: pd.DataFrame) -> dict:
             "sales_per_visitor": safe_div(turn, foot),
             "conversion_rate": safe_div(trans, foot) * 100.0 if pd.notna(foot) else np.nan,
             "sales_per_transaction": safe_div(turn, trans),
-            "sales_per_sqm": safe_div(turn, sqm),
-            "sqm_sum": float(sqm) if pd.notna(sqm) else np.nan,
+            "sales_per_sqm": safe_div(turn, sqm_sum),
+            "sqm_sum": float(sqm_sum) if pd.notna(sqm_sum) else np.nan,
         }
     return out
 
@@ -292,7 +321,6 @@ def build_region_outcomes(payload: dict) -> dict:
 def render_outcome_feed(outcomes: dict, typing: bool = True):
     st.markdown("## Agentic outcome feed")
 
-    # If OutcomeExplainer exists, use it. Otherwise, render simple deterministic cards.
     if OutcomeExplainer is None:
         st.info("OutcomeExplainer not available — showing deterministic outcomes.")
         _render_simple(outcomes)
@@ -304,10 +332,8 @@ def render_outcome_feed(outcomes: dict, typing: bool = True):
     for card in cards:
         box = st.empty()
         if typing:
-            txt = ""
             for chunk in explainer.stream_typing(card.get("body", ""), chunk_size=24, delay=0.01):
-                txt = chunk
-                box.markdown(f"### {card.get('title','')}\n\n{txt}")
+                box.markdown(f"### {card.get('title','')}\n\n{chunk}")
         else:
             box.markdown(f"### {card.get('title','')}\n\n{card.get('body','')}")
 
@@ -316,7 +342,7 @@ def _render_simple(outcomes: dict):
     meta = outcomes.get("meta", {})
     scores = outcomes.get("scores", {})
     st.markdown(f"### {meta.get('client','Client')} · {meta.get('region','Region')} · {meta.get('period_label','Period')}")
-    if "region_svi" in scores:
+    if "region_svi" in scores and pd.notna(scores["region_svi"]):
         st.markdown(f"- **Region SVI:** {int(round(float(scores['region_svi'])))} / 100")
     for o in outcomes.get("opportunities", []):
         st.markdown(f"**Opportunity — {o.get('store_name','')}**")
@@ -337,6 +363,8 @@ def main():
     else:
         fastapi_base = raw_api_url
         report_url = raw_api_url + "/get-report"
+
+    st.title("PFM Region Reasoner — Agentic Outcome Edition")
 
     # ---- Clients ----
     clients = load_clients("clients.json")
@@ -373,7 +401,6 @@ def main():
         st.stop()
 
     # ---- Locations (sqm) ----
-    # We fetch locations to get sq_meter reliably
     locations_df = get_locations_by_company(fastapi_base, company_id)
     if locations_df is None or locations_df.empty:
         st.error("No locations returned from /company/{company}/location")
@@ -387,7 +414,6 @@ def main():
         st.warning("No stores matched regions.csv mapping.")
         st.stop()
 
-    # normalize region
     merged["region"] = merged["region"].astype(str).str.strip().str.lower()
 
     # store_display
@@ -396,42 +422,42 @@ def main():
     else:
         merged["store_display"] = merged["name"] if "name" in merged.columns else merged["id"].astype(str)
 
-    # sqm_effective
+    # store_type hygiene
+    if "store_type" not in merged.columns:
+        merged["store_type"] = "Unknown"
+    merged["store_type"] = (
+        merged["store_type"]
+        .fillna("Unknown")
+        .astype(str).str.strip()
+        .replace({"": "Unknown", "nan": "Unknown", "None": "Unknown"})
+    )
+
+    # sqm_effective (Series-safe)
     sqm_col = None
     for cand in ["sq_meter", "sqm", "sq_meters", "square_meters"]:
         if cand in merged.columns:
             sqm_col = cand
             break
 
-    # ---- Enrich sqm_effective (ALWAYS Series; avoid combine_first(float) crash) ----
-    sqm_col = None
-    for cand in ["sq_meter", "sqm", "sq_meters", "square_meters"]:
-        if cand in merged.columns:
-            sqm_col = cand
-            break
-
-# Always create a Series with the correct index
     if sqm_col is not None:
         base_sqm = pd.to_numeric(merged[sqm_col], errors="coerce")
     else:
         base_sqm = pd.Series(np.nan, index=merged.index, dtype="float64")
 
-    # sqm_override might be missing; ensure Series too
     sqm_override = pd.to_numeric(merged.get("sqm_override", np.nan), errors="coerce")
     if not isinstance(sqm_override, pd.Series):
         sqm_override = pd.Series(sqm_override, index=merged.index, dtype="float64")
 
     merged["sqm_effective"] = sqm_override.combine_first(base_sqm)
-
-    # Optional: safety clamp (sqm <= 0 -> NaN)
     merged["sqm_effective"] = pd.to_numeric(merged["sqm_effective"], errors="coerce")
     merged.loc[merged["sqm_effective"] <= 0, "sqm_effective"] = np.nan
 
-    # Debug line you already have in your script
-    # st.write("Location sqm column used:", sqm_col)
-
     # ---- Fetch report ----
     all_shop_ids = merged["id"].dropna().astype(int).unique().tolist()
+    if not all_shop_ids:
+        st.error("No shop IDs after mapping.")
+        st.stop()
+
     cfg = VemcountApiConfig(report_url=report_url)
 
     metric_map = {
@@ -498,13 +524,19 @@ def main():
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    # sales_per_sqm robust fallback
+    # sales_per_sqm robust fallback (Series-safe!)
     if "sales_per_sqm" not in df.columns:
         df["sales_per_sqm"] = np.nan
     df["sales_per_sqm"] = pd.to_numeric(df["sales_per_sqm"], errors="coerce")
-    df["sales_per_sqm"] = df["sales_per_sqm"].combine_first(
-        np.where(df["sqm_effective"] > 0, df["turnover"] / df["sqm_effective"], np.nan)
+
+    sqm_eff = pd.to_numeric(df.get("sqm_effective", np.nan), errors="coerce")
+    turn = pd.to_numeric(df.get("turnover", np.nan), errors="coerce")
+
+    computed_spm2 = pd.Series(
+        np.where((sqm_eff > 0) & turn.notna(), turn / sqm_eff, np.nan),
+        index=df.index
     )
+    df["sales_per_sqm"] = df["sales_per_sqm"].combine_first(computed_spm2)
 
     # Region subset
     df_region = df[df["region"] == region_choice].copy()
@@ -523,21 +555,52 @@ def main():
         )
     )
 
-    store_summary["conversion_rate"] = np.where(store_summary["footfall"] > 0, store_summary["transactions"] / store_summary["footfall"] * 100.0, np.nan)
-    store_summary["sales_per_visitor"] = np.where(store_summary["footfall"] > 0, store_summary["turnover"] / store_summary["footfall"], np.nan)
-    store_summary["sales_per_transaction"] = np.where(store_summary["transactions"] > 0, store_summary["turnover"] / store_summary["transactions"], np.nan)
-    store_summary["sales_per_sqm"] = np.where(store_summary["sqm_effective"] > 0, store_summary["turnover"] / store_summary["sqm_effective"], np.nan)
+    store_summary["conversion_rate"] = np.where(
+        store_summary["footfall"] > 0,
+        store_summary["transactions"] / store_summary["footfall"] * 100.0,
+        np.nan
+    )
+    store_summary["sales_per_visitor"] = np.where(
+        store_summary["footfall"] > 0,
+        store_summary["turnover"] / store_summary["footfall"],
+        np.nan
+    )
+    store_summary["sales_per_transaction"] = np.where(
+        store_summary["transactions"] > 0,
+        store_summary["turnover"] / store_summary["transactions"],
+        np.nan
+    )
+    store_summary["sales_per_sqm"] = np.where(
+        store_summary["sqm_effective"] > 0,
+        store_summary["turnover"] / store_summary["sqm_effective"],
+        np.nan
+    )
 
     # Company type benchmarks (dict)
     df_all = df.copy()
     company_type_bench = compute_company_type_bench(df_all)
 
     # Indices vs type bench
-    store_summary["Traffic idx vs type"] = store_summary.apply(lambda r: idx_vs(r["footfall"], company_type_bench.get(r["store_type"], {}).get("footfall", np.nan)), axis=1)
-    store_summary["CR idx vs type"] = store_summary.apply(lambda r: idx_vs(r["conversion_rate"], company_type_bench.get(r["store_type"], {}).get("conversion_rate", np.nan)), axis=1)
-    store_summary["SPV idx vs type"] = store_summary.apply(lambda r: idx_vs(r["sales_per_visitor"], company_type_bench.get(r["store_type"], {}).get("sales_per_visitor", np.nan)), axis=1)
-    store_summary["ATV idx vs type"] = store_summary.apply(lambda r: idx_vs(r["sales_per_transaction"], company_type_bench.get(r["store_type"], {}).get("sales_per_transaction", np.nan)), axis=1)
-    store_summary["Sales/m² idx vs type"] = store_summary.apply(lambda r: idx_vs(r["sales_per_sqm"], company_type_bench.get(r["store_type"], {}).get("sales_per_sqm", np.nan)), axis=1)
+    store_summary["Traffic idx vs type"] = store_summary.apply(
+        lambda r: idx_vs(r["footfall"], company_type_bench.get(r["store_type"], {}).get("footfall", np.nan)),
+        axis=1
+    )
+    store_summary["CR idx vs type"] = store_summary.apply(
+        lambda r: idx_vs(r["conversion_rate"], company_type_bench.get(r["store_type"], {}).get("conversion_rate", np.nan)),
+        axis=1
+    )
+    store_summary["SPV idx vs type"] = store_summary.apply(
+        lambda r: idx_vs(r["sales_per_visitor"], company_type_bench.get(r["store_type"], {}).get("sales_per_visitor", np.nan)),
+        axis=1
+    )
+    store_summary["ATV idx vs type"] = store_summary.apply(
+        lambda r: idx_vs(r["sales_per_transaction"], company_type_bench.get(r["store_type"], {}).get("sales_per_transaction", np.nan)),
+        axis=1
+    )
+    store_summary["Sales/m² idx vs type"] = store_summary.apply(
+        lambda r: idx_vs(r["sales_per_sqm"], company_type_bench.get(r["store_type"], {}).get("sales_per_sqm", np.nan)),
+        axis=1
+    )
 
     # Region SVI
     reg_vals = compute_driver_values_from_period(
@@ -569,10 +632,8 @@ def main():
 
     payload = {
         "df_region": df_region,
-        "store_dim": merged[["id", "region", "store_type", "sqm_effective", "store_display"]].drop_duplicates(),
         "store_summary": store_summary,
         "company_type_bench": company_type_bench,
-        "region_svi": region_svi,
         "annual_factor": annual_factor,
         "meta": {
             "client": selected_client.get("brand", ""),
@@ -597,10 +658,14 @@ def main():
         st.write("Period:", start_date, "→", end_date)
         st.write("Params preview:", params_preview)
         st.write("store_summary cols:", store_summary.columns.tolist())
-        st.write("Example sqm fields:", merged[["id", "sqm_override"]].head())
         st.write("Location sqm column used:", sqm_col)
-        st.write("sqm_col:", sqm_col)
-        st.write("sqm_effective filled:", int(pd.to_numeric(merged["sqm_effective"], errors="coerce").notna().sum()), "/", len(merged))
+        st.write(
+            "sqm_effective filled:",
+            int(pd.to_numeric(merged["sqm_effective"], errors="coerce").notna().sum()),
+            "/",
+            len(merged)
+        )
+        st.write("Example sqm:", merged[["id", "sqm_override", sqm_col] if sqm_col else ["id", "sqm_override"]].head())
 
 
 main()
