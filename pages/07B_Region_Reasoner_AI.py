@@ -1,18 +1,21 @@
 # pages/07B_Region_Reasoner_AI.py
 # ------------------------------------------------------------
-# PFM Region Reasoner — Agentic Outcome Edition (KNALLER v1)
+# PFM Region Reasoner — Agentic Workload Edition (deterministic-first)
 #
 # Adds:
-# - Region SVI vs other regions (rank + table)
-# - Store-type performance vs other regions (same store_type, excluding current region)
-# - Upside aggregated by store_type + top stores
-# - Strengths: best store_types + best stores (copy what works)
+# - Agentic workload cards (store-type focus + why + impact + actions)
+# - Region SVI rank vs other regions
+# - Store-type performance vs other regions (same type; excluding current region)
+# - Strength cards (what’s working)
+# - Data quality / confidence card
 #
-# Fixes:
-# - OutcomeExplainer import robust (repo root on sys.path)
-# - sqm_effective: sqm_override overrides, else sq_meter from report payload
-# - typing loop indentation fixed
-# - avoids duplicate debug columns in st.write
+# Debug:
+# - OutcomeExplainer import diagnostics (exact error + openai pkg + secrets presence)
+#
+# Notes:
+# - get-report response includes sq_meter inside payload; we request it explicitly.
+# - sqm_effective = sqm_override (if set) else sq_meter (from report).
+# - sales_per_sqm: use API value; only backfill when NaN.
 # ------------------------------------------------------------
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ import requests
 from pathlib import Path
 from datetime import datetime
 
+
 # ------------------------------------------------------------
 # Ensure repo root is on sys.path (for outcome_explainer.py in root)
 # pages/.. -> repo root
@@ -33,6 +37,7 @@ _THIS_FILE = Path(__file__).resolve()
 _REPO_ROOT = _THIS_FILE.parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+
 
 # --- helpers / services (existing in repo) ---
 from helpers_clients import load_clients
@@ -56,11 +61,17 @@ try:
 except Exception:
     make_actions = None
 
-# Optional: LLM explainer wrapper (root/outcome_explainer.py)
+
+# ------------------------------------------------------------
+# OutcomeExplainer import + diagnostics (don’t swallow errors)
+# ------------------------------------------------------------
+_OUTCOME_IMPORT_ERROR = None
+OutcomeExplainer = None
 try:
-    from outcome_explainer import OutcomeExplainer
-except Exception:
+    from outcome_explainer import OutcomeExplainer  # file in repo root
+except Exception as e:
     OutcomeExplainer = None
+    _OUTCOME_IMPORT_ERROR = repr(e)
 
 
 # ------------------------------------------------------------
@@ -137,7 +148,7 @@ def load_region_mapping(path="data/regions.csv") -> pd.DataFrame:
 
 
 # ------------------------------------------------------------
-# FastAPI locations endpoint (names; sometimes sqm not included)
+# FastAPI locations endpoint (often only id+name)
 # ------------------------------------------------------------
 @st.cache_data(ttl=600)
 def get_locations_by_company(fastapi_base_url: str, company_id: int) -> pd.DataFrame:
@@ -180,11 +191,9 @@ def compute_company_type_bench(df_all: pd.DataFrame) -> dict:
         trans = pd.to_numeric(g.get("transactions"), errors="coerce").dropna().sum()
 
         # unique sqm per store (avoid daily duplication)
-        sqm_sum = np.nan
         if "id" in g.columns:
             sqm = (
                 g[["id", "sqm_effective"]]
-                .dropna(subset=["id"])
                 .drop_duplicates(subset=["id"])
             )
             sqm_sum = pd.to_numeric(sqm["sqm_effective"], errors="coerce").dropna().sum()
@@ -251,13 +260,9 @@ def estimate_upside(store_row: pd.Series, bench_vals: dict) -> tuple[float, str]
 
 
 # ------------------------------------------------------------
-# Region-wide SVI table (rank across regions)
+# Region SVI table (rank across regions)
 # ------------------------------------------------------------
 def compute_region_svi_table(df_all: pd.DataFrame, region_list: list[str]) -> pd.DataFrame:
-    """
-    Computes region SVI for each region in region_list vs company totals.
-    Returns DataFrame: region, svi, avg_ratio_vs_company, turnover, footfall, transactions, sqm_sum
-    """
     if df_all is None or df_all.empty:
         return pd.DataFrame()
 
@@ -298,7 +303,6 @@ def compute_region_svi_table(df_all: pd.DataFrame, region_list: list[str]) -> pd
             "turnover": float(pd.to_numeric(dfr["turnover"], errors="coerce").dropna().sum()),
             "footfall": float(pd.to_numeric(dfr["footfall"], errors="coerce").dropna().sum()),
             "transactions": float(pd.to_numeric(dfr["transactions"], errors="coerce").dropna().sum()),
-            "sqm_sum": float(pd.to_numeric(dfr["sqm_effective"], errors="coerce").dropna().sum()),
         })
 
     out = pd.DataFrame(rows)
@@ -310,15 +314,9 @@ def compute_region_svi_table(df_all: pd.DataFrame, region_list: list[str]) -> pd
 
 
 # ------------------------------------------------------------
-# Store-type comparison: current region vs other regions
+# Store-type comparison vs other regions (same type)
 # ------------------------------------------------------------
 def compute_storetype_vs_other_regions(df_all: pd.DataFrame, region_choice: str) -> pd.DataFrame:
-    """
-    For each store_type:
-      - compute KPIs for current region stores
-      - compute KPIs for same store_type across OTHER regions
-      - return indices (region / other_regions * 100)
-    """
     if df_all is None or df_all.empty:
         return pd.DataFrame()
 
@@ -335,12 +333,8 @@ def compute_storetype_vs_other_regions(df_all: pd.DataFrame, region_choice: str)
         turn = pd.to_numeric(df_["turnover"], errors="coerce").dropna().sum()
         trans = pd.to_numeric(df_["transactions"], errors="coerce").dropna().sum()
 
-        sqm_sum = np.nan
         if "id" in df_.columns:
-            sqm = (
-                df_[["id", "sqm_effective"]]
-                .drop_duplicates(subset=["id"])
-            )
+            sqm = df_[["id", "sqm_effective"]].drop_duplicates(subset=["id"])
             sqm_sum = pd.to_numeric(sqm["sqm_effective"], errors="coerce").dropna().sum()
         else:
             sqm_sum = pd.to_numeric(df_.get("sqm_effective"), errors="coerce").dropna().sum()
@@ -351,9 +345,7 @@ def compute_storetype_vs_other_regions(df_all: pd.DataFrame, region_choice: str)
             "transactions": float(trans),
             "spv": safe_div(turn, foot),
             "cr": safe_div(trans, foot) * 100.0 if pd.notna(foot) else np.nan,
-            "atv": safe_div(turn, trans),
             "spm2": safe_div(turn, sqm_sum),
-            "sqm_sum": float(sqm_sum) if pd.notna(sqm_sum) else np.nan,
         }
 
     rows = []
@@ -369,8 +361,6 @@ def compute_storetype_vs_other_regions(df_all: pd.DataFrame, region_choice: str)
 
         rows.append({
             "store_type": stype,
-            "region_turnover": a["turnover"],
-            "other_turnover": b["turnover"],
             "SPV idx vs other regions": idx_vs(a["spv"], b["spv"]),
             "CR idx vs other regions": idx_vs(a["cr"], b["cr"]),
             "Sales/m² idx vs other regions": idx_vs(a["spm2"], b["spm2"]),
@@ -384,223 +374,267 @@ def compute_storetype_vs_other_regions(df_all: pd.DataFrame, region_choice: str)
 
 
 # ------------------------------------------------------------
-# Outcome builder (agentic: region rank + store-type focus + upside by type)
+# Agentic "why" + actions (rule-based)
 # ------------------------------------------------------------
-def build_region_outcomes(payload: dict) -> dict:
-    meta = payload["meta"]
-    scores = payload["scores"]
-    store_summary = payload["store_summary"]
-    company_type_bench = payload["company_type_bench"]
-    region_rank = payload.get("region_rank", {})
-    stype_vs_other = payload.get("stype_vs_other", pd.DataFrame())
+def infer_root_cause(row: dict) -> tuple[str, str]:
+    """
+    Returns (primary_driver, explanation)
+    """
+    spm2 = row.get("Sales/m² idx vs other regions", np.nan)
+    spv = row.get("SPV idx vs other regions", np.nan)
+    cr = row.get("CR idx vs other regions", np.nan)
+    traf = row.get("Traffic idx vs other regions", np.nan)
 
-    # --- store-level opportunities (same as before) ---
-    opps_store = []
-    for _, r in store_summary.iterrows():
-        stype = str(r.get("store_type", "Unknown")).strip() or "Unknown"
-        bench = company_type_bench.get(stype, {})
-        up, driver = estimate_upside(r, bench)
-        if pd.notna(up) and up > 0:
-            actions = []
-            if callable(make_actions):
-                try:
-                    actions = make_actions(r) or []
-                except Exception:
-                    actions = []
-            opps_store.append({
-                "store_name": r.get("store_display", "") or str(r.get("id", "")),
-                "store_id": r.get("id", np.nan),
-                "store_type": stype,
-                "driver": driver,
-                "impact_period_eur": float(up),
-                "impact_annual_eur": float(up) * payload["annual_factor"],
-                "actions": actions,
-            })
-
-    opps_store = sorted(opps_store, key=lambda x: x["impact_period_eur"], reverse=True)
-
-    # --- aggregate upside by store_type (this is the “manager view”) ---
-    opps_type = []
-    if opps_store:
-        df_o = pd.DataFrame(opps_store)
-        g = df_o.groupby("store_type", as_index=False).agg(
-            impact_period_eur=("impact_period_eur", "sum"),
-            impact_annual_eur=("impact_annual_eur", "sum"),
-            stores=("store_name", "count"),
-        ).sort_values("impact_period_eur", ascending=False)
-
-        for _, rr in g.head(3).iterrows():
-            stype = rr["store_type"]
-            top_store = df_o[df_o["store_type"] == stype].sort_values("impact_period_eur", ascending=False).head(2)
-            examples = [f"{row['store_name']} ({fmt_eur(row['impact_period_eur'])})" for _, row in top_store.iterrows()]
-            opps_type.append({
-                "store_type": stype,
-                "impact_period_eur": float(rr["impact_period_eur"]),
-                "impact_annual_eur": float(rr["impact_annual_eur"]),
-                "stores": int(rr["stores"]),
-                "examples": examples,
-            })
-
-    # --- strengths: best stores (where potential is already used well) ---
-    strengths = []
-    if store_summary is not None and not store_summary.empty:
-        ss = store_summary.copy()
-        # define "strong" as high sales/m² and high SPV relative to type (simple deterministic)
-        ss["score_strength"] = (
-            pd.to_numeric(ss.get("Sales/m² idx vs type"), errors="coerce").fillna(100)
-            + pd.to_numeric(ss.get("SPV idx vs type"), errors="coerce").fillna(100)
-        )
-        best = ss.sort_values("score_strength", ascending=False).head(3)
-        for _, r in best.iterrows():
-            strengths.append({
-                "store_name": r.get("store_display", "") or str(r.get("id", "")),
-                "store_type": str(r.get("store_type", "Unknown")),
-                "spv_idx": r.get("SPV idx vs type", np.nan),
-                "spm2_idx": r.get("Sales/m² idx vs type", np.nan),
-                "cr_idx": r.get("CR idx vs type", np.nan),
-            })
-
-    # --- store-type focus vs other regions ---
-    focus_types = []
-    if isinstance(stype_vs_other, pd.DataFrame) and not stype_vs_other.empty:
-        tmp = stype_vs_other.copy()
-        # weakest store_types first (lowest Sales/m² idx vs other regions)
-        weak = tmp.sort_values("Sales/m² idx vs other regions", ascending=True).head(3)
-        for _, r in weak.iterrows():
-            focus_types.append({
-                "store_type": r["store_type"],
-                "spv_idx_other": r.get("SPV idx vs other regions", np.nan),
-                "cr_idx_other": r.get("CR idx vs other regions", np.nan),
-                "spm2_idx_other": r.get("Sales/m² idx vs other regions", np.nan),
-                "traffic_idx_other": r.get("Traffic idx vs other regions", np.nan),
-            })
-
-    # --- risks ---
-    risks = []
-    svi = scores.get("region_svi", np.nan)
-    if pd.notna(svi) and float(svi) < 60:
-        risks.append({
-            "driver": "Regional performance pressure",
-            "severity": "high",
-            "why": [
-                f"Region SVI: {int(round(float(svi)))} / 100",
-                "Multiple store_types underperform vs other regions",
-            ],
-        })
-
-    return {
-        "meta": meta,
-        "scores": scores,
-        "region_rank": region_rank,
-        "opportunities_by_type": opps_type,
-        "opportunities_top_stores": opps_store[:3],
-        "focus_store_types": focus_types,
-        "strengths": strengths,
-        "risks": risks,
-        "notes": [
-            "Benchmarked on same store_type (company-wide)",
-            "Store-type comparisons exclude current region (vs other regions)",
-            "sqm_effective: sqm_override overrides; else sq_meter from report payload"
-        ]
+    vals = {
+        "Space productivity (Sales/m²)": spm2,
+        "Basket value & mix (SPV)": spv,
+        "Conversion (CR)": cr,
+        "Traffic": traf,
     }
 
+    # pick lowest index as main driver (ignoring NaNs)
+    clean = [(k, v) for k, v in vals.items() if pd.notna(v)]
+    if not clean:
+        return "Unknown", "Not enough data to isolate a driver."
+
+    main = sorted(clean, key=lambda x: x[1])[0]
+    driver = main[0]
+    idx = main[1]
+
+    if driver == "Traffic":
+        return driver, f"Traffic is lagging vs other regions (idx {fmt_pct(idx,0)}). Fixing traffic is likely the fastest lever."
+    if driver == "Conversion (CR)":
+        return driver, f"Conversion is lagging vs other regions (idx {fmt_pct(idx,0)}). Focus on in-store execution."
+    if driver == "Basket value & mix (SPV)":
+        return driver, f"Sales per visitor is lagging (idx {fmt_pct(idx,0)}). This often points to ATV/mix & merchandising."
+    if driver == "Space productivity (Sales/m²)":
+        return driver, f"Sales per m² is lagging (idx {fmt_pct(idx,0)}). This suggests layout/assortment productivity issues."
+    return "Unknown", "No clear driver."
+
+def actions_for_driver(driver: str) -> list[str]:
+    if "Traffic" in driver:
+        return [
+            "Run local traffic play: window/visual hook + local activation for 2 weeks",
+            "Check opening hours + staffing coverage on peak moments (avoid ‘closed-in-practice’)",
+            "Validate street/catchment shifts (if available: capture rate / external context)"
+        ]
+    if "Conversion" in driver:
+        return [
+            "Audit conversion blockers: queueing, fitting rooms, service coverage",
+            "Set micro-goals: greet rate, assisted selling routines, staff allocation by hour",
+            "Check POS completeness: transactions missing = fake low CR"
+        ]
+    if "SPV" in driver or "visitor" in driver.lower():
+        return [
+            "Push attach-rate / bundling: top 5 bundles + checkout prompts",
+            "Merch refresh: hero products in hot zones + price architecture check",
+            "Check promo dilution: discounting can lift traffic but kill SPV"
+        ]
+    if "m²" in driver or "Space" in driver:
+        return [
+            "Rebalance space: reduce low-yield categories, expand winners",
+            "Hotspot planogram: entrance + mid-store conversion zones",
+            "Check sqm accuracy (wrong sqm = wrong sales/m²)"
+        ]
+    return [
+        "Validate data quality first",
+        "Then pick one lever: Traffic / Conversion / SPV / Space"
+    ]
+
 
 # ------------------------------------------------------------
-# Render outcome feed
+# Data quality / confidence
 # ------------------------------------------------------------
-def render_outcome_feed(outcomes: dict, typing: bool = True):
-    st.markdown("## Agentic outcome feed")
+def compute_data_quality(df_region: pd.DataFrame) -> dict:
+    """
+    Simple signals:
+    - sqm missing %
+    - turnover missing %
+    - transactions missing %
+    - footfall missing %
+    """
+    out = {}
+    if df_region is None or df_region.empty:
+        return out
 
-    # If OutcomeExplainer exists, use it; else deterministic UI cards
-    if OutcomeExplainer is None:
-        st.warning("OutcomeExplainer not available — using deterministic cards (still fully usable).")
-        render_deterministic_cards(outcomes)
-        return
+    def miss_pct(col: str) -> float:
+        if col not in df_region.columns:
+            return 100.0
+        s = pd.to_numeric(df_region[col], errors="coerce")
+        return float(s.isna().mean() * 100.0)
 
-    explainer = OutcomeExplainer()
-    cards = explainer.build_cards(outcomes, persona="region_manager", style="crisp", use_llm=False)
+    out["sqm_missing_pct"] = miss_pct("sqm_effective")
+    out["turnover_missing_pct"] = miss_pct("turnover")
+    out["transactions_missing_pct"] = miss_pct("transactions")
+    out["footfall_missing_pct"] = miss_pct("footfall")
 
-    for card in cards:
-        box = st.empty()
-        title = str(card.get("title", "") or "")
-        body_full = str(card.get("body", "") or "")
+    # crude confidence score
+    # 100 - average missing, clipped
+    avg_miss = np.mean([
+        out["sqm_missing_pct"],
+        out["turnover_missing_pct"],
+        out["transactions_missing_pct"],
+        out["footfall_missing_pct"],
+    ])
+    conf = max(0.0, min(100.0, 100.0 - avg_miss))
+    out["confidence"] = conf
+    return out
 
-        if typing:
-            for chunk in explainer.stream_typing(body_full, chunk_size=24, delay=0.01):
-                box.markdown(f"### {title}\n\n{chunk}")
-        else:
-            box.markdown(f"### {title}\n\n{body_full}")
 
+# ------------------------------------------------------------
+# Agentic deterministic cards renderer
+# ------------------------------------------------------------
+def card(title: str, body_md: str, bullets: list[str] | None = None):
+    with st.container(border=True):
+        st.markdown(f"### {title}")
+        st.markdown(body_md)
+        if bullets:
+            for b in bullets:
+                st.markdown(f"- {b}")
 
-def render_deterministic_cards(outcomes: dict):
-    meta = outcomes.get("meta", {})
-    scores = outcomes.get("scores", {})
-    rr = outcomes.get("region_rank", {})
+def render_agentic_workload(
+    meta: dict,
+    region_rank: dict,
+    scores: dict,
+    svi_table: pd.DataFrame,
+    stype_vs_other: pd.DataFrame,
+    store_summary: pd.DataFrame,
+    company_type_bench: dict,
+    annual_factor: float,
+    data_quality: dict,
+):
+    st.markdown("## Agentic workload")
 
-    st.markdown(f"### {meta.get('client','Client')} · {meta.get('region','Region')} · {meta.get('period_label','Period')}")
-
-    cols = st.columns(3)
+    # ---- Region status card ----
     svi = scores.get("region_svi", np.nan)
+    rank = region_rank.get("rank", "-")
+    total = region_rank.get("total", "-")
+    gap = region_rank.get("gap_to_best", np.nan)
+
+    cols = st.columns(4)
     cols[0].metric("Region SVI", f"{int(round(float(svi)))} / 100" if pd.notna(svi) else "-")
+    cols[1].metric("Rank vs regions", f"{rank} / {total}")
+    cols[2].metric("Gap to #1", fmt_pct(gap, 0))
+    cols[3].metric("Confidence", f"{int(round(data_quality.get('confidence', 0)))} / 100")
 
-    if rr:
-        cols[1].metric("Rank vs regions", f"{rr.get('rank','-')} / {rr.get('total','-')}")
-        cols[2].metric("Gap to #1", fmt_pct(rr.get("gap_to_best", np.nan), 0))
+    # ---- Summary narrative ----
+    worst_types = []
+    if stype_vs_other is not None and not stype_vs_other.empty:
+        worst_types = stype_vs_other.sort_values("Sales/m² idx vs other regions", ascending=True).head(2)["store_type"].tolist()
+
+    headline = (
+        f"**{meta.get('client','Client')} · {meta.get('region','region')} · {meta.get('period_label','period')}**\n\n"
+        f"Your region is ranked **{rank}/{total}** on SVI. "
+        f"Primary friction likely sits in **{', '.join(worst_types) if worst_types else 'store-type differences'}**."
+    )
+    card("Region summary (30 seconds)", headline)
+
+    # ---- Store-type focus cards ----
+    st.markdown("### Focus areas (by store type)")
+    if stype_vs_other is None or stype_vs_other.empty:
+        st.info("No store-type vs other-regions comparison available (need same store_type across ≥2 regions).")
     else:
-        cols[1].metric("Rank vs regions", "-")
-        cols[2].metric("Gap to #1", "-")
+        focus = stype_vs_other.sort_values("Sales/m² idx vs other regions", ascending=True).head(3)
 
-    st.markdown("#### 1) Where to focus (store types vs other regions)")
-    focus = outcomes.get("focus_store_types", [])
-    if focus:
-        for f in focus:
-            st.markdown(
-                f"- **{f['store_type']}** · Sales/m² idx: **{fmt_pct(f['spm2_idx_other'],0)}** · "
-                f"SPV idx: **{fmt_pct(f['spv_idx_other'],0)}** · CR idx: **{fmt_pct(f['cr_idx_other'],0)}** · "
-                f"Traffic idx: **{fmt_pct(f['traffic_idx_other'],0)}**"
+        # precompute store-level upside and aggregate per type
+        opps_store = []
+        for _, r in store_summary.iterrows():
+            stype = str(r.get("store_type", "Unknown")).strip() or "Unknown"
+            bench = company_type_bench.get(stype, {})
+            up, driver = estimate_upside(r, bench)
+            if pd.notna(up) and up > 0:
+                opps_store.append({
+                    "store_type": stype,
+                    "store_display": r.get("store_display", str(r.get("id", ""))),
+                    "impact_period": float(up),
+                    "impact_annual": float(up) * annual_factor,
+                    "driver": driver,
+                    "traffic_idx": r.get("Traffic idx vs type", np.nan),
+                    "cr_idx": r.get("CR idx vs type", np.nan),
+                    "spm2_idx": r.get("Sales/m² idx vs type", np.nan),
+                    "spv_idx": r.get("SPV idx vs type", np.nan),
+                })
+        df_opps = pd.DataFrame(opps_store)
+
+        for _, row in focus.iterrows():
+            stype = row["store_type"]
+            driver, expl = infer_root_cause(row.to_dict())
+            actions = actions_for_driver(driver)
+
+            # upside per type
+            up_period = np.nan
+            up_annual = np.nan
+            examples = []
+            if df_opps is not None and not df_opps.empty:
+                dft = df_opps[df_opps["store_type"] == stype].copy()
+                if not dft.empty:
+                    up_period = float(dft["impact_period"].sum())
+                    up_annual = float(dft["impact_annual"].sum())
+                    top = dft.sort_values("impact_period", ascending=False).head(2)
+                    examples = [
+                        f"{r['store_display']} — {fmt_eur(r['impact_period'])} (driver: {r['driver']})"
+                        for _, r in top.iterrows()
+                    ]
+
+            body = (
+                f"**Why this store type matters now:** {expl}\n\n"
+                f"**Indices vs other regions (same type):**\n"
+                f"- Sales/m² idx: **{fmt_pct(row.get('Sales/m² idx vs other regions', np.nan), 0)}**\n"
+                f"- SPV idx: **{fmt_pct(row.get('SPV idx vs other regions', np.nan), 0)}**\n"
+                f"- CR idx: **{fmt_pct(row.get('CR idx vs other regions', np.nan), 0)}**\n"
+                f"- Traffic idx: **{fmt_pct(row.get('Traffic idx vs other regions', np.nan), 0)}**\n\n"
+                f"**Estimated upside:** **{fmt_eur(up_period)}** (period) · **{fmt_eur(up_annual)} / year**"
             )
-    else:
-        st.info("No store-type vs other regions comparison available (need at least 2 regions with same store_type).")
 
-    st.markdown("#### 2) Biggest upside (aggregated by store type)")
-    opp_t = outcomes.get("opportunities_by_type", [])
-    if opp_t:
-        for o in opp_t:
-            st.markdown(
-                f"- **{o['store_type']}** · **{fmt_eur(o['impact_period_eur'])}** (period) · "
-                f"**{fmt_eur(o['impact_annual_eur'])}/yr** · stores impacted: {o['stores']} "
-                f"· examples: {', '.join(o['examples'])}"
+            bullets = []
+            bullets.append("**Recommended actions (next 14 days):**")
+            bullets += [f"{a}" for a in actions]
+
+            if examples:
+                bullets.append("**Start here (top stores inside this store type):**")
+                bullets += examples
+
+            card(f"Workcard — Store type: {stype}", body, bullets=bullets)
+
+    # ---- Strengths ----
+    st.markdown("### What’s working (protect & replicate)")
+    if store_summary is None or store_summary.empty:
+        st.info("No store_summary available for strengths.")
+    else:
+        ss = store_summary.copy()
+        ss["strength_score"] = (
+            pd.to_numeric(ss.get("Sales/m² idx vs type"), errors="coerce").fillna(100)
+            + pd.to_numeric(ss.get("SPV idx vs type"), errors="coerce").fillna(100)
+            + pd.to_numeric(ss.get("CR idx vs type"), errors="coerce").fillna(100)
+        )
+        best = ss.sort_values("strength_score", ascending=False).head(3)
+
+        bullets = []
+        for _, r in best.iterrows():
+            bullets.append(
+                f"**{r.get('store_display','')}** ({r.get('store_type','')}) · "
+                f"Sales/m² idx {fmt_pct(r.get('Sales/m² idx vs type', np.nan),0)} · "
+                f"SPV idx {fmt_pct(r.get('SPV idx vs type', np.nan),0)} · "
+                f"CR idx {fmt_pct(r.get('CR idx vs type', np.nan),0)}"
             )
-    else:
-        st.info("No upside found (or missing KPIs).")
 
-    st.markdown("#### 3) Top stores to act on this week")
-    opp_s = outcomes.get("opportunities_top_stores", [])
-    if opp_s:
-        for o in opp_s:
-            st.markdown(
-                f"- **{o['store_name']}** ({o['store_type']}) — {o['driver']} · "
-                f"**{fmt_eur(o['impact_period_eur'])}** (period) · **{fmt_eur(o['impact_annual_eur'])}/yr**"
-            )
-    else:
-        st.info("No store-level opportunities detected.")
+        card(
+            "Strength card — replicate playbook",
+            "These stores are outperforming their **own store type benchmark**. Don’t “optimize” them into mediocrity — replicate what they do.",
+            bullets=bullets
+        )
 
-    st.markdown("#### 4) What’s already working (copy/paste playbook)")
-    strengths = outcomes.get("strengths", [])
-    if strengths:
-        for s in strengths:
-            st.markdown(
-                f"- **{s['store_name']}** ({s['store_type']}) · "
-                f"SPV idx: **{fmt_pct(s['spv_idx'],0)}** · Sales/m² idx: **{fmt_pct(s['spm2_idx'],0)}** · "
-                f"CR idx: **{fmt_pct(s['cr_idx'],0)}**"
-            )
-    else:
-        st.info("No strengths summary available.")
-
-    if outcomes.get("risks"):
-        st.markdown("#### Risks / alerts")
-        for r in outcomes["risks"]:
-            st.error(f"**{r.get('driver','Risk')}** ({r.get('severity','')}) — " + " · ".join(r.get("why", [])))
+    # ---- Data quality ----
+    st.markdown("### Data quality (so you don’t fight ghosts)")
+    dq = data_quality or {}
+    dq_body = (
+        f"- sqm missing: **{fmt_pct(dq.get('sqm_missing_pct', np.nan),0)}**\n"
+        f"- turnover missing: **{fmt_pct(dq.get('turnover_missing_pct', np.nan),0)}**\n"
+        f"- transactions missing: **{fmt_pct(dq.get('transactions_missing_pct', np.nan),0)}**\n"
+        f"- footfall missing: **{fmt_pct(dq.get('footfall_missing_pct', np.nan),0)}**\n\n"
+        f"Confidence score: **{int(round(dq.get('confidence', 0)))} / 100**"
+    )
+    card("Confidence card", dq_body)
 
 
 # ------------------------------------------------------------
@@ -616,7 +650,7 @@ def main():
         fastapi_base = raw_api_url
         report_url = raw_api_url + "/get-report"
 
-    st.title("PFM Region Reasoner — Agentic Outcome Edition")
+    st.title("PFM Region Reasoner — Agentic Workload Edition")
 
     # ---- Clients ----
     clients = load_clients("clients.json")
@@ -652,34 +686,28 @@ def main():
     if not run:
         st.stop()
 
-    # ---- Locations (names only; sqm will come from report payload sq_meter) ----
+    # ---- Locations (id, name) ----
     locations_df = get_locations_by_company(fastapi_base, company_id)
     if locations_df is None or locations_df.empty:
         st.error("No locations returned from /company/{company}/location")
         st.stop()
 
     if "id" not in locations_df.columns:
-        st.error(f"Locations payload has no 'id' column. Columns: {locations_df.columns.tolist()}")
+        st.error(f"Locations payload has no 'id'. Columns: {locations_df.columns.tolist()}")
         st.stop()
 
     locations_df = locations_df.copy()
     locations_df["id"] = pd.to_numeric(locations_df["id"], errors="coerce").astype("Int64")
 
-    # join region mapping onto locations (for region + store_type + sqm_override)
+    # join regions mapping
     merged = locations_df.merge(region_map, left_on="id", right_on="shop_id", how="inner")
     if merged.empty:
         st.warning("No stores matched regions.csv mapping.")
         st.stop()
 
     merged["region"] = merged["region"].astype(str).str.strip().str.lower()
+    merged["store_display"] = merged["name"] if "name" in merged.columns else merged["id"].astype(str)
 
-    # store_display
-    if "name" in merged.columns and merged["name"].notna().any():
-        merged["store_display"] = merged["name"]
-    else:
-        merged["store_display"] = merged["id"].astype(str)
-
-    # store_type hygiene
     if "store_type" not in merged.columns:
         merged["store_type"] = "Unknown"
     merged["store_type"] = (
@@ -689,7 +717,7 @@ def main():
         .replace({"": "Unknown", "nan": "Unknown", "None": "Unknown"})
     )
 
-    # ---- Fetch report ----
+    # ---- Fetch report (include sq_meter!) ----
     all_shop_ids = merged["id"].dropna().astype(int).unique().tolist()
     if not all_shop_ids:
         st.error("No shop IDs after mapping.")
@@ -697,7 +725,6 @@ def main():
 
     cfg = VemcountApiConfig(report_url=report_url)
 
-    # IMPORTANT: include sq_meter in data_outputs (you confirmed it's in response)
     metric_map = {
         "count_in": "footfall",
         "turnover": "turnover",
@@ -738,7 +765,6 @@ def main():
         st.warning("No data returned for this selection.")
         st.stop()
 
-    # store key
     store_key = None
     for cand in ["shop_id", "id", "location_id"]:
         if cand in df_norm.columns:
@@ -750,7 +776,6 @@ def main():
 
     df_norm[store_key] = pd.to_numeric(df_norm[store_key], errors="coerce").astype("Int64")
 
-    # Join dimensions (region + store_type + store_display + sqm_override)
     df = df_norm.merge(
         merged[["id", "store_display", "region", "store_type", "sqm_override"]].drop_duplicates(),
         left_on=store_key,
@@ -758,37 +783,37 @@ def main():
         how="left"
     )
 
-    # Ensure numeric
+    # numeric
     for c in ["footfall", "turnover", "transactions", "sales_per_sqm", "sq_meter", "sqm_override"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    # sqm_effective: sqm_override overrides; else sq_meter from report payload
+    # sqm_effective
     if "sq_meter" not in df.columns:
         df["sq_meter"] = np.nan
-    sqm_eff = pd.to_numeric(df["sqm_override"], errors="coerce").combine_first(pd.to_numeric(df["sq_meter"], errors="coerce"))
-    sqm_eff = pd.Series(sqm_eff, index=df.index, dtype="float64")
-    sqm_eff.loc[sqm_eff <= 0] = np.nan
-    df["sqm_effective"] = sqm_eff
+    df["sqm_effective"] = pd.to_numeric(df["sqm_override"], errors="coerce").combine_first(
+        pd.to_numeric(df["sq_meter"], errors="coerce")
+    )
+    df["sqm_effective"] = pd.Series(df["sqm_effective"], index=df.index, dtype="float64")
+    df.loc[df["sqm_effective"] <= 0, "sqm_effective"] = np.nan
 
-    # sales_per_sqm: keep API value, only backfill where missing/NaN
+    # sales_per_sqm backfill only if NaN
     if "sales_per_sqm" not in df.columns:
         df["sales_per_sqm"] = np.nan
     df["sales_per_sqm"] = pd.to_numeric(df["sales_per_sqm"], errors="coerce")
-
     computed_spm2 = pd.Series(
         np.where((df["sqm_effective"] > 0) & df["turnover"].notna(), df["turnover"] / df["sqm_effective"], np.nan),
         index=df.index
     )
     df["sales_per_sqm"] = df["sales_per_sqm"].combine_first(computed_spm2)
 
-    # Region subset
+    # subset region
     df_region = df[df["region"] == region_choice].copy()
     if df_region.empty:
         st.warning("No rows for selected region after join.")
         st.stop()
 
-    # Store summary (period totals)
+    # store summary totals
     store_summary = (
         df_region
         .groupby(["id", "store_display", "store_type", "sqm_effective"], as_index=False)
@@ -820,11 +845,11 @@ def main():
         np.nan
     )
 
-    # Company type benchmarks (company-wide)
+    # company benchmarks
     df_all = df.copy()
     company_type_bench = compute_company_type_bench(df_all)
 
-    # Indices vs type bench (company-wide)
+    # indices vs type
     store_summary["Traffic idx vs type"] = store_summary.apply(
         lambda r: idx_vs(r["footfall"], company_type_bench.get(r["store_type"], {}).get("footfall", np.nan)),
         axis=1
@@ -835,10 +860,6 @@ def main():
     )
     store_summary["SPV idx vs type"] = store_summary.apply(
         lambda r: idx_vs(r["sales_per_visitor"], company_type_bench.get(r["store_type"], {}).get("sales_per_visitor", np.nan)),
-        axis=1
-    )
-    store_summary["ATV idx vs type"] = store_summary.apply(
-        lambda r: idx_vs(r["sales_per_transaction"], company_type_bench.get(r["store_type"], {}).get("sales_per_transaction", np.nan)),
         axis=1
     )
     store_summary["Sales/m² idx vs type"] = store_summary.apply(
@@ -861,7 +882,6 @@ def main():
         sqm_sum=float(pd.to_numeric(df_all["sqm_effective"], errors="coerce").dropna().sum()),
         capture_pct=np.nan,
     )
-
     region_svi, avg_ratio, _ = compute_svi_explainable(
         vals_a=reg_vals,
         vals_b=comp_vals,
@@ -870,11 +890,11 @@ def main():
         cap=120,
     )
 
-    # Annual factor
+    # annual factor
     days = max(1, (pd.to_datetime(end_date) - pd.to_datetime(start_date)).days + 1)
     annual_factor = 365.0 / float(days)
 
-    # Region SVI rank table
+    # Rank across regions
     region_list = sorted(df_all["region"].dropna().unique().tolist())
     svi_table = compute_region_svi_table(df_all, region_list)
 
@@ -893,75 +913,76 @@ def main():
                 "gap_to_best": (cur / best * 100.0) if (pd.notna(cur) and pd.notna(best) and best != 0) else np.nan,
             }
 
-    # Store-type comparison vs other regions
     stype_vs_other = compute_storetype_vs_other_regions(df_all, region_choice)
 
-    payload = {
-        "store_summary": store_summary,
-        "company_type_bench": company_type_bench,
-        "annual_factor": annual_factor,
-        "region_rank": region_rank,
-        "stype_vs_other": stype_vs_other,
-        "meta": {
-            "client": selected_client.get("brand", ""),
-            "region": region_choice,
-            "period_label": f"{period_label} ({start_date} → {end_date})"
-        },
-        "scores": {
-            "region_svi": float(region_svi) if pd.notna(region_svi) else np.nan,
-            "avg_ratio_vs_company": float(avg_ratio) if pd.notna(avg_ratio) else np.nan
-        }
+    meta = {
+        "client": selected_client.get("brand", ""),
+        "region": region_choice,
+        "period_label": f"{period_label} ({start_date} → {end_date})"
+    }
+    scores = {
+        "region_svi": float(region_svi) if pd.notna(region_svi) else np.nan,
+        "avg_ratio_vs_company": float(avg_ratio) if pd.notna(avg_ratio) else np.nan
     }
 
-    outcomes = build_region_outcomes(payload)
+    data_quality = compute_data_quality(df_region)
 
-    # --- Layout: show comparisons BEFORE the narrative ---
-    with st.expander("📊 Region comparison (SVI vs other regions)", expanded=True):
+    # Render comparisons (optional expanders)
+    with st.expander("📊 Region comparison (SVI vs other regions)", expanded=False):
         if svi_table is None or svi_table.empty:
             st.info("No SVI table available.")
         else:
             show = svi_table.copy()
             show["SVI"] = show["svi"].round(0)
-            show["Avg ratio vs company"] = show["avg_ratio_vs_company"].round(0)
             show["Turnover"] = show["turnover"].map(fmt_eur)
-            show["Footfall"] = show["footfall"].round(0)
-            show["Transactions"] = show["transactions"].round(0)
-            show = show[["rank", "region", "SVI", "Avg ratio vs company", "Turnover", "Footfall", "Transactions"]]
+            show = show[["rank", "region", "SVI", "Turnover", "footfall", "transactions"]]
             st.dataframe(show, use_container_width=True)
 
-    with st.expander("🧩 Store types vs other regions (same type)", expanded=True):
+    with st.expander("🧩 Store types vs other regions (same type)", expanded=False):
         if stype_vs_other is None or stype_vs_other.empty:
-            st.info("No store-type comparison available (need same store_type across >=2 regions).")
+            st.info("No store-type comparison available.")
         else:
-            st.dataframe(
-                stype_vs_other.assign(
-                    **{
-                        "SPV idx vs other regions": stype_vs_other["SPV idx vs other regions"].round(0),
-                        "CR idx vs other regions": stype_vs_other["CR idx vs other regions"].round(0),
-                        "Sales/m² idx vs other regions": stype_vs_other["Sales/m² idx vs other regions"].round(0),
-                        "Traffic idx vs other regions": stype_vs_other["Traffic idx vs other regions"].round(0),
-                        "region_turnover": stype_vs_other["region_turnover"].map(fmt_eur),
-                        "other_turnover": stype_vs_other["other_turnover"].map(fmt_eur),
-                    }
-                ),
-                use_container_width=True
-            )
+            st.dataframe(stype_vs_other, use_container_width=True)
 
-    # --- The “agentic” feed ---
-    render_outcome_feed(outcomes, typing=True)
+    # AGENTIC workload cards (deterministic)
+    render_agentic_workload(
+        meta=meta,
+        region_rank=region_rank,
+        scores=scores,
+        svi_table=svi_table,
+        stype_vs_other=stype_vs_other,
+        store_summary=store_summary,
+        company_type_bench=company_type_bench,
+        annual_factor=annual_factor,
+        data_quality=data_quality,
+    )
 
-    # Debug
-    with st.expander("🔧 Debug"):
+    # Debug / Diagnostics
+    with st.expander("🔧 Debug / Diagnostics"):
         st.write("REPORT_URL:", report_url)
         st.write("FASTAPI_BASE:", fastapi_base)
         st.write("Company:", company_id)
         st.write("Region:", region_choice)
         st.write("Period:", start_date, "→", end_date)
         st.write("Params preview:", params_preview)
-        st.write("merged cols:", merged.columns.tolist())
+
+        st.write("OutcomeExplainer file exists:", bool((_REPO_ROOT / "outcome_explainer.py").exists()))
+        st.write("OutcomeExplainer import error:", _OUTCOME_IMPORT_ERROR)
+
+        # openai package availability (common root cause)
+        try:
+            import openai  # noqa
+            st.write("openai package:", "✅ available")
+        except Exception as e:
+            st.write("openai package:", f"❌ not available ({repr(e)})")
+
+        # secrets presence (don’t print keys)
+        st.write("secrets has OPENAI_API_KEY:", "OPENAI_API_KEY" in st.secrets)
+        st.write("sys.path head:", sys.path[:5])
+
         st.write("df_norm cols:", df_norm.columns.tolist())
         st.write("sqm_effective filled:", int(pd.to_numeric(df["sqm_effective"], errors="coerce").notna().sum()), "/", len(df))
-        st.write("Example sqm (from report):", df[["id", "store_display", "sqm_override", "sq_meter", "sqm_effective"]].head(10))
+        st.write("Example sqm:", df[["id", "store_display", "sqm_override", "sq_meter", "sqm_effective"]].head(10))
 
 
 main()
