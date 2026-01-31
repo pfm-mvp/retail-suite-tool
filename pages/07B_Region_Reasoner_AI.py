@@ -1,13 +1,12 @@
 # pages/07B_Region_Reasoner_AI.py
 # ------------------------------------------------------------
 # PFM Region Reasoner — Agentic Outcome Edition (IMPORT-SAFE)
-# Fixes (this iteration):
-# - FIX: Debug expander no longer crashes on duplicate columns
-# - FIX: sqm column detection will NEVER pick sqm_override / sqm_effective
-# - FIX: OutcomeExplainer always available (fallback implemented) + debug shows import error
-# Notes:
-# - Your /company/{id}/location currently returns only [id, name], so no sq_meter can be used.
-#   sqm_effective will only come from regions.csv sqm_override.
+# Fixes (this version):
+# - Pull sq_meter (and optional name) from /get-report response shop metadata
+# - Use that as base sqm when locations endpoint lacks sq_meter
+# - Debug expander no longer crashes on duplicate columns
+# - sqm column detection never picks sqm_override/sqm_effective
+# - OutcomeExplainer always available (fallback) + debug shows import error
 # ------------------------------------------------------------
 
 from __future__ import annotations
@@ -19,6 +18,7 @@ import streamlit as st
 import requests
 from pathlib import Path
 from datetime import datetime
+
 
 # ------------------------------------------------------------
 # Ensure repo root is on sys.path (for outcome_explainer.py in root)
@@ -57,64 +57,6 @@ except Exception:
 # ------------------------------------------------------------
 _OUTCOME_IMPORT_ERROR = None
 
-class _FallbackOutcomeExplainer:
-    """Minimal drop-in so the UI still shows 'agentic' cards even if root import fails."""
-    def build_cards(self, outcomes: dict, persona: str = "region_manager", style: str = "crisp", use_llm: bool = False):
-        meta = outcomes.get("meta", {})
-        scores = outcomes.get("scores", {})
-        cards = []
-
-        title = f"{meta.get('client','Client')} · {meta.get('region','Region')} · {meta.get('period_label','Period')}"
-        body = []
-        if pd.notna(scores.get("region_svi", np.nan)):
-            body.append(f"- **Region SVI:** {int(round(float(scores['region_svi'])))} / 100")
-
-        opps = outcomes.get("opportunities", []) or []
-        if opps:
-            body.append("\n**Top opportunities:**")
-            for o in opps[:3]:
-                body.append(
-                    f"- **{o.get('store_name','')}** — {o.get('driver','')} · "
-                    f"{fmt_eur(o.get('impact_period_eur'))} (period) · {fmt_eur(o.get('impact_annual_eur'))}/yr"
-                )
-        else:
-            body.append("\nNo upside opportunities detected (likely missing sqm_override or limited KPI coverage).")
-
-        cards.append({"title": "Region summary", "body": "\n".join(body)})
-
-        risks = outcomes.get("risks", []) or []
-        for r in risks[:2]:
-            cards.append({
-                "title": f"Risk — {r.get('driver','Risk')}",
-                "body": "\n".join([f"- {x}" for x in (r.get("why", []) or [])])
-            })
-
-        return cards
-
-    def stream_typing(self, text: str, chunk_size: int = 24, delay: float = 0.0):
-        # no sleep: keep it deterministic and fast
-        acc = ""
-        for i in range(0, len(text), chunk_size):
-            acc = text[: i + chunk_size]
-            yield acc
-
-
-try:
-    from outcome_explainer import OutcomeExplainer  # noqa
-except Exception as e:
-    _OUTCOME_IMPORT_ERROR = repr(e)
-    OutcomeExplainer = _FallbackOutcomeExplainer
-
-
-# ------------------------------------------------------------
-# Page config
-# ------------------------------------------------------------
-st.set_page_config(page_title="PFM Region Reasoner — Agentic", layout="wide")
-
-
-# ------------------------------------------------------------
-# Formatting helpers (EU)
-# ------------------------------------------------------------
 def fmt_eur(x):
     if pd.isna(x):
         return "-"
@@ -132,6 +74,53 @@ def safe_div(a, b):
         return float(a) / float(b)
     except Exception:
         return np.nan
+
+
+class _FallbackOutcomeExplainer:
+    def build_cards(self, outcomes: dict, persona: str = "region_manager", style: str = "crisp", use_llm: bool = False):
+        meta = outcomes.get("meta", {})
+        scores = outcomes.get("scores", {})
+        cards = []
+
+        title = f"{meta.get('client','Client')} · {meta.get('region','Region')} · {meta.get('period_label','Period')}"
+        body = [f"**{title}**"]
+
+        if pd.notna(scores.get("region_svi", np.nan)):
+            body.append(f"- **Region SVI:** {int(round(float(scores['region_svi'])))} / 100")
+
+        opps = outcomes.get("opportunities", []) or []
+        if opps:
+            body.append("\n**Top opportunities:**")
+            for o in opps[:3]:
+                body.append(
+                    f"- **{o.get('store_name','')}** — {o.get('driver','')} · "
+                    f"{fmt_eur(o.get('impact_period_eur'))} (period) · {fmt_eur(o.get('impact_annual_eur'))}/yr"
+                )
+        else:
+            body.append("\nNo upside opportunities detected.")
+
+        cards.append({"title": "Region summary", "body": "\n".join(body)})
+
+        return cards
+
+    def stream_typing(self, text: str, chunk_size: int = 24, delay: float = 0.0):
+        acc = ""
+        for i in range(0, len(text), chunk_size):
+            acc = text[: i + chunk_size]
+            yield acc
+
+
+try:
+    from outcome_explainer import OutcomeExplainer  # noqa
+except Exception as e:
+    _OUTCOME_IMPORT_ERROR = repr(e)
+    OutcomeExplainer = _FallbackOutcomeExplainer
+
+
+# ------------------------------------------------------------
+# Page config
+# ------------------------------------------------------------
+st.set_page_config(page_title="PFM Region Reasoner — Agentic", layout="wide")
 
 
 # ------------------------------------------------------------
@@ -178,7 +167,7 @@ def load_region_mapping(path="data/regions.csv") -> pd.DataFrame:
 
 
 # ------------------------------------------------------------
-# Vemcount locations via FastAPI
+# Vemcount locations via FastAPI (optional)
 # ------------------------------------------------------------
 @st.cache_data(ttl=600)
 def get_locations_by_company(fastapi_base_url: str, company_id: int) -> pd.DataFrame:
@@ -192,6 +181,60 @@ def get_locations_by_company(fastapi_base_url: str, company_id: int) -> pd.DataF
 
 
 # ------------------------------------------------------------
+# Extract store meta (sq_meter) from report response
+# ------------------------------------------------------------
+def extract_store_meta_from_report(resp: dict) -> pd.DataFrame:
+    """
+    Expected structure (based on your JSON example):
+      resp["data"][period_key][shop_id]["data"]["sq_meter"]
+      resp["data"][period_key][shop_id]["data"]["name"] (optional)
+    Returns columns: id, sq_meter, name
+    """
+    rows = []
+    if not isinstance(resp, dict):
+        return pd.DataFrame()
+
+    data = resp.get("data")
+    if not isinstance(data, dict) or not data:
+        return pd.DataFrame()
+
+    # period_key could be "last_year" OR "date_YYYY-MM-DD" etc. We'll iterate all top-level keys.
+    for period_key, period_block in data.items():
+        if not isinstance(period_block, dict):
+            continue
+        for shop_id, shop_payload in period_block.items():
+            if not isinstance(shop_payload, dict):
+                continue
+            meta = shop_payload.get("data") or {}
+            if not isinstance(meta, dict):
+                continue
+
+            sq = meta.get("sq_meter", np.nan)
+            nm = meta.get("name", None)
+            try:
+                sid = int(shop_id)
+            except Exception:
+                sid = pd.to_numeric(shop_id, errors="coerce")
+                if pd.isna(sid):
+                    continue
+                sid = int(sid)
+
+            rows.append({
+                "id": sid,
+                "sq_meter": sq,
+                "name": nm
+            })
+
+    if not rows:
+        return pd.DataFrame()
+
+    dfm = pd.DataFrame(rows).drop_duplicates(subset=["id"])
+    dfm["id"] = pd.to_numeric(dfm["id"], errors="coerce").astype("Int64")
+    dfm["sq_meter"] = pd.to_numeric(dfm["sq_meter"], errors="coerce")
+    return dfm
+
+
+# ------------------------------------------------------------
 # KPI / Benchmark helpers
 # ------------------------------------------------------------
 def idx_vs(a, b):
@@ -199,11 +242,6 @@ def idx_vs(a, b):
 
 
 def compute_company_type_bench(df_all: pd.DataFrame) -> dict:
-    """
-    Returns dict: {store_type: {...}}
-    IMPORTANT: df_all uses renamed columns:
-      footfall, turnover, transactions, sqm_effective
-    """
     out = {}
     if df_all is None or df_all.empty:
         return out
@@ -307,40 +345,19 @@ def build_region_outcomes(payload: dict) -> dict:
                 "driver": driver,
                 "impact_period_eur": float(up),
                 "impact_annual_eur": float(up) * payload["annual_factor"],
-                "why": [
-                    f"Traffic idx vs type: {fmt_pct(r.get('Traffic idx vs type', np.nan), 0)}",
-                    f"CR idx vs type: {fmt_pct(r.get('CR idx vs type', np.nan), 0)}",
-                    f"Sales/m² idx vs type: {fmt_pct(r.get('Sales/m² idx vs type', np.nan), 0)}",
-                ],
                 "actions": actions,
             })
 
     opportunities = sorted(opportunities, key=lambda x: x["impact_period_eur"], reverse=True)[:3]
 
-    risks = []
-    svi = scores.get("region_svi", np.nan)
-    if pd.notna(svi) and float(svi) < 60:
-        risks.append({
-            "driver": "Regional performance pressure",
-            "severity": "high",
-            "why": [
-                f"Region SVI: {int(round(float(svi)))} / 100",
-                "Several stores underperform their own store_type benchmarks"
-            ],
-            "actions": [
-                {"label": "Focus", "text": "Start with top upside + lowest SVI stores"},
-                {"label": "Validate", "text": "Check closed days / POS completeness for the worst outliers"},
-            ]
-        })
-
     return {
         "meta": meta,
         "scores": scores,
         "opportunities": opportunities,
-        "risks": risks,
+        "risks": [],
         "notes": [
             "Benchmarked on same store_type (company-wide)",
-            "sqm-calibrated: sqm_override → sq_meter (if available)"
+            "sqm source: regions.csv sqm_override → report meta sq_meter"
         ]
     }
 
@@ -348,7 +365,7 @@ def build_region_outcomes(payload: dict) -> dict:
 def render_outcome_feed(outcomes: dict, typing: bool = True):
     st.markdown("## Agentic outcome feed")
 
-    explainer = OutcomeExplainer()  # real or fallback
+    explainer = OutcomeExplainer()
     cards = explainer.build_cards(outcomes, persona="region_manager", style="crisp", use_llm=False)
 
     for card in cards:
@@ -361,31 +378,6 @@ def render_outcome_feed(outcomes: dict, typing: bool = True):
                 box.markdown(f"### {title}\n\n{chunk}")
         else:
             box.markdown(f"### {title}\n\n{body_full}")
-
-
-# ------------------------------------------------------------
-# sqm helpers
-# ------------------------------------------------------------
-def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df.columns = [str(c).strip().lower() for c in df.columns]
-    return df
-
-def _find_sqm_col(cols: list[str]) -> str | None:
-    # IMPORTANT: never pick these — they are derived / overrides
-    banned = {"sqm_override", "sqm_effective"}
-    cols_clean = [c for c in cols if str(c).strip().lower() not in banned]
-
-    direct = ["sq_meter", "sqm", "sq_meters", "square_meters", "m2", "surface_m2", "surface", "area_m2", "area"]
-    for c in direct:
-        if c in cols_clean:
-            return c
-
-    for c in cols_clean:
-        lc = str(c).lower()
-        if ("sq" in lc and "meter" in lc) or ("sqm" in lc) or ("m2" in lc) or ("square" in lc and "meter" in lc):
-            return c
-    return None
 
 
 # ------------------------------------------------------------
@@ -434,12 +426,15 @@ def main():
     if not run:
         st.stop()
 
+    # --- Locations only gives id/name in your setup; still useful for list of shops ---
     locations_df = get_locations_by_company(fastapi_base, company_id)
     if locations_df is None or locations_df.empty:
         st.error("No locations returned from /company/{company}/location")
         st.stop()
 
-    locations_df = _normalize_columns(locations_df)
+    # normalize locations cols
+    locations_df = locations_df.copy()
+    locations_df.columns = [str(c).strip().lower() for c in locations_df.columns]
 
     if "id" not in locations_df.columns:
         st.error(f"Locations payload has no 'id' column. Columns: {locations_df.columns.tolist()}")
@@ -452,12 +447,10 @@ def main():
         st.warning("No stores matched regions.csv mapping.")
         st.stop()
 
-    merged = _normalize_columns(merged)
+    merged.columns = [str(c).strip().lower() for c in merged.columns]
     merged["region"] = merged["region"].astype(str).str.strip().str.lower()
 
-    if "store_label" in merged.columns and merged["store_label"].notna().any():
-        merged["store_display"] = merged["store_label"]
-    elif "name" in merged.columns:
+    if "name" in merged.columns:
         merged["store_display"] = merged["name"]
     else:
         merged["store_display"] = merged["id"].astype(str)
@@ -471,21 +464,7 @@ def main():
         .replace({"": "Unknown", "nan": "Unknown", "None": "Unknown"})
     )
 
-    # sqm_effective — only from locations if present; otherwise from sqm_override
-    sqm_col = _find_sqm_col(list(merged.columns))
-    if sqm_col is not None:
-        base_sqm = pd.to_numeric(merged[sqm_col], errors="coerce")
-    else:
-        base_sqm = pd.Series(np.nan, index=merged.index, dtype="float64")
-
-    sqm_override = pd.to_numeric(merged.get("sqm_override", np.nan), errors="coerce")
-    if not isinstance(sqm_override, pd.Series):
-        sqm_override = pd.Series(sqm_override, index=merged.index, dtype="float64")
-
-    merged["sqm_effective"] = sqm_override.combine_first(pd.Series(base_sqm, index=merged.index))
-    merged["sqm_effective"] = pd.to_numeric(merged["sqm_effective"], errors="coerce")
-    merged.loc[merged["sqm_effective"] <= 0, "sqm_effective"] = np.nan
-
+    # ---- Fetch report ----
     all_shop_ids = merged["id"].dropna().astype(int).unique().tolist()
     if not all_shop_ids:
         st.error("No shop IDs after mapping.")
@@ -498,6 +477,7 @@ def main():
         "turnover": "turnover",
         "transactions": "transactions",
         "sales_per_sqm": "sales_per_sqm",
+        "sq_meter": "sq_meter",  # IMPORTANT: request sq_meter so it's present in meta anyway
     }
 
     params_preview = build_report_params(
@@ -527,11 +507,44 @@ def main():
         st.write("Params preview:", params_preview)
         st.stop()
 
-    df_norm = normalize_vemcount_response(resp, kpi_keys=metric_map.keys()).rename(columns=metric_map)
+    # --- NEW: extract sq_meter from report meta ---
+    df_meta = extract_store_meta_from_report(resp)
+    if df_meta is None:
+        df_meta = pd.DataFrame()
+
+    if not df_meta.empty:
+        merged = merged.merge(df_meta[["id", "sq_meter"]].drop_duplicates(), on="id", how="left")
+    else:
+        merged["sq_meter"] = np.nan
+
+    # sqm_effective:
+    # priority: sqm_override (regions.csv) -> sq_meter (report meta)
+    sqm_override = pd.to_numeric(merged.get("sqm_override", np.nan), errors="coerce")
+    if not isinstance(sqm_override, pd.Series):
+        sqm_override = pd.Series(sqm_override, index=merged.index, dtype="float64")
+
+    base_sqm = pd.to_numeric(merged.get("sq_meter", np.nan), errors="coerce")
+    if not isinstance(base_sqm, pd.Series):
+        base_sqm = pd.Series(base_sqm, index=merged.index, dtype="float64")
+
+    merged["sqm_effective"] = sqm_override.combine_first(base_sqm)
+    merged["sqm_effective"] = pd.to_numeric(merged["sqm_effective"], errors="coerce")
+    merged.loc[merged["sqm_effective"] <= 0, "sqm_effective"] = np.nan
+
+    # normalize KPI rows
+    df_norm = normalize_vemcount_response(resp, kpi_keys=["count_in", "turnover", "transactions", "sales_per_sqm"]).rename(
+        columns={
+            "count_in": "footfall",
+            "turnover": "turnover",
+            "transactions": "transactions",
+            "sales_per_sqm": "sales_per_sqm",
+        }
+    )
     if df_norm is None or df_norm.empty:
         st.warning("No data returned for this selection.")
         st.stop()
 
+    # store key
     store_key = None
     for cand in ["shop_id", "id", "location_id"]:
         if cand in df_norm.columns:
@@ -554,18 +567,14 @@ def main():
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    # sales_per_sqm backfill only if missing/NaN (but will remain NaN if sqm_effective missing)
+    # backfill sales_per_sqm only if missing/NaN
     if "sales_per_sqm" not in df.columns:
         df["sales_per_sqm"] = np.nan
-    df["sales_per_sqm"] = pd.to_numeric(df["sales_per_sqm"], errors="coerce")
 
     sqm_eff = pd.to_numeric(df.get("sqm_effective", np.nan), errors="coerce")
     turn = pd.to_numeric(df.get("turnover", np.nan), errors="coerce")
-    computed_spm2 = pd.Series(
-        np.where((sqm_eff > 0) & turn.notna(), turn / sqm_eff, np.nan),
-        index=df.index
-    )
-    df["sales_per_sqm"] = df["sales_per_sqm"].combine_first(computed_spm2)
+    computed_spm2 = pd.Series(np.where((sqm_eff > 0) & turn.notna(), turn / sqm_eff, np.nan), index=df.index)
+    df["sales_per_sqm"] = pd.to_numeric(df["sales_per_sqm"], errors="coerce").combine_first(computed_spm2)
 
     df_region = df[df["region"] == region_choice].copy()
     if df_region.empty:
@@ -582,41 +591,21 @@ def main():
         )
     )
 
-    store_summary["conversion_rate"] = np.where(
-        store_summary["footfall"] > 0,
-        store_summary["transactions"] / store_summary["footfall"] * 100.0,
-        np.nan
-    )
-    store_summary["sales_per_visitor"] = np.where(
-        store_summary["footfall"] > 0,
-        store_summary["turnover"] / store_summary["footfall"],
-        np.nan
-    )
-    store_summary["sales_per_transaction"] = np.where(
-        store_summary["transactions"] > 0,
-        store_summary["turnover"] / store_summary["transactions"],
-        np.nan
-    )
-    store_summary["sales_per_sqm"] = np.where(
-        store_summary["sqm_effective"] > 0,
-        store_summary["turnover"] / store_summary["sqm_effective"],
-        np.nan
-    )
+    store_summary["conversion_rate"] = np.where(store_summary["footfall"] > 0, store_summary["transactions"] / store_summary["footfall"] * 100.0, np.nan)
+    store_summary["sales_per_visitor"] = np.where(store_summary["footfall"] > 0, store_summary["turnover"] / store_summary["footfall"], np.nan)
+    store_summary["sales_per_sqm"] = np.where(store_summary["sqm_effective"] > 0, store_summary["turnover"] / store_summary["sqm_effective"], np.nan)
 
     df_all = df.copy()
     company_type_bench = compute_company_type_bench(df_all)
 
     store_summary["Traffic idx vs type"] = store_summary.apply(
-        lambda r: idx_vs(r["footfall"], company_type_bench.get(r["store_type"], {}).get("footfall", np.nan)),
-        axis=1
+        lambda r: idx_vs(r["footfall"], company_type_bench.get(r["store_type"], {}).get("footfall", np.nan)), axis=1
     )
     store_summary["CR idx vs type"] = store_summary.apply(
-        lambda r: idx_vs(r["conversion_rate"], company_type_bench.get(r["store_type"], {}).get("conversion_rate", np.nan)),
-        axis=1
+        lambda r: idx_vs(r["conversion_rate"], company_type_bench.get(r["store_type"], {}).get("conversion_rate", np.nan)), axis=1
     )
     store_summary["Sales/m² idx vs type"] = store_summary.apply(
-        lambda r: idx_vs(r["sales_per_sqm"], company_type_bench.get(r["store_type"], {}).get("sales_per_sqm", np.nan)),
-        axis=1
+        lambda r: idx_vs(r["sales_per_sqm"], company_type_bench.get(r["store_type"], {}).get("sales_per_sqm", np.nan)), axis=1
     )
 
     reg_vals = compute_driver_values_from_period(
@@ -634,13 +623,7 @@ def main():
         capture_pct=np.nan,
     )
 
-    region_svi, avg_ratio, _ = compute_svi_explainable(
-        vals_a=reg_vals,
-        vals_b=comp_vals,
-        weights=BASE_SVI_WEIGHTS,
-        floor=80,
-        cap=120,
-    )
+    region_svi, avg_ratio, _ = compute_svi_explainable(vals_a=reg_vals, vals_b=comp_vals, weights=BASE_SVI_WEIGHTS, floor=80, cap=120)
 
     days = max(1, (pd.to_datetime(end_date) - pd.to_datetime(start_date)).days + 1)
     annual_factor = 365.0 / float(days)
@@ -670,21 +653,20 @@ def main():
         st.write("Region:", region_choice)
         st.write("Period:", start_date, "→", end_date)
         st.write("Params preview:", params_preview)
-
         st.write("OutcomeExplainer import error:", _OUTCOME_IMPORT_ERROR)
+
         st.write("locations_df columns:", locations_df.columns.tolist())
         st.write("merged columns:", merged.columns.tolist())
-        st.write("Location sqm column used:", sqm_col)
+        st.write("df_meta columns:", df_meta.columns.tolist() if isinstance(df_meta, pd.DataFrame) else None)
+
         st.write(
             "sqm_effective filled:",
             int(pd.to_numeric(merged["sqm_effective"], errors="coerce").notna().sum()),
             "/",
             len(merged)
         )
-
-        cols_show = ["id", "store_display", "sqm_override", "sqm_effective"]
-        if sqm_col is not None and sqm_col in merged.columns and sqm_col not in cols_show:
-            cols_show.append(sqm_col)
+        cols_show = ["id", "store_display", "sqm_override", "sq_meter", "sqm_effective"]
+        cols_show = [c for c in cols_show if c in merged.columns]
         st.write("Example sqm:", merged[cols_show].head(10))
 
 main()
