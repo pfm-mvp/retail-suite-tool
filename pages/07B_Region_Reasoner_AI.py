@@ -335,13 +335,14 @@ def render_outcome_feed(outcomes: dict, typing: bool = True):
 
     for card in cards:
         box = st.empty()
+        title = str(card.get("title", "") or "")
+        body_full = str(card.get("body", "") or "")
+
         if typing:
-            for chunk in explainer.stream_typing(card.get("body", ""), chunk_size=24, delay=0.01):
-                box.markdown(f"### {card.get('title','')}
-\n{chunk}")
+            for chunk in explainer.stream_typing(body_full, chunk_size=24, delay=0.01):
+            box.markdown(f"### {title}\n\n{chunk}")
         else:
-            box.markdown(f"### {card.get('title','')}
-\n{card.get('body','')}")
+            box.markdown(f"### {title}\n\n{body_full}")
 
 
 def _render_simple(outcomes: dict):
