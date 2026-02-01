@@ -613,6 +613,43 @@ def rewrite_card_if_enabled(
     except Exception as e:
         return title, body_md, bullets, repr(e)
 
+def openrouter_chat_completion(
+    messages: list[dict],
+    model: str,
+    api_key: str,
+    max_tokens: int = 700,
+    temperature: float = 0.2,
+) -> str:
+    """
+    OpenRouter OpenAI-compatible chat.completions.
+    On errors, raise RuntimeError with response body for easy debugging.
+    """
+    url = "https://openrouter.ai/api/v1/chat/completions"
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        # Recommended by OpenRouter (not always required, but helps)
+        "HTTP-Referer": st.secrets.get("APP_URL", "http://localhost:8501"),
+        "X-Title": "PFM Retail Suite Tool",
+    }
+
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": float(temperature),
+        "max_tokens": int(max_tokens),
+    }
+
+    try:
+        r = requests.post(url, headers=headers, json=payload, timeout=120)
+        if not r.ok:
+            # Crucial: show body
+            raise RuntimeError(f"OpenRouter HTTP {r.status_code}: {r.text}")
+        data = r.json()
+        return data["choices"][0]["message"]["content"]
+    except Exception as e:
+        raise RuntimeError(f"OpenRouter request failed: {repr(e)}")
 
 # ------------------------------------------------------------
 # Agentic deterministic cards renderer (+ optional LLM rewrite)
@@ -832,6 +869,9 @@ def main():
 
     region_choice = st.selectbox("Region", sorted(region_map["region"].unique()))
     region_choice = str(region_choice).strip().lower()
+
+    use_llm = st.toggle("Rewrite cards (LLM)", value=False)
+    st.caption("Tip: LLM rewrite doet 1 call naar OpenRouter om de workload-cards scherper te maken.")
 
     run = st.button("Run analysis", type="primary")
     if not run:
@@ -1130,6 +1170,8 @@ def main():
         st.write("df_norm cols:", df_norm.columns.tolist())
         st.write("sqm_effective filled:", int(pd.to_numeric(df["sqm_effective"], errors="coerce").notna().sum()), "/", len(df))
         st.write("Example sqm:", df[["id", "store_display", "sqm_override", "sq_meter", "sqm_effective"]].head(10))
-
+        st.write("use_llm:", use_llm)
+        st.write("OpenRouter key present:", "OPENROUTER_API_KEY" in st.secrets)
+        st.write("OpenRouter model:", st.secrets.get("OPENROUTER_MODEL", "google/gemma-3-1b-it:free"))
 
 main()
