@@ -8,7 +8,7 @@
 # - Store-type performance vs other regions (same type; excluding current region)
 # - Strength cards (what’s working)
 # - Data quality / confidence card
-# - LLM rewrite toggle via OpenRouter (free models)
+# - LLM rewrite toggle via OpenRouter (ONE CALL, free model)
 #
 # Notes:
 # - get-report response includes sq_meter inside payload; we request it explicitly.
@@ -27,7 +27,6 @@ import requests
 from pathlib import Path
 from datetime import datetime
 
-
 # ------------------------------------------------------------
 # Ensure repo root is on sys.path (for outcome_explainer.py in root)
 # pages/.. -> repo root
@@ -36,7 +35,6 @@ _THIS_FILE = Path(__file__).resolve()
 _REPO_ROOT = _THIS_FILE.parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
-
 
 # --- helpers / services (existing in repo) ---
 from helpers_clients import load_clients
@@ -62,7 +60,6 @@ except Exception:
 
 PFM_PURPLE = "#762181"
 
-
 # ------------------------------------------------------------
 # Optional: OutcomeExplainer import + diagnostics (keep, but not required)
 # ------------------------------------------------------------
@@ -74,11 +71,19 @@ except Exception as e:
     OutcomeExplainer = None
     _OUTCOME_IMPORT_ERROR = repr(e)
 
+# ------------------------------------------------------------
+# OpenRouter constants + helpers
+# ------------------------------------------------------------
+OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
+DEFAULT_FREE_MODEL = "google/gemma-3-1b-it:free"
 
-# ------------------------------------------------------------
-# OpenRouter (LLM rewrite) helpers
-# ------------------------------------------------------------
-OPENROUTER_BASE = "https://openrouter.ai/api/v1"
+FREE_MODEL_CHOICES = [
+    # Keep a short, reliable list. You can expand later.
+    "google/gemma-3-1b-it:free",
+    "google/gemma-2-9b-it:free",
+    "mistralai/mistral-7b-instruct:free",
+    "meta-llama/llama-3.1-8b-instruct:free",
+]
 
 def _has_secret(key: str) -> bool:
     try:
@@ -86,79 +91,47 @@ def _has_secret(key: str) -> bool:
     except Exception:
         return False
 
-def _openrouter_headers() -> dict:
+def openrouter_chat_completion(
+    messages: list[dict],
+    model: str,
+    api_key: str,
+    max_tokens: int = 1200,
+    temperature: float = 0.2,
+) -> str:
+    """
+    OpenRouter OpenAI-compatible chat.completions.
+    Raises RuntimeError with response body on failure (so 400 becomes self-explanatory).
+    """
+    model = (model or "").strip()
+    if not model:
+        model = DEFAULT_FREE_MODEL
+
     headers = {
-        "Authorization": f"Bearer {st.secrets.get('OPENROUTER_API_KEY', '')}",
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
+        # Recommended by OpenRouter (helps attribution; usually not required)
+        "HTTP-Referer": str(st.secrets.get("OPENROUTER_REFERER", st.secrets.get("APP_URL", "http://localhost:8501"))),
+        "X-Title": str(st.secrets.get("OPENROUTER_APP_TITLE", "PFM Region Reasoner")),
     }
-    # Optional, but recommended by OpenRouter (leaderboard / attribution)
-    # (Safe to leave even if blank)
-    headers["HTTP-Referer"] = str(st.secrets.get("OPENROUTER_REFERER", ""))
-    headers["X-Title"] = str(st.secrets.get("OPENROUTER_APP_TITLE", "PFM Region Reasoner"))
-    return headers
 
-@st.cache_data(ttl=3600)
-def openrouter_list_models() -> list[str]:
-    """
-    Tries to fetch models list and returns ids that look free (':free').
-    If it fails, returns a small fallback list.
-    """
-    fallback = [
-        "meta-llama/llama-3.1-8b-instruct:free",
-        "mistralai/mistral-7b-instruct:free",
-        "google/gemma-2-9b-it:free",
-    ]
-
-    try:
-        r = requests.get(f"{OPENROUTER_BASE}/models", timeout=20)
-        r.raise_for_status()
-        data = r.json()
-        items = data.get("data", []) if isinstance(data, dict) else []
-        ids = []
-        for it in items:
-            mid = str(it.get("id", "")).strip()
-            if not mid:
-                continue
-            # Heuristic: OpenRouter commonly marks free variants with ':free'
-            if mid.endswith(":free") or ":free" in mid:
-                ids.append(mid)
-        ids = sorted(list(dict.fromkeys(ids)))
-        return ids if ids else fallback
-    except Exception:
-        return fallback
-
-@st.cache_data(ttl=3600)
-def openrouter_chat_cached(model: str, system: str, user: str, temperature: float = 0.2, max_tokens: int = 600) -> str:
-    """
-    Cached wrapper to avoid repeated costs for same text/model.
-    """
     payload = {
         "model": model,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
+        "messages": messages,
         "temperature": float(temperature),
         "max_tokens": int(max_tokens),
     }
 
-    resp = requests.post(
-        f"{OPENROUTER_BASE}/chat/completions",
-        headers=_openrouter_headers(),
-        data=json.dumps(payload),
-        timeout=60,
-    )
-    resp.raise_for_status()
-    j = resp.json()
-    # OpenAI-compatible format
-    return str(j["choices"][0]["message"]["content"]).strip()
+    r = requests.post(OPENROUTER_CHAT_URL, headers=headers, json=payload, timeout=120)
+    if not r.ok:
+        raise RuntimeError(f"OpenRouter HTTP {r.status_code}: {r.text}")
 
+    data = r.json()
+    return str(data["choices"][0]["message"]["content"]).strip()
 
 # ------------------------------------------------------------
 # Page config
 # ------------------------------------------------------------
 st.set_page_config(page_title="PFM Region Reasoner — Agentic", layout="wide")
-
 
 # ------------------------------------------------------------
 # Formatting helpers (EU)
@@ -183,7 +156,6 @@ def safe_div(a, b):
 
 def idx_vs(a, b):
     return (a / b * 100.0) if (pd.notna(a) and pd.notna(b) and float(b) != 0.0) else np.nan
-
 
 # ------------------------------------------------------------
 # Region mapping
@@ -226,7 +198,6 @@ def load_region_mapping(path="data/regions.csv") -> pd.DataFrame:
 
     return df.dropna(subset=["shop_id"]).copy()
 
-
 # ------------------------------------------------------------
 # FastAPI locations endpoint (often only id+name)
 # ------------------------------------------------------------
@@ -239,7 +210,6 @@ def get_locations_by_company(fastapi_base_url: str, company_id: int) -> pd.DataF
     if isinstance(data, dict) and "locations" in data:
         return pd.DataFrame(data["locations"])
     return pd.DataFrame(data)
-
 
 # ------------------------------------------------------------
 # Styling helpers
@@ -255,16 +225,10 @@ def highlight_region_row(df: pd.DataFrame, region_choice: str):
 
     return df.style.apply(_style_row, axis=1)
 
-
 # ------------------------------------------------------------
 # Benchmarks
 # ------------------------------------------------------------
 def compute_company_type_bench(df_all: pd.DataFrame) -> dict:
-    """
-    Bench per store_type across ALL rows in df_all.
-    df_all should have:
-      id, store_type, footfall, turnover, transactions, sqm_effective
-    """
     out = {}
     if df_all is None or df_all.empty:
         return out
@@ -285,7 +249,6 @@ def compute_company_type_bench(df_all: pd.DataFrame) -> dict:
         turn = pd.to_numeric(g.get("turnover"), errors="coerce").dropna().sum()
         trans = pd.to_numeric(g.get("transactions"), errors="coerce").dropna().sum()
 
-        # unique sqm per store (avoid daily duplication)
         if "id" in g.columns:
             sqm = g[["id", "sqm_effective"]].drop_duplicates(subset=["id"])
             sqm_sum = pd.to_numeric(sqm["sqm_effective"], errors="coerce").dropna().sum()
@@ -304,17 +267,10 @@ def compute_company_type_bench(df_all: pd.DataFrame) -> dict:
         }
     return out
 
-
 # ------------------------------------------------------------
 # Upside estimator (deterministic)
 # ------------------------------------------------------------
 def estimate_upside(store_row: pd.Series, bench_vals: dict) -> tuple[float, str]:
-    """
-    Upside vs same store_type benchmark:
-      - Low SPV
-      - Low Sales/m²
-      - Low Conversion (uses store ATV if possible)
-    """
     foot = pd.to_numeric(store_row.get("footfall", np.nan), errors="coerce")
     turn = pd.to_numeric(store_row.get("turnover", np.nan), errors="coerce")
     trans = pd.to_numeric(store_row.get("transactions", np.nan), errors="coerce")
@@ -349,7 +305,6 @@ def estimate_upside(store_row: pd.Series, bench_vals: dict) -> tuple[float, str]
     best = sorted(candidates, key=lambda x: x[1], reverse=True)[0]
     upside = float(best[1]) if best[1] > 0 else np.nan
     return upside, best[0]
-
 
 # ------------------------------------------------------------
 # Region SVI table (rank across regions)
@@ -403,7 +358,6 @@ def compute_region_svi_table(df_all: pd.DataFrame, region_list: list[str]) -> pd
     out = out.sort_values("svi", ascending=False).reset_index(drop=True)
     out["rank"] = np.arange(1, len(out) + 1)
     return out
-
 
 # ------------------------------------------------------------
 # Store-type comparison vs other regions (same type)
@@ -463,7 +417,6 @@ def compute_storetype_vs_other_regions(df_all: pd.DataFrame, region_choice: str)
     if out.empty:
         return out
     return out.sort_values("Sales/m² idx vs other regions", ascending=True).reset_index(drop=True)
-
 
 # ------------------------------------------------------------
 # Agentic "why" + actions (rule-based)
@@ -527,7 +480,6 @@ def actions_for_driver(driver: str) -> list[str]:
         "Then pick one lever: Traffic / Conversion / SPV / Space"
     ]
 
-
 # ------------------------------------------------------------
 # Data quality / confidence
 # ------------------------------------------------------------
@@ -557,142 +509,101 @@ def compute_data_quality(df_region: pd.DataFrame) -> dict:
     out["confidence"] = conf
     return out
 
-
 # ------------------------------------------------------------
-# LLM rewrite: make “agentic” copy without changing numbers
+# Cards builder + renderer (Step 3)
 # ------------------------------------------------------------
-def rewrite_card_if_enabled(
-    use_llm: bool,
-    model: str,
-    title: str,
-    body_md: str,
-    bullets: list[str] | None,
-) -> tuple[str, str, list[str] | None, str | None]:
-    """
-    Returns possibly rewritten (title/body/bullets) and optional error string.
-    """
-    if not use_llm:
-        return title, body_md, bullets, None
+def build_card(title: str, body_md: str, bullets: list[str] | None = None) -> dict:
+    return {"title": title, "body": body_md, "bullets": bullets or []}
 
-    if not _has_secret("OPENROUTER_API_KEY"):
-        return title, body_md, bullets, "OPENROUTER_API_KEY missing in secrets."
-
-    # Build compact input (keep numbers!)
-    bullets_txt = ""
-    if bullets:
-        bullets_txt = "\n".join([f"- {b}" for b in bullets])
-
-    system = (
-        "You rewrite retail performance insights for a Region Manager.\n"
-        "Rules:\n"
-        "- Keep ALL numbers, percentages, currency amounts and store ids EXACTLY unchanged.\n"
-        "- Do not invent new metrics.\n"
-        "- Make it action-oriented: what to do next, why it matters, expected impact.\n"
-        "- Keep it concise but punchy.\n"
-        "- Output valid Markdown.\n"
-    )
-
-    user = (
-        f"Rewrite this card.\n\n"
-        f"TITLE:\n{title}\n\n"
-        f"BODY:\n{body_md}\n\n"
-        f"BULLETS:\n{bullets_txt}\n"
-    )
-
-    try:
-        rewritten = openrouter_chat_cached(
-            model=model,
-            system=system,
-            user=user,
-            temperature=0.2,
-            max_tokens=650,
-        )
-        # We keep title stable (less risk) and replace body + bullets as one markdown block.
-        # Split heuristically: everything as body, bullets removed (since LLM may merge).
-        return title, rewritten, None, None
-    except Exception as e:
-        return title, body_md, bullets, repr(e)
-
-def openrouter_chat_completion(
-    messages: list[dict],
-    model: str,
-    api_key: str,
-    max_tokens: int = 700,
-    temperature: float = 0.2,
-) -> str:
-    """
-    OpenRouter OpenAI-compatible chat.completions.
-    On errors, raise RuntimeError with response body for easy debugging.
-    """
-    url = "https://openrouter.ai/api/v1/chat/completions"
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        # Recommended by OpenRouter (not always required, but helps)
-        "HTTP-Referer": st.secrets.get("APP_URL", "http://localhost:8501"),
-        "X-Title": "PFM Retail Suite Tool",
-    }
-
-    payload = {
-        "model": model,
-        "messages": messages,
-        "temperature": float(temperature),
-        "max_tokens": int(max_tokens),
-    }
-
-    try:
-        r = requests.post(url, headers=headers, json=payload, timeout=120)
-        if not r.ok:
-            # Crucial: show body
-            raise RuntimeError(f"OpenRouter HTTP {r.status_code}: {r.text}")
-        data = r.json()
-        return data["choices"][0]["message"]["content"]
-    except Exception as e:
-        raise RuntimeError(f"OpenRouter request failed: {repr(e)}")
-
-# ------------------------------------------------------------
-# Agentic deterministic cards renderer (+ optional LLM rewrite)
-# ------------------------------------------------------------
-def card(use_llm: bool, model: str, title: str, body_md: str, bullets: list[str] | None = None):
-    title2, body2, bullets2, err = rewrite_card_if_enabled(use_llm, model, title, body_md, bullets)
-
-    with st.container(border=True):
-        st.markdown(f"### {title2}")
-        if err:
-            st.caption(f"LLM rewrite skipped: {err}")
-        st.markdown(body2)
-        if bullets2:
-            for b in bullets2:
+def render_cards(cards: list[dict], llm_note: str | None = None):
+    if llm_note:
+        st.caption(llm_note)
+    for c in cards:
+        with st.container(border=True):
+            st.markdown(f"### {c.get('title','')}")
+            st.markdown(c.get("body",""))
+            for b in (c.get("bullets") or []):
                 st.markdown(f"- {b}")
 
+def rewrite_cards_with_openrouter(cards: list[dict], meta: dict, model: str) -> tuple[list[dict], str | None]:
+    """
+    ONE CALL rewrite. Returns (cards, error_str)
+    """
+    api_key = str(st.secrets.get("OPENROUTER_API_KEY", "")).strip()
+    if not api_key:
+        return cards, "OPENROUTER_API_KEY missing in secrets."
 
-def render_agentic_workload(
-    use_llm: bool,
-    model: str,
+    model = (model or "").strip() or DEFAULT_FREE_MODEL
+
+    system = (
+        "You are a retail performance co-pilot for a Region Manager.\n"
+        "Rewrite the cards to be punchy, actionable, and quantified.\n"
+        "Hard rules:\n"
+        "- Keep numbers EXACTLY as provided (€, %, ranks, counts). Do not change digits.\n"
+        "- Do not invent new metrics or claims.\n"
+        "- Keep markdown.\n"
+        "- Return ONLY valid JSON: a list of objects with keys: title, body, bullets.\n"
+        "- bullets must be a JSON array of strings.\n"
+    )
+
+    user_payload = {
+        "context": {
+            "client": meta.get("client"),
+            "region": meta.get("region"),
+            "period": meta.get("period_label"),
+        },
+        "cards": cards,
+    }
+
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+    ]
+
+    try:
+        txt = openrouter_chat_completion(
+            messages=messages,
+            model=model,
+            api_key=api_key,
+            max_tokens=1400,
+            temperature=0.2,
+        )
+        rewritten = json.loads(txt)
+        if isinstance(rewritten, list) and all(isinstance(x, dict) for x in rewritten):
+            # Light validation
+            out = []
+            for x in rewritten:
+                out.append({
+                    "title": str(x.get("title","")).strip() or "Card",
+                    "body": str(x.get("body","")).strip(),
+                    "bullets": x.get("bullets") if isinstance(x.get("bullets"), list) else [],
+                })
+            return out, None
+        return cards, "LLM returned non-list JSON. Falling back to deterministic cards."
+    except Exception as e:
+        return cards, str(e)
+
+# ------------------------------------------------------------
+# Workload → build cards (deterministic)
+# ------------------------------------------------------------
+def build_agentic_workload_cards(
     meta: dict,
     region_rank: dict,
     scores: dict,
-    svi_table: pd.DataFrame,
     stype_vs_other: pd.DataFrame,
     store_summary: pd.DataFrame,
     company_type_bench: dict,
     annual_factor: float,
     data_quality: dict,
-):
-    st.markdown("## Agentic workload")
+) -> list[dict]:
+    cards: list[dict] = []
 
     svi = scores.get("region_svi", np.nan)
     rank = region_rank.get("rank", "-")
     total = region_rank.get("total", "-")
     gap = region_rank.get("gap_to_best", np.nan)
 
-    cols = st.columns(4)
-    cols[0].metric("Region SVI", f"{int(round(float(svi)))} / 100" if pd.notna(svi) else "-")
-    cols[1].metric("Rank vs regions", f"{rank} / {total}")
-    cols[2].metric("Gap to #1", fmt_pct(gap, 0))
-    cols[3].metric("Confidence", f"{int(round(data_quality.get('confidence', 0)))} / 100")
-
+    # Region summary card
     worst_types = []
     if stype_vs_other is not None and not stype_vs_other.empty:
         worst_types = (
@@ -702,17 +613,24 @@ def render_agentic_workload(
 
     headline = (
         f"**{meta.get('client','Client')} · {meta.get('region','region')} · {meta.get('period_label','period')}**\n\n"
-        f"Your region is ranked **{rank}/{total}** on SVI. "
-        f"Primary friction likely sits in **{', '.join(worst_types) if worst_types else 'store-type differences'}**."
+        f"- Region SVI: **{int(round(float(svi)))} / 100**\n"
+        f"- Rank vs regions: **{rank}/{total}**\n"
+        f"- Gap to #1 (SVI ratio): **{fmt_pct(gap, 0)}**\n"
+        f"- Confidence: **{int(round(data_quality.get('confidence', 0)))} / 100**\n\n"
+        f"Most likely friction sits in: **{', '.join(worst_types) if worst_types else 'store-type differences'}**."
     )
-    card(use_llm, model, "Region summary (30 seconds)", headline)
+    cards.append(build_card("Region summary (30 seconds)", headline))
 
-    st.markdown("### Focus areas (by store type)")
+    # Focus store-types
     if stype_vs_other is None or stype_vs_other.empty:
-        st.info("No store-type vs other-regions comparison available (need same store_type across ≥2 regions).")
+        cards.append(build_card(
+            "Focus areas (by store type)",
+            "No store-type vs other-regions comparison available (need same store_type across ≥2 regions).",
+        ))
     else:
         focus = stype_vs_other.sort_values("Sales/m² idx vs other regions", ascending=True).head(3)
 
+        # Precompute store upside within region
         opps_store = []
         for _, r in store_summary.iterrows():
             stype = str(r.get("store_type", "Unknown")).strip() or "Unknown"
@@ -760,17 +678,14 @@ def render_agentic_workload(
             bullets = []
             bullets.append("Recommended actions (next 14 days):")
             bullets += actions
-
             if examples:
                 bullets.append("Start here (top stores inside this store type):")
                 bullets += examples
 
-            card(use_llm, model, f"Workcard — Store type: {stype}", body, bullets=bullets)
+            cards.append(build_card(f"Workcard — Store type: {stype}", body, bullets=bullets))
 
-    st.markdown("### What’s working (protect & replicate)")
-    if store_summary is None or store_summary.empty:
-        st.info("No store_summary available for strengths.")
-    else:
+    # Strength card
+    if store_summary is not None and not store_summary.empty:
         ss = store_summary.copy()
         ss["strength_score"] = (
             pd.to_numeric(ss.get("Sales/m² idx vs type"), errors="coerce").fillna(100)
@@ -788,14 +703,13 @@ def render_agentic_workload(
                 f"CR idx {fmt_pct(r.get('CR idx vs type', np.nan),0)}"
             )
 
-        card(
-            use_llm, model,
+        cards.append(build_card(
             "Strength card — replicate playbook",
             "These stores outperform their **own store type benchmark**. Protect them, and copy their playbook.",
             bullets=bullets
-        )
+        ))
 
-    st.markdown("### Data quality (so you don’t fight ghosts)")
+    # Confidence card
     dq = data_quality or {}
     dq_body = (
         f"- sqm missing: **{fmt_pct(dq.get('sqm_missing_pct', np.nan),0)}**\n"
@@ -804,30 +718,37 @@ def render_agentic_workload(
         f"- footfall missing: **{fmt_pct(dq.get('footfall_missing_pct', np.nan),0)}**\n\n"
         f"Confidence score: **{int(round(dq.get('confidence', 0)))} / 100**"
     )
-    card(use_llm, model, "Confidence card", dq_body)
+    cards.append(build_card("Confidence card", dq_body))
 
+    return cards
 
 # ------------------------------------------------------------
 # MAIN
 # ------------------------------------------------------------
 def main():
-    # ---- Sidebar controls (LLM toggle) ----
+    # ---- Sidebar settings (SINGLE source of truth) ----
     with st.sidebar:
         st.markdown("## Settings")
 
-        use_llm = st.toggle("Rewrite cards (LLM)", value=False)
+        use_llm = st.toggle("Rewrite cards (LLM via OpenRouter)", value=False)
+        model_default = str(st.secrets.get("OPENROUTER_MODEL", "")).strip() or DEFAULT_FREE_MODEL
 
-        # Model picker (free models)
-        free_models = openrouter_list_models()
-        default_model = str(st.secrets.get("OPENROUTER_MODEL", "")).strip()
-        if default_model and default_model in free_models:
-            idx = free_models.index(default_model)
-        else:
-            idx = 0
-        model = st.selectbox("OpenRouter model", free_models, index=idx, disabled=not use_llm)
+        # Ensure model is never blank
+        choices = FREE_MODEL_CHOICES.copy()
+        if model_default not in choices:
+            choices.insert(0, model_default)
+
+        model = st.selectbox(
+            "OpenRouter model",
+            options=choices,
+            index=choices.index(model_default) if model_default in choices else 0,
+            disabled=not use_llm,
+        )
 
         if use_llm and not _has_secret("OPENROUTER_API_KEY"):
-            st.warning("OPENROUTER_API_KEY missing in secrets → will fall back to deterministic cards.")
+            st.warning("OPENROUTER_API_KEY missing in secrets → deterministic cards only.")
+
+        st.caption("Tip: rewrite gebruikt 1 call (alle cards in één keer).")
 
     # ---- API URL setup ----
     raw_api_url = st.secrets["API_URL"].rstrip("/")
@@ -869,9 +790,6 @@ def main():
 
     region_choice = st.selectbox("Region", sorted(region_map["region"].unique()))
     region_choice = str(region_choice).strip().lower()
-
-    use_llm = st.toggle("Rewrite cards (LLM)", value=False)
-    st.caption("Tip: LLM rewrite doet 1 call naar OpenRouter om de workload-cards scherper te maken.")
 
     run = st.button("Run analysis", type="primary")
     if not run:
@@ -1118,7 +1036,7 @@ def main():
 
     data_quality = compute_data_quality(df_region)
 
-    # Render comparisons (optional expanders)
+    # Optional expanders: comparisons
     with st.expander("📊 Region comparison (SVI vs other regions)", expanded=False):
         if svi_table is None or svi_table.empty:
             st.info("No SVI table available.")
@@ -1136,20 +1054,33 @@ def main():
         else:
             st.dataframe(stype_vs_other, use_container_width=True)
 
-    # AGENTIC workload cards (deterministic + optional OpenRouter rewrite)
-    render_agentic_workload(
-        use_llm=use_llm,
-        model=model,
+    # ---- Build cards (deterministic) ----
+    cards = build_agentic_workload_cards(
         meta=meta,
         region_rank=region_rank,
         scores=scores,
-        svi_table=svi_table,
         stype_vs_other=stype_vs_other,
         store_summary=store_summary,
         company_type_bench=company_type_bench,
         annual_factor=annual_factor,
         data_quality=data_quality,
     )
+
+    # ---- Optional: ONE CALL rewrite ----
+    llm_note = None
+    if use_llm:
+        if not _has_secret("OPENROUTER_API_KEY"):
+            llm_note = "LLM rewrite skipped: OPENROUTER_API_KEY missing."
+        else:
+            cards_rewritten, err = rewrite_cards_with_openrouter(cards, meta=meta, model=model)
+            if err:
+                llm_note = f"LLM rewrite skipped: {err}"
+            else:
+                llm_note = f"LLM rewrite applied (OpenRouter: {model})"
+                cards = cards_rewritten
+
+    st.markdown("## Agentic workload")
+    render_cards(cards, llm_note=llm_note)
 
     # Debug / Diagnostics
     with st.expander("🔧 Debug / Diagnostics"):
@@ -1163,15 +1094,13 @@ def main():
         st.write("OutcomeExplainer file exists:", bool((_REPO_ROOT / "outcome_explainer.py").exists()))
         st.write("OutcomeExplainer import error:", _OUTCOME_IMPORT_ERROR)
 
-        st.write("secrets has OPENROUTER_API_KEY:", "OPENROUTER_API_KEY" in st.secrets)
-        st.write("selected OpenRouter model:", model)
         st.write("use_llm:", use_llm)
+        st.write("OPENROUTER_API_KEY present:", _has_secret("OPENROUTER_API_KEY"))
+        st.write("Selected OpenRouter model:", (model or "").strip() or DEFAULT_FREE_MODEL)
+        st.write("DEFAULT_FREE_MODEL:", DEFAULT_FREE_MODEL)
 
         st.write("df_norm cols:", df_norm.columns.tolist())
         st.write("sqm_effective filled:", int(pd.to_numeric(df["sqm_effective"], errors="coerce").notna().sum()), "/", len(df))
         st.write("Example sqm:", df[["id", "store_display", "sqm_override", "sq_meter", "sqm_effective"]].head(10))
-        st.write("use_llm:", use_llm)
-        st.write("OpenRouter key present:", "OPENROUTER_API_KEY" in st.secrets)
-        st.write("OpenRouter model:", st.secrets.get("OPENROUTER_MODEL", "google/gemma-3-1b-it:free"))
 
 main()
