@@ -61,6 +61,18 @@ try:
 except Exception:
     make_actions = None
 
+PFM_PURPLE = "#762181"
+
+def highlight_region_row(df: pd.DataFrame, region_choice: str):
+    rc = str(region_choice).strip().lower()
+
+    def _style_row(row):
+        is_target = str(row.get("region", "")).strip().lower() == rc
+        if is_target:
+            return [f"background-color: {PFM_PURPLE}; color: white; font-weight: 700;"] * len(row)
+        return [""] * len(row)
+
+    return df.style.apply(_style_row, axis=1)
 
 # ------------------------------------------------------------
 # OutcomeExplainer import + diagnostics (don’t swallow errors)
@@ -936,7 +948,8 @@ def main():
             show["SVI"] = show["svi"].round(0)
             show["Turnover"] = show["turnover"].map(fmt_eur)
             show = show[["rank", "region", "SVI", "Turnover", "footfall", "transactions"]]
-            st.dataframe(show, use_container_width=True)
+            styled = highlight_region_row(show, region_choice)
+            st.dataframe(styled, use_container_width=True)
 
     with st.expander("🧩 Store types vs other regions (same type)", expanded=False):
         if stype_vs_other is None or stype_vs_other.empty:
